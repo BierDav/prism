@@ -1,0 +1,33 @@
+[package]
+name = "rocky-prism-ffi"
+description = "rocky-prism for the apps: UniFFI bindings, generated for Kotlin Multiplatform by gobley's bindgen (uniffi-bindgen/)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the JVM and Android (JNA loads librocky_prism_ffi); staticlib: the
+# Mac, linked into PrismShared.framework; lib: the Rust tests.
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+rocky-prism = { path = "../rocky-prism" }
+# The leader's request handling, which a device runs with its own T3
+# sessions while it can't reach the workers (worker/src/direct.rs).
+prism-worker = { path = "../worker" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rocky-sdk.workspace = true
+rocky-tcp.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# The version gobley's bindgen reads (uniffi-bindgen/ pins the same).
+uniffi = "=0.29.4"
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+serde_json.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["time"] }

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="relay_url">Relay URL</string>
+    <string name="relay_url_about">The ntfy server, e.g. https://ntfy.quickme.at</string>
+    <string name="relay_token">Relay token</string>
+    <string name="relay_token_about">This phone\'s access token on the relay</string>
+    <string name="t3_url">T3 Code URL</string>
+    <string name="t3_url_about">T3 Code\'s web app, for Open in T3</string>
+    <string name="prism_url">Prism update URL</string>
+    <string name="prism_url_about">Where the app updates from (default https://prism.quickme.at)</string>
+    <string name="rocky_provisioning">Rocky provisioning</string>
+    <string name="rocky_provisioning_about">This phone\'s provisioning for its replica of Prism\'s database (prism-device-v1:…)</string>
+    <string name="rocky_peers">Rocky peers</string>
+    <string name="rocky_peers_about">The Prism workers\' Rocky contacts, one per line</string>
+    <string name="device_name">Device name</string>
+    <string name="device_name_about">This phone\'s name for Prism and the metrics (default david-pixel)</string>
+    <string name="telemetry_url">Telemetry URL</string>
+    <string name="telemetry_url_about">Prometheus remote write endpoint (default: the Prism URL + /v1/telemetry/write)</string>
+    <string name="background_restricted">Apps restricted in the background</string>
+    <string name="background_restricted_about">Package names (comma or line separated) that never run in the background; unset: com.google.android.gm,com.google.android.apps.weather</string>
+    <string name="background_charging_only">Apps in the background only while charging</string>
+    <string name="background_charging_only_about">Package names (comma or line separated) that run in the background only while plugged in; unset: com.whatsapp</string>
+    <string name="activity_recognition_denied">Apps denied activity recognition</string>
+    <string name="activity_recognition_denied_about">Package names (comma or line separated) that may not use activity recognition; unset: com.google.android.apps.wellbeing</string>
+    <string name="telemetry_user">Telemetry user</string>
+    <string name="telemetry_user_about">Basic auth user for the telemetry endpoint (default prism_phone)</string>
+    <string name="telemetry_password">Telemetry password</string>
+    <string name="telemetry_password_about">Basic auth password for the telemetry endpoint</string>
+    <string name="netbird_setup_key">NetBird setup key</string>
+    <string name="netbird_setup_key_about">Enrolls this phone in NetBird once; afterwards it stays connected without the key</string>
+    <string name="netbird_management_url">NetBird management URL</string>
+    <string name="netbird_management_url_about">NetBird\'s management service (default https://api.netbird.io:443)</string>
+    <string name="hotspot_key">Hotspot key</string>
+    <string name="hotspot_key_about">64 hex characters shared with Prism for macOS: the Mac\'s Bluetooth LE request for the hotspot must carry it (docs/hotspot.md); unset, the phone doesn\'t listen</string>
+</resources>

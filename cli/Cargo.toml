@@ -1,0 +1,25 @@
+[package]
+name = "prism-cli"
+description = "The prism command: machines report checks to Prism, the owner pairs and lists machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "prism"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+hex = "0.4"
+hmac = "0.12"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

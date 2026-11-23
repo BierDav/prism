@@ -1,0 +1,11 @@
+# gobley's bindgen (uniffi-bindgen/) reads this table as it is (no
+# [bindings.kotlin] around it): Kotlin Multiplatform sources in package
+# at.quickme.prism.rocky, loading librocky_prism_ffi.
+package_name = "at.quickme.prism.rocky"
+cdylib_name = "rocky_prism_ffi"
+kotlin_multiplatform = true
+# jvmMain serves both the JVM check and Android (the app compiles shared/'s
+# jvmMain with its sources), so JNA's cleaner, which both have
+# (java.lang.ref.Cleaner is Android 13+, the app runs on 12).
+kotlin_targets = ["jvm", "native"]
+disable_java_cleaner = true

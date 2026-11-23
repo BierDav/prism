@@ -1,0 +1,16 @@
+# Deployed by Argo CD (apps/klaxon.yaml in selfhosted-platform) into the
+# monitoring namespace: the prism workers (worker.yaml). The worker workflow
+# (.github/workflows/worker.yaml) pins the image below (name and digest). The
+# prism-config ConfigMap (endpoints, machines, devices, default model) lives
+# in selfhosted-platform's manifests/alerting; the prism-worker,
+# prism-events, prism-push, prism-alerts, prism-text-generation,
+# prism-telemetry and alerting-t3 Sealed Secrets in its manifests/secrets.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - worker.yaml
+images:
+  - name: prism-worker
+    newName: gitea.quickme.at/david-cluster-1/prism-worker
+    newTag: c57e01654a4ee92969c4558bf92503ab8e3c1ddd-4131
+    digest: sha256:e140236bcd0bec2900ee938d77d832d35dadb46974c43be22a94ada33abdb52e

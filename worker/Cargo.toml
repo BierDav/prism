@@ -1,0 +1,40 @@
+[package]
+name = "prism-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = "0.8"
+chrono.workspace = true
+data-encoding = "2"
+ed25519-dalek = "2"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+futures-util = "0.3"
+getrandom = "0.2"
+hex = "0.4"
+hmac = "0.12"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rocky-prism = { path = "../rocky-prism" }
+rocky-sdk.workspace = true
+rocky-tcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "fs"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
+[dev-dependencies]
+rocky-core = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
+axum = { version = "0.8", features = ["ws"] }
+http-body-util = "0.1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

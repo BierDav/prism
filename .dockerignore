@@ -1,0 +1,10 @@
+# The worker image (worker/Dockerfile) builds only the cargo workspace.
+*
+!Cargo.toml
+!Cargo.lock
+!cli
+!rocky-prism
+!rocky-prism-ffi
+!uniffi-bindgen
+!worker
+**/target

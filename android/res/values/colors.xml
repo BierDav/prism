@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Before Compose draws: the brand surface (ui/Theme.kt has the scheme). -->
+    <color name="prism_window">#FFFBF8FF</color>
+    <!-- The icon's indigo, behind the prism on the splash screen. -->
+    <color name="prism_icon">#FF4A44D6</color>
+</resources>

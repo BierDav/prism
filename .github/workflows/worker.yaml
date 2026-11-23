@@ -1,0 +1,135 @@
+# Tests and builds the prism worker image (worker/, rocky-prism/, and the
+# prism CLI it ships, cli/) on every push to main that changes it: natively
+# on an x64 and an arm64 runner (Rust with Rocky's bundled SQLite doesn't
+# cross-compile in a plain Dockerfile), then
+# one multi-architecture image, pinned by name and digest in
+# deploy/kustomization.yaml for Argo CD. Tags carry the run id, so a rerun
+# never retags (and orphans) a pinned digest.
+name: Worker image
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - cli/**
+      - rocky-prism/**
+      - rocky-prism-ffi/**
+      - uniffi-bindgen/**
+      - worker/**
+      - .dockerignore
+      - .github/workflows/worker.yaml
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+concurrency:
+  group: prism-worker-image
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/bierdav/prism-worker
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # The runner's preinstalled SDKs take disk the workspace's tests need.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # worker/Dockerfile runs the workspace's tests before it builds. The
+      # compiled dependencies (its cook layer) are cached per architecture,
+      # so a change to the workspace's code compiles only it.
+      - name: Test, build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ github.run_id }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=prism-worker-${{ matrix.arch }}
+          cache-to: type=gha,scope=prism-worker-${{ matrix.arch }},mode=max,ignore-error=true
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge both architectures
+        id: merge
+        env:
+          TAG: ${{ github.sha }}-${{ github.run_id }}
+        run: |
+          set -eu
+          docker buildx imagetools create -t "$IMAGE:$TAG" "$IMAGE:$TAG-amd64" "$IMAGE:$TAG-arm64"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:$TAG" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          case "$digest" in sha256:*) ;; *) echo "No manifest digest for $IMAGE:$TAG"; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Pin the image for Argo CD
+        if: github.ref == 'refs/heads/main'
+        env:
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.sha }}-${{ github.run_id }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          set -eu
+          pin() {
+            python3 - <<'PY'
+          import os, re
+          path = 'deploy/kustomization.yaml'
+          text = open(path).read()
+          block = re.compile(r'(?ms)^  - name: prism-worker\n.*?(?=^  - |\Z)')
+          entry = ('  - name: prism-worker\n'
+                   f"    newName: {os.environ['IMAGE']}\n"
+                   f"    newTag: {os.environ['TAG']}\n"
+                   f"    digest: {os.environ['DIGEST']}\n")
+          text = block.sub(entry, text) if block.search(text) else text.rstrip('\n') + '\n' + entry
+          open(path, 'w').write(text)
+          PY
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only a newer commit that builds a worker image owns the pin.
+          for attempt in 1 2 3 4; do
+            git fetch origin main
+            if [ -n "$(git log --format=%H "${SHA}..origin/main" -- Cargo.toml Cargo.lock cli rocky-prism rocky-prism-ffi uniffi-bindgen worker .dockerignore .github/workflows/worker.yaml)" ]; then
+              echo "a newer worker build on main owns the pin"
+              exit 0
+            fi
+            git reset --hard origin/main
+            pin
+            git add deploy/kustomization.yaml
+            if git diff --cached --quiet; then exit 0; fi
+            # Pushes with GITHUB_TOKEN start no workflow; the marker is for
+            # readers (and fleet-prism skips deploy/-only commits).
+            git commit -m "Pin prism-worker image ${SHA} [skip ci]"
+            if git push origin HEAD:main; then exit 0; fi
+            echo "Push failed (attempt $attempt); retrying in 5 seconds."
+            sleep 5
+          done
+          exit 1

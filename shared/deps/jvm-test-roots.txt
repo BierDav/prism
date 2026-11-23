@@ -1,0 +1,8 @@
+# The JVM check's libraries beyond the app's (android/deps/lock.json): OkHttp
+# for a desktop JVM, where the app has OkHttp's Android build.
+#
+#   python3 -I android/deps/resolve.py ../../shared/deps/jvm-test-roots.txt \
+#     ../../shared/deps/jvm-test-lock.json lock.json
+com.squareup.okhttp3:okhttp-jvm:5.5.1
+# JNA for a desktop JVM (the app has its Android build, an AAR).
+net.java.dev.jna:jna:5.19.1@jar

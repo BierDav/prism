@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The window around the Compose screens (ui/Theme.kt draws everything
+     else): edge to edge, no action bar, and the system splash: Prism's icon
+     on its indigo disc. -->
+<resources>
+    <style name="Theme.Prism" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/prism_window</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowSplashScreenBackground">@color/prism_window</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/prism_icon</item>
+    </style>
+
+    <!-- The assistant's window (AssistActivity): see-through over the app
+         it was called from, to the screen's very edges, no splash. Compose
+         draws the veil, the light and the composer. -->
+    <style name="Theme.Prism.Assist" parent="Theme.Prism">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

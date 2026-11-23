@@ -1,0 +1,47 @@
+Prism's shell access contains code derived from Shizuku and Shizuku-API,
+and speaks Shizuku-API's binder interface (moe.shizuku.server.IShizukuService,
+API v13) so apps built on it can use Prism's shell server.
+
+Shizuku
+  https://github.com/RikkaApps/Shizuku, tag v13.6.0,
+  commit 2650830c5b099ae0dd34fedf614d4f592ca05d65
+  Copyright RikkaW and the Shizuku contributors
+  Licensed under the Apache License, Version 2.0 (LICENSE.Shizuku)
+
+  Derived from it, and changed (each file's header says how):
+    android/shizuku/starter/starter.c
+      from manager/src/main/jni/starter.cpp and misc.cpp
+    android/src/at/quickme/prism/shell/Server.kt
+      from server/src/main/java/rikka/shizuku/server/ShizukuService.java,
+      BinderSender.java and ApkChangedObservers.kt
+    android/src/at/quickme/prism/shell/UserServices.kt
+      from server/.../ShizukuUserServiceManager.java and
+      starter/src/main/java/moe/shizuku/starter/ServiceStarter.java
+    android/src/at/quickme/prism/shell/Hidden.kt
+      after the hidden-API calls of the files above
+    android/src/at/quickme/prism/shell/ShellProvider.kt
+      after manager's ShizukuManagerProvider ("sendBinder", "sendUserService")
+
+Shizuku-API
+  https://github.com/RikkaApps/Shizuku-API, commit
+  510fc988c02c3475d8c25db170f96792f105bdf8 (the api submodule of Shizuku
+  v13.6.0); the binder interface checked against commit
+  5ab1d6f844ca6d24fff691bdaa3bc44c308ce1ca (API 13, patch 6)
+  Copyright (c) 2021 RikkaW
+  Licensed under the MIT License (LICENSE.Shizuku-API)
+
+  Derived from it:
+    android/src/at/quickme/prism/shell/Protocol.kt
+      the transaction codes and keys of aidl/src/main/aidl/moe/shizuku/server/*.aidl
+      and shared/.../ShizukuApiConstants.java
+    android/src/at/quickme/prism/shell/Server.kt
+      from server-shared/src/main/java/rikka/shizuku/server/Service.java,
+      ClientManager.java, ClientRecord.java,
+      api/RemoteProcessHolder.java and util/ParcelFileDescriptorUtil.java
+    android/src/at/quickme/prism/shell/UserServices.kt
+      from server-shared/.../UserServiceManager.java, UserServiceRecord.java
+      and UserService.java
+    android/src/moe/shizuku/api/BinderContainer.kt
+      from provider/src/main/java/moe/shizuku/api/BinderContainer.java
+
+Prism ships no unmodified Shizuku files and none of Shizuku's binaries.

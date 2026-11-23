@@ -1,0 +1,30 @@
+The Android app contains NetBird's client library (lib/arm64-v8a/libgojni.so
+and the Java bindings in io.netbird.gomobile), built by android/netbird from
+https://github.com/netbirdio/netbird at tag v0.83.1, package client/android.
+Only the client is used: nothing from NetBird's management/, signal/, relay/
+or combined/ directories (AGPL-3.0) is built into it. NetBird's Android app
+(netbirdio/android-client, GPL-3.0) is not used; the app's NetBird glue
+(android/src/at/quickme/prism/netbird) is this repository's own.
+
+The library also links the Go standard library and Go modules named in
+NetBird's go.mod at that tag, each under its own licence (MIT, BSD, Apache-2.0,
+and MPL-2.0 for github.com/hashicorp/errwrap, go-multierror and go-version,
+whose sources are available from their repositories unchanged).
+
+NetBird's licence follows.
+
+-------------------------------------------------------------------------------
+
+BSD 3-Clause License
+
+Copyright (c) 2022-2026 NetBird GmbH & AUTHORS
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

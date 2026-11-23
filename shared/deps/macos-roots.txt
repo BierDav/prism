@@ -1,0 +1,11 @@
+# The shared module's direct dependencies for Kotlin/Native (macos_arm64);
+# android/deps/resolve.py --native macos_arm64 writes their klibs to
+# macos-lock.json. Keep the versions those of the JVM side (the "shared/"
+# block in android/deps/roots.txt). The standard library comes with
+# kotlin-native (nixpkgs), at the compiler's version.
+org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0
+org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0
+io.ktor:ktor-client-core:3.6.1
+io.ktor:ktor-client-content-negotiation:3.6.1
+io.ktor:ktor-serialization-kotlinx-json:3.6.1
+io.ktor:ktor-client-darwin:3.6.1

@@ -1,0 +1,360 @@
+# The prism worker (worker/, docs/worker.md): Prism's state as a Rocky
+# replica on every worker, the phone and the Macs. Workers run as a
+# StatefulSet so each pod keeps its name, its replica (a local-path volume)
+# and its Rocky identity across restarts. A pod that loses its volume needs
+# a new provisioning (a new node, docs/worker.md): starting the same node
+# again from an empty volume can fork its own Rocky author log.
+#
+# Phones and Macs reach the workers at wss://prism.quickme.at/rocky/<pod>
+# (the Ingress below); any worker receiving that path admits the connection
+# when it is that pod and otherwise forwards it to
+# <pod>.prism-worker.monitoring.svc.cluster.local:7411, where the workers
+# also sync with each other. Every worker also answers Prism's HTTP API on
+# prism.quickme.at and prism-events.quickme.at (the Ingress below). One worker at a time holds the
+# prism-worker-leader Lease and does the once-only work (alert numbers,
+# pushes, requests, fix launches).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prism-worker
+  namespace: monitoring
+  labels:
+    app: prism-worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prism-worker-leader
+  namespace: monitoring
+  labels:
+    app: prism-worker
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["prism-worker-leader"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prism-worker-leader
+  namespace: monitoring
+  labels:
+    app: prism-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prism-worker-leader
+subjects:
+  - kind: ServiceAccount
+    name: prism-worker
+    namespace: monitoring
+---
+# Headless: <pod>.prism-worker resolves to each pod, ready or not, so
+# workers find each other while starting.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prism-worker
+  namespace: monitoring
+  labels:
+    app: prism-worker
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: prism-worker
+  ports:
+    - name: rocky
+      port: 7411
+      targetPort: rocky
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prism-worker-http
+  namespace: monitoring
+  labels:
+    app: prism-worker
+spec:
+  selector:
+    app: prism-worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prism-worker
+  namespace: monitoring
+  labels:
+    app: prism-worker
+spec:
+  serviceName: prism-worker
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: prism-worker
+  template:
+    metadata:
+      labels:
+        app: prism-worker
+    spec:
+      serviceAccountName: prism-worker
+      # Cluster DNS can't resolve the NetBird names of the T3 hosts fix
+      # threads launch on and approvals are read from.
+      hostAliases:
+        - ip: "100.123.164.99"
+          hostnames: ["david-tp.netbird.cloud"]
+        - ip: "100.123.184.163"
+          hostnames: ["david-mm-linz.netbird.cloud"]
+      # One worker per cluster node, ccs-kematen-1 included: alerting must
+      # keep working, with two of three replicas, whichever Oracle node goes
+      # away. The cluster has no dev boxes among its nodes any more.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: prism-worker
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitea-registry
+      containers:
+        - name: prism-worker
+          image: prism-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: PRISM_WORKER_NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PRISM_WORKER_DATA
+              value: /data/prism
+            # SQLite's temporary files: the root filesystem is read-only.
+            - name: TMPDIR
+              value: /tmp
+            - name: SQLITE_TMPDIR
+              value: /tmp
+            - name: PRISM_WORKER_PUBLIC_URL
+              value: wss://prism.quickme.at/rocky
+            - name: PRISM_WORKER_PEER_DOMAIN
+              value: prism-worker.monitoring.svc.cluster.local
+            - name: PRISM_EVENT_KEY_FILE
+              value: /secrets/events/PRISM_EVENT_KEY
+            - name: PRISM_CONFIG
+              value: /config/config.json
+            - name: T3_ACCESS_TOKEN_FILE
+              value: /secrets/t3/T3_ACCESS_TOKEN
+            # ntfy's publish token (the leader's wake-up pushes).
+            - name: PRISM_PUSH_TOKEN_FILE
+              value: /secrets/push/PRISM_PUSH_TOKEN
+            # POST /alerts/cluster is public on prism.quickme.at: Alertmanager
+            # carries this token (selfhosted-platform's
+            # manifests/secrets/prism-alerts.yaml).
+            - name: PRISM_ALERTS_TOKEN_FILE
+              value: /secrets/alerts/token
+            # The hosts' metrics, read from ClickHouse as telemetry_reader.
+            - name: PRISM_METRICS_PASSWORD_FILE
+              value: /secrets/metrics/reader-password
+            # The phone's metrics (POST /v1/telemetry/write): the password of
+            # ClickHouse's prism_phone user, which the phone sends too and the
+            # worker passes on to telemetry_url (selfhosted-platform's
+            # manifests/secrets/prism-telemetry.yaml).
+            - name: PRISM_TELEMETRY_PASSWORD_FILE
+              value: /secrets/telemetry/password
+            # The AI gateway's client key, for magic picks (text_generation).
+            - name: PRISM_TEXT_GENERATION_KEY_FILE
+              value: /secrets/text-generation/api-key
+            # selfhosted-platform's manifests/secrets/prism-worker.yaml: one
+            # provisioning per pod, and every worker's in-cluster contact.
+            - name: PRISM_WORKER_PROVISIONING_FILE
+              value: /secrets/rocky/$(PRISM_WORKER_NODE)
+            - name: PRISM_WORKER_PEERS_FILE
+              value: /secrets/rocky/PEERS
+          ports:
+            - name: rocky
+              containerPort: 7411
+            - name: http
+              containerPort: 8080
+          # /ready is 503 while the replica is incomplete, so webhooks and the
+          # apps' API go to a worker that can serve them (worker/src/health.rs).
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          # Opening a large replica takes Rocky up to tens of minutes before
+          # HTTP listens (it re-reads the WAL and audits its history), and a
+          # liveness kill mid-open starts it over. Liveness begins once /health
+          # first answers; the open gets up to an hour.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 60
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 256Mi
+            limits:
+              # A worker can retain a large Rocky history while applying sync.
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: event-key
+              mountPath: /secrets/events
+              readOnly: true
+            - name: rocky
+              mountPath: /secrets/rocky
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: t3-token
+              mountPath: /secrets/t3
+              readOnly: true
+            - name: push-token
+              mountPath: /secrets/push
+              readOnly: true
+            - name: alerts-token
+              mountPath: /secrets/alerts
+              readOnly: true
+            - name: metrics-reader
+              mountPath: /secrets/metrics
+              readOnly: true
+            - name: text-generation
+              mountPath: /secrets/text-generation
+              readOnly: true
+            - name: telemetry
+              mountPath: /secrets/telemetry
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: config
+          configMap:
+            name: prism-config
+        - name: t3-token
+          secret:
+            secretName: alerting-t3
+        - name: rocky
+          secret:
+            secretName: prism-worker
+        - name: event-key
+          secret:
+            secretName: prism-events
+            optional: true
+        # selfhosted-platform's manifests/secrets: prism-push,
+        # prism-alerts, observability-clickhouse (which vmalert reads too)
+        # and prism-text-generation.
+        - name: push-token
+          secret:
+            secretName: prism-push
+            optional: true
+        - name: alerts-token
+          secret:
+            secretName: prism-alerts
+        - name: metrics-reader
+          secret:
+            secretName: observability-clickhouse
+            items:
+              - key: reader-password
+                path: reader-password
+            optional: true
+        - name: text-generation
+          secret:
+            secretName: prism-text-generation
+            optional: true
+        # Until it exists, /v1/telemetry/write answers 503.
+        - name: telemetry
+          secret:
+            secretName: prism-telemetry
+            optional: true
+  # Written out as the API server stores it (apiVersion, kind, volumeMode),
+  # or Argo CD shows the StatefulSet OutOfSync after every sync.
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: 1Gi
+---
+# prism.quickme.at, all of it: the apps' Rocky links
+# (wss://prism.quickme.at/rocky/<pod>), the APK download, T3's placement
+# sync, Alertmanager's webhook (with its token), the phone's metrics push
+# (its telemetry credential) and the owner's admin routes
+# (admin token). prism-events.quickme.at, where machines report (`prism run`
+# with their event tokens), reaches the same workers. Rocky's link sessions
+# are long-lived WebSockets; the edge's websecure entry point already has no
+# read timeout (selfhosted-platform values/traefik.yaml). external-dns
+# publishes both hosts as CNAMEs of the edge pool; the wildcard certificate
+# covers them.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prism-worker-rocky
+  namespace: monitoring
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: edge-traefik
+  rules:
+    - host: prism.quickme.at
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prism-worker-http
+                port:
+                  number: 8080
+    - host: prism-events.quickme.at
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prism-worker-http
+                port:
+                  number: 8080

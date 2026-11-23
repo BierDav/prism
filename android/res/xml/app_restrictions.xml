@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The settings (Settings.kt): provisioned over adb at enrollment, or set
+     by an MDM as managed configuration. -->
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+    <restriction android:key="relay_url" android:restrictionType="string"
+        android:title="@string/relay_url" android:description="@string/relay_url_about" />
+    <restriction android:key="relay_token" android:restrictionType="string"
+        android:title="@string/relay_token" android:description="@string/relay_token_about" />
+    <restriction android:key="t3_url" android:restrictionType="string"
+        android:title="@string/t3_url" android:description="@string/t3_url_about" />
+    <restriction android:key="prism_url" android:restrictionType="string"
+        android:title="@string/prism_url" android:description="@string/prism_url_about" />
+    <restriction android:key="rocky_provisioning" android:restrictionType="string"
+        android:title="@string/rocky_provisioning" android:description="@string/rocky_provisioning_about" />
+    <restriction android:key="rocky_peers" android:restrictionType="string"
+        android:title="@string/rocky_peers" android:description="@string/rocky_peers_about" />
+    <restriction android:key="device_name" android:restrictionType="string"
+        android:title="@string/device_name" android:description="@string/device_name_about" />
+    <restriction android:key="telemetry_url" android:restrictionType="string"
+        android:title="@string/telemetry_url" android:description="@string/telemetry_url_about" />
+    <restriction android:key="telemetry_user" android:restrictionType="string"
+        android:title="@string/telemetry_user" android:description="@string/telemetry_user_about" />
+    <restriction android:key="telemetry_password" android:restrictionType="string"
+        android:title="@string/telemetry_password" android:description="@string/telemetry_password_about" />
+    <restriction android:key="netbird_setup_key" android:restrictionType="string"
+        android:title="@string/netbird_setup_key" android:description="@string/netbird_setup_key_about" />
+    <restriction android:key="netbird_management_url" android:restrictionType="string"
+        android:title="@string/netbird_management_url" android:description="@string/netbird_management_url_about"
+        android:defaultValue="https://api.netbird.io:443" />
+    <restriction android:key="background_restricted" android:restrictionType="string"
+        android:title="@string/background_restricted" android:description="@string/background_restricted_about" />
+    <restriction android:key="background_charging_only" android:restrictionType="string"
+        android:title="@string/background_charging_only" android:description="@string/background_charging_only_about" />
+    <restriction android:key="activity_recognition_denied" android:restrictionType="string"
+        android:title="@string/activity_recognition_denied" android:description="@string/activity_recognition_denied_about" />
+    <restriction android:key="hotspot_key" android:restrictionType="string"
+        android:title="@string/hotspot_key" android:description="@string/hotspot_key_about" />
+</restrictions>

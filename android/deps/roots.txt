@@ -1,0 +1,28 @@
+# The app's direct Maven dependencies; resolve.py writes their closure to
+# lock.json. Kotlin's standard library matches the compiler (nixpkgs' kotlin).
+org.jetbrains.kotlin:kotlin-stdlib:2.4.21
+org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0
+androidx.activity:activity-compose:1.13.0
+androidx.compose.material3:material3:1.5.0
+# The main screen's navigation (Navigation 3) and its panes: list and detail
+# side by side where the window is wide enough (foldables, tablets, TVs).
+androidx.navigation3:navigation3-ui:1.2.2
+androidx.compose.material3.adaptive:adaptive-navigation3:1.3.0
+androidx.compose.material:material-icons-core:1.7.8
+androidx.lifecycle:lifecycle-runtime-compose:2.11.0
+androidx.core:core:1.19.1
+
+# shared/ (Kotlin Multiplatform, shared with the Mac app): its JVM libraries,
+# in the app's class path and dex. Keep the versions those of
+# shared/deps/macos-roots.txt. Ktor's engine here is OkHttp.
+org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0
+io.ktor:ktor-client-core:3.6.1
+io.ktor:ktor-client-content-negotiation:3.6.1
+io.ktor:ktor-serialization-kotlinx-json:3.6.1
+io.ktor:ktor-client-okhttp:3.6.1
+# shared/'s Rocky replica (rocky-prism-ffi through gobley's bindings): JNA
+# (its Android build, with libjnidispatch.so per ABI) and atomicfu, which
+# the generated code uses. The JVM check takes JNA's jar instead
+# (shared/deps/jvm-test-roots.txt).
+org.jetbrains.kotlinx:atomicfu:0.33.0
+net.java.dev.jna:jna:5.19.1@aar

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Prism</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9F43"/>
+      <stop offset="0.55" stop-color="#F5542E"/>
+      <stop offset="1" stop-color="#C81D4E"/>
+    </linearGradient>
+    <linearGradient id="bell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#FFE3D3"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <g transform="rotate(-14 256 262)">
+    <!-- driver housing -->
+    <rect x="78" y="214" width="78" height="96" rx="22" fill="#2A1430"/>
+    <rect x="96" y="232" width="20" height="60" rx="10" fill="#FF9F43"/>
+    <!-- flared bell -->
+    <path d="M148 226 L300 150 Q326 138 326 166 L326 358 Q326 386 300 374 L148 298 Z" fill="url(#bell)"/>
+    <!-- rim -->
+    <rect x="310" y="130" width="40" height="264" rx="20" fill="#FFFFFF"/>
+    <!-- sound -->
+    <path d="M386 214 Q410 262 386 310" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round"/>
+    <path d="M430 178 Q472 262 430 346" fill="none" stroke="#FFFFFF" stroke-opacity="0.7" stroke-width="24" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,182 @@
+[
+ {
+  "coordinate": "io.ktor:ktor-client-content-negotiation-macosarm64:3.6.1",
+  "file": "ktor-client-content-negotiation-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-content-negotiation-macosarm64/3.6.1/ktor-client-content-negotiation-macosarm64-3.6.1.klib",
+  "sha256": "f47fb3222dd5a1a9d8666e86bdd41fc7aecf2de16937d5b01e7bd7ab23afe8ae"
+ },
+ {
+  "coordinate": "io.ktor:ktor-client-core-macosarm64:3.6.1",
+  "file": "ktor-client-core-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-core-macosarm64/3.6.1/ktor-client-core-macosarm64-3.6.1.klib",
+  "sha256": "21e7a0219dbd4392691cc5242c074a5ea3054a8b4a94b973d6c280a1b83a78e1"
+ },
+ {
+  "coordinate": "io.ktor:ktor-client-darwin-macosarm64:3.6.1",
+  "file": "ktor-client-darwin-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-darwin-macosarm64/3.6.1/ktor-client-darwin-macosarm64-3.6.1.klib",
+  "sha256": "f2e34041f7d5aa9a24fafa323f0dad5de46fe970fb1299ed6c52d2fb51d2ed41"
+ },
+ {
+  "coordinate": "io.ktor:ktor-events-macosarm64:3.6.1",
+  "file": "ktor-events-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-events-macosarm64/3.6.1/ktor-events-macosarm64-3.6.1.klib",
+  "sha256": "e7a991ad3e6a84e8fdabd043f88555cf81cc24b00ef218258c86f68f44ea9da2"
+ },
+ {
+  "coordinate": "io.ktor:ktor-http-cio-macosarm64:3.6.1",
+  "file": "ktor-http-cio-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-http-cio-macosarm64/3.6.1/ktor-http-cio-macosarm64-3.6.1.klib",
+  "sha256": "935eedfe9e6e155feae51194baa32d80e9a2bdd19ee95f39fa1b716d54c61db5"
+ },
+ {
+  "coordinate": "io.ktor:ktor-http-macosarm64:3.6.1",
+  "file": "ktor-http-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-http-macosarm64/3.6.1/ktor-http-macosarm64-3.6.1.klib",
+  "sha256": "3c09e0a7c4ac21cc702afd8264248efe951057009cba2ed4a065bf28848eb4ca"
+ },
+ {
+  "coordinate": "io.ktor:ktor-io-macosarm64:3.6.1",
+  "file": "ktor-io-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-io-macosarm64/3.6.1/ktor-io-macosarm64-3.6.1.klib",
+  "sha256": "b4586f4f871294e18c29f1d20dd6eff32412c9968f2fd78129534ec8b69e88b3"
+ },
+ {
+  "coordinate": "io.ktor:ktor-io-macosarm64:3.6.1",
+  "file": "ktor-io-macosarm64-3.6.1-cinterop-mutex.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-io-macosarm64/3.6.1/ktor-io-macosarm64-3.6.1-cinterop-mutex.klib",
+  "sha256": "aedaf8bdbc69a5b20f05b70ac81b556673a3a6506478ea557ef16969b4b2fc12"
+ },
+ {
+  "coordinate": "io.ktor:ktor-network-macosarm64:3.6.1",
+  "file": "ktor-network-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-network-macosarm64/3.6.1/ktor-network-macosarm64-3.6.1.klib",
+  "sha256": "a8ce09d58860fcede64090ab6e4f7d911159df0bbbc736a52318ba2000b38bff"
+ },
+ {
+  "coordinate": "io.ktor:ktor-network-macosarm64:3.6.1",
+  "file": "ktor-network-macosarm64-3.6.1-cinterop-network.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-network-macosarm64/3.6.1/ktor-network-macosarm64-3.6.1-cinterop-network.klib",
+  "sha256": "d183d6753235cf5eb7cbf992fbaa3a94eca839260319ba695f97e6c9a23271c3"
+ },
+ {
+  "coordinate": "io.ktor:ktor-network-macosarm64:3.6.1",
+  "file": "ktor-network-macosarm64-3.6.1-cinterop-un.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-network-macosarm64/3.6.1/ktor-network-macosarm64-3.6.1-cinterop-un.klib",
+  "sha256": "03e549a9f79122c4c88792efe7322fb418f7973453e7d3559ed33df69711d38a"
+ },
+ {
+  "coordinate": "io.ktor:ktor-network-tls-macosarm64:3.6.1",
+  "file": "ktor-network-tls-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-network-tls-macosarm64/3.6.1/ktor-network-tls-macosarm64-3.6.1.klib",
+  "sha256": "b07f3ee9a7277830b3e3e993f13a52ea13c0441d51c3441edfd5aeaff5251b0a"
+ },
+ {
+  "coordinate": "io.ktor:ktor-openapi-schema-macosarm64:3.6.1",
+  "file": "ktor-openapi-schema-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-openapi-schema-macosarm64/3.6.1/ktor-openapi-schema-macosarm64-3.6.1.klib",
+  "sha256": "0c7ca948ff162ffc2178fe75b7d0ea34531d062f0ae88822eb53bf7e56bc9400"
+ },
+ {
+  "coordinate": "io.ktor:ktor-serialization-kotlinx-json-macosarm64:3.6.1",
+  "file": "ktor-serialization-kotlinx-json-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-serialization-kotlinx-json-macosarm64/3.6.1/ktor-serialization-kotlinx-json-macosarm64-3.6.1.klib",
+  "sha256": "16c5771e2aa1a8ee6d1222215fb38d702ec7b49c696536459fd7ebec1fdd0922"
+ },
+ {
+  "coordinate": "io.ktor:ktor-serialization-kotlinx-macosarm64:3.6.1",
+  "file": "ktor-serialization-kotlinx-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-serialization-kotlinx-macosarm64/3.6.1/ktor-serialization-kotlinx-macosarm64-3.6.1.klib",
+  "sha256": "f04f1ef027f000a4187312eff540d519bacf41144b9b107c557254317a34dd80"
+ },
+ {
+  "coordinate": "io.ktor:ktor-serialization-macosarm64:3.6.1",
+  "file": "ktor-serialization-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-serialization-macosarm64/3.6.1/ktor-serialization-macosarm64-3.6.1.klib",
+  "sha256": "feec6c434e542951a32dd118d1344aa60f2f1497002a9d8b056cd448e3bca654"
+ },
+ {
+  "coordinate": "io.ktor:ktor-sse-macosarm64:3.6.1",
+  "file": "ktor-sse-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-sse-macosarm64/3.6.1/ktor-sse-macosarm64-3.6.1.klib",
+  "sha256": "60a4e6e5cc7009f2d43f3ef4b18cc6c263717663b664e0473709f21b96e49cf9"
+ },
+ {
+  "coordinate": "io.ktor:ktor-utils-macosarm64:3.6.1",
+  "file": "ktor-utils-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-utils-macosarm64/3.6.1/ktor-utils-macosarm64-3.6.1.klib",
+  "sha256": "4c381ad34dcdd94c5a1830f3b0e2dc327dfad6d1082a9966fb501d6ccffeda9d"
+ },
+ {
+  "coordinate": "io.ktor:ktor-utils-macosarm64:3.6.1",
+  "file": "ktor-utils-macosarm64-3.6.1-cinterop-threadUtils.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-utils-macosarm64/3.6.1/ktor-utils-macosarm64-3.6.1-cinterop-threadUtils.klib",
+  "sha256": "5d847c03b20a3ca10113f701be1bf9f285bec5c0175f6060db1fbe1becda599a"
+ },
+ {
+  "coordinate": "io.ktor:ktor-websocket-serialization-macosarm64:3.6.1",
+  "file": "ktor-websocket-serialization-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-websocket-serialization-macosarm64/3.6.1/ktor-websocket-serialization-macosarm64-3.6.1.klib",
+  "sha256": "4f1f2630db354a8cd6d8714520d6f8d7ff4d4189ab557241c7c785a214df44f6"
+ },
+ {
+  "coordinate": "io.ktor:ktor-websockets-macosarm64:3.6.1",
+  "file": "ktor-websockets-macosarm64-3.6.1.klib",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-websockets-macosarm64/3.6.1/ktor-websockets-macosarm64-3.6.1.klib",
+  "sha256": "586cf3b3a8d283705a38ce67aa6818eba884782fcb72048be030cebdded67b3c"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:atomicfu-macosarm64:0.33.0",
+  "file": "atomicfu-macosarm64-0.33.0.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-macosarm64/0.33.0/atomicfu-macosarm64-0.33.0.klib",
+  "sha256": "ff7abc4b4625ea3819e2ed888d85670d9c6a7b57992ba5752a02337b206e9f49"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:atomicfu-macosarm64:0.33.0",
+  "file": "atomicfu-macosarm64-0.33.0-cinterop-interop.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-macosarm64/0.33.0/atomicfu-macosarm64-0.33.0-cinterop-interop.klib",
+  "sha256": "6c7fadcd957fa614cccafff42e9833ed17e8506be119a6ab262f87bbc402c9a4"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-coroutines-core-macosarm64:1.11.0",
+  "file": "kotlinx-coroutines-core-macosarm64-1.11.0.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-macosarm64/1.11.0/kotlinx-coroutines-core-macosarm64-1.11.0.klib",
+  "sha256": "782a837c8593af70135378fb90b999cf0cb9880dc746619f64d6c5c224d014d0"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-datetime-macosarm64:0.8.0-0.6.x-compat",
+  "file": "kotlinx-datetime-macosarm64-0.8.0-0.6.x-compat.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-datetime-macosarm64/0.8.0-0.6.x-compat/kotlinx-datetime-macosarm64-0.8.0-0.6.x-compat.klib",
+  "sha256": "0a4eabe9f65769a98b11036d71cf83da5339577d6c1032d73145c8411adc4b1b"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-io-bytestring-macosarm64:0.9.1",
+  "file": "kotlinx-io-bytestring-macosarm64-0.9.1.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-io-bytestring-macosarm64/0.9.1/kotlinx-io-bytestring-macosarm64-0.9.1.klib",
+  "sha256": "b20ec12601f9bd20c346be668b5d0429fa960f22782b73955891273913c6db04"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-io-core-macosarm64:0.9.1",
+  "file": "kotlinx-io-core-macosarm64-0.9.1.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-io-core-macosarm64/0.9.1/kotlinx-io-core-macosarm64-0.9.1.klib",
+  "sha256": "8af9ce3402b639aebcb029539cc7b71e2bada133e46c0f3be8793570223978bd"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-serialization-core-macosarm64:1.13.0",
+  "file": "kotlinx-serialization-core-macosarm64-1.13.0.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-core-macosarm64/1.13.0/kotlinx-serialization-core-macosarm64-1.13.0.klib",
+  "sha256": "fd7c969d017719f3b7aa24c292b174b581fde452c2a8fc7886857e4b778ff67a"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-serialization-json-io-macosarm64:1.11.0",
+  "file": "kotlinx-serialization-json-io-macosarm64-1.11.0.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json-io-macosarm64/1.11.0/kotlinx-serialization-json-io-macosarm64-1.11.0.klib",
+  "sha256": "b31df07545813e58d519402c5200ed0668f356c63e314a5f9d5d9187de942b0c"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-serialization-json-macosarm64:1.13.0",
+  "file": "kotlinx-serialization-json-macosarm64-1.13.0.klib",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json-macosarm64/1.13.0/kotlinx-serialization-json-macosarm64-1.13.0.klib",
+  "sha256": "cc7e1e6a62e2eec1115188bdb71c18e41ca0d01165ef4358340ecbdbccba03c2"
+ }
+]
