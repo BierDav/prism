@@ -155,7 +155,7 @@ places:
 | `check` | The machine check's name, or `""`. |
 | `summary`, `description` | From the alert's annotations. Untrusted text: show it as plain text, never as markup or links. |
 | `command`, `output` | For machine events: the command and the tail of its output. Show them in monospace. |
-| `labels` | Every label. Machine events from before the server kept them itself carry `source: klaxon`. |
+| `labels` | Every label. |
 | `state` | `open`, `resolved` (it recovered), `dismissed` (the owner dismissed this episode) or `gone` (Alertmanager no longer had it; cluster alerts only). |
 | `startsAt` | When the episode started (Alertmanager's `startsAt`, or the first failed run of a machine event), never later than `createdAt`. |
 | `createdAt` | When the server first saw this episode. |
@@ -734,7 +734,7 @@ The phone applies them when `app.settings` names it, when its replica's
   (docs/worker.md).
 - The workers: `worker/`, image `ghcr.io/bierdav/prism-worker`,
   StatefulSet `prism-worker` in namespace `monitoring`, from selfhosted-platform
-  `apps/klaxon.yaml` (docs/worker.md).
+  `apps/prism.yaml` (docs/worker.md).
 - The `prism` command (`cli/`, Rust) is packages.<system>.prism in this
   flake, which fleet installs, and `/prism` in the worker image.
 - Fleet machines report with `prism run` to

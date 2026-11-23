@@ -1,4 +1,4 @@
-# Deployed by Argo CD (apps/klaxon.yaml in selfhosted-platform) into the
+# Deployed by Argo CD (apps/prism.yaml in selfhosted-platform) into the
 # monitoring namespace: the prism workers (worker.yaml). The worker workflow
 # (.github/workflows/worker.yaml) pins the image below (name and digest). The
 # prism-config ConfigMap (endpoints, machines, devices, default model) lives

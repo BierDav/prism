@@ -3,6 +3,12 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// What a machine token's HMAC covers before the machine's name.
+const MACHINE_PREFIX: &[u8] = b"prism-machine:";
+/// The prefix of tokens minted before the rename. They are accepted, with a
+/// warning, only until fleet has re-minted every host's token.
+const RETIRED_MACHINE_PREFIX: &[u8] = b"klaxon-machine:";
+
 pub fn is_valid_machine_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 63 {
@@ -43,8 +49,7 @@ pub fn machine_token(key: &[u8], machine: &str) -> Result<String, String> {
     }
     let mut mac =
         HmacSha256::new_from_slice(key).map_err(|err| format!("invalid HMAC key: {err}"))?;
-    // The prefix is from before the rename; fleet's tokens depend on it.
-    mac.update(b"klaxon-machine:");
+    mac.update(MACHINE_PREFIX);
     mac.update(machine.as_bytes());
     let sig = hex::encode(mac.finalize().into_bytes());
     Ok(format!("{machine}.{sig}"))
@@ -57,11 +62,23 @@ pub fn verify_machine_token(key: &[u8], token: &str) -> Option<String> {
         return None;
     }
     let sig_bytes = hex::decode(sig_hex).ok()?;
-    let mut mac = HmacSha256::new_from_slice(key).ok()?;
-    mac.update(b"klaxon-machine:");
-    mac.update(machine.as_bytes());
-    mac.verify_slice(&sig_bytes).ok()?;
-    Some(machine.to_string())
+    let signed_with = |prefix: &[u8]| {
+        HmacSha256::new_from_slice(key).ok().is_some_and(|mut mac| {
+            mac.update(prefix);
+            mac.update(machine.as_bytes());
+            mac.verify_slice(&sig_bytes).is_ok()
+        })
+    };
+    if signed_with(MACHINE_PREFIX) {
+        return Some(machine.to_string());
+    }
+    if signed_with(RETIRED_MACHINE_PREFIX) {
+        eprintln!(
+            "prism-worker: {machine} reported with a token of the retired prefix; re-mint it (prism token {machine})"
+        );
+        return Some(machine.to_string());
+    }
+    None
 }
 
 /// The admin token's prefix. It has no dot, so it is never a machine token.
@@ -108,9 +125,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     const KEY: &str = "prism-test-event-key-0123456789abcdef";
-    /// `PRISM_EVENT_KEY_FILE=<file holding KEY and a newline> prism token david-mb`
-    /// from the Go server.
-    const GO_TOKEN: &str =
+    /// `PRISM_EVENT_KEY_FILE=<file holding KEY and a newline> prism token david-mb`.
+    /// The same vector is in `cli/src/token.rs`: both sides must agree.
+    const MACHINE_TOKEN: &str =
+        "david-mb.09541051eb3665a385687eb787f165713a2adf8c88e9e75ff6e795e8b8faa4fc";
+    /// The same machine's token under the retired prefix.
+    const RETIRED_TOKEN: &str =
         "david-mb.d6ed43973d8463ff02792f533d7462036fd62c2e8978a1eb5f6d1201ffff49f1";
 
     fn env(vars: &[(&str, String)]) -> impl Fn(&str) -> Option<String> + use<> {
@@ -122,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn key_file_wins_over_env_and_verifies_a_go_minted_token() {
+    fn key_file_wins_over_env_and_verifies_minted_tokens() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("PRISM_EVENT_KEY");
         std::fs::write(&path, format!("{KEY}\n")).expect("write key");
@@ -136,13 +156,19 @@ mod tests {
         let key = secret_from("PRISM_EVENT_KEY", vars).expect("key");
         assert_eq!(key, KEY);
         assert_eq!(
-            verify_machine_token(key.as_bytes(), GO_TOKEN).as_deref(),
+            verify_machine_token(key.as_bytes(), MACHINE_TOKEN).as_deref(),
+            Some("david-mb")
+        );
+        assert_eq!(
+            verify_machine_token(key.as_bytes(), RETIRED_TOKEN).as_deref(),
             Some("david-mb")
         );
         assert_eq!(
             machine_token(key.as_bytes(), "david-mb").as_deref(),
-            Ok(GO_TOKEN)
+            Ok(MACHINE_TOKEN)
         );
+        let forged = MACHINE_TOKEN.replace("david-mb.", "david-tp.");
+        assert_eq!(verify_machine_token(key.as_bytes(), &forged), None);
     }
 
     /// The same vector is in `cli/src/token.rs`: both sides must agree.
@@ -158,7 +184,7 @@ mod tests {
             b"another-key-that-must-not-be-used-xx",
             &token
         ));
-        assert!(!verify_admin_token(KEY.as_bytes(), GO_TOKEN));
+        assert!(!verify_admin_token(KEY.as_bytes(), MACHINE_TOKEN));
         assert!(!verify_admin_token(KEY.as_bytes(), "admin:00"));
         assert_eq!(verify_machine_token(KEY.as_bytes(), &token), None);
         assert_eq!(admin_token(b"short"), None);

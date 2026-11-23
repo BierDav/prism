@@ -16,28 +16,14 @@ pub fn valid_machine_name(name: &str) -> bool {
 }
 
 /// Go's `Secret`: NAME, read from the file NAME_FILE names when that is set
-/// (trimmed; unreadable is empty). A PRISM_ name falls back to its KLAXON_
-/// name, with a warning.
+/// (trimmed; unreadable is empty).
 pub fn secret(name: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
-    let set = |key: &str| env(key).is_some_and(|v| !v.is_empty());
-    let mut name = name.to_string();
-    if let Some(rest) = name.strip_prefix("PRISM_").map(str::to_string)
-        && !set(&name)
-        && !set(&format!("{name}_FILE"))
-        && (set(&format!("KLAXON_{rest}")) || set(&format!("KLAXON_{rest}_FILE")))
-    {
-        eprintln!(
-            "{} WARN deprecated environment variable; rename it variable=KLAXON_{rest} use={name}",
-            chrono::Local::now().format("%Y/%m/%d %H:%M:%S")
-        );
-        name = format!("KLAXON_{rest}");
-    }
     if let Some(path) = env(&format!("{name}_FILE")).filter(|p| !p.is_empty()) {
         return std::fs::read_to_string(path)
             .map(|raw| raw.trim().to_string())
             .unwrap_or_default();
     }
-    env(&name).unwrap_or_default()
+    env(name).unwrap_or_default()
 }
 
 fn mac(key: &[u8]) -> Result<HmacSha256, String> {
@@ -53,8 +39,7 @@ pub fn machine_token(key: &[u8], machine: &str) -> Result<String, String> {
     if !valid_machine_name(machine) {
         return Err(format!("invalid machine name {}", go_quote(machine)));
     }
-    // The prefix is from before the rename; fleet's tokens depend on it.
-    mac.update(b"klaxon-machine:");
+    mac.update(b"prism-machine:");
     mac.update(machine.as_bytes());
     Ok(format!(
         "{machine}.{}",
@@ -97,7 +82,7 @@ mod tests {
         // `PRISM_EVENT_KEY=… prism token david-mb` from the Go server.
         assert_eq!(
             machine_token(KEY.as_bytes(), "david-mb").as_deref(),
-            Ok("david-mb.d6ed43973d8463ff02792f533d7462036fd62c2e8978a1eb5f6d1201ffff49f1")
+            Ok("david-mb.09541051eb3665a385687eb787f165713a2adf8c88e9e75ff6e795e8b8faa4fc")
         );
         // The same vector is in worker/src/auth.rs.
         assert_eq!(
@@ -115,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn secrets_come_from_the_file_then_the_variable_then_klaxon() {
+    fn secrets_come_from_the_file_then_the_variable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key");
         std::fs::write(&path, format!("{KEY}\n")).unwrap();
@@ -127,8 +112,6 @@ mod tests {
         assert_eq!(secret("PRISM_EVENT_KEY", &e), KEY);
         let e = env(&[("PRISM_EVENT_KEY", "from-env".into())]);
         assert_eq!(secret("PRISM_EVENT_KEY", &e), "from-env");
-        let e = env(&[("KLAXON_EVENT_KEY_FILE", file)]);
-        assert_eq!(secret("PRISM_EVENT_KEY", &e), KEY);
         let e = env(&[("PRISM_EVENT_KEY_FILE", "/nonexistent/key".into())]);
         assert_eq!(secret("PRISM_EVENT_KEY", &e), "");
     }

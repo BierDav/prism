@@ -35,7 +35,6 @@ pub const ACTION_RESOLVE: &str = "resolve";
 /// The alert name of a machine event (`prism run`), a check's alert.
 pub const EVENT_ALERT_NAME: &str = "HostCheckFailed";
 const EVENT_SOURCE: &str = "prism";
-const LEGACY_EVENT_SOURCE: &str = "klaxon";
 
 /// The longest instruction a fix request carries.
 pub const MAX_INSTRUCTION_CHARS: usize = 10_000;
@@ -95,7 +94,7 @@ impl AmAlert {
     /// Whether this is a machine event (a failed `prism run` check).
     pub fn is_host_event(&self) -> bool {
         let source = self.label("source");
-        (source == EVENT_SOURCE || source == LEGACY_EVENT_SOURCE)
+        source == EVENT_SOURCE
             && self.label("alertname") == EVENT_ALERT_NAME
             && !self.label("machine").is_empty()
             && !self.label("check").is_empty()

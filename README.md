@@ -12,7 +12,7 @@ workers behind them and the `prism` CLI machines report with.
 | `cli/` | The `prism` CLI (Rust): `prism run`/`report`/`ping` on every fleet host, `prism pair`/`machines`/`device-token` in a worker pod (`docs/worker.md`); `packages.<system>.prism` |
 | `worker/` | The prism worker (Rust): Prism's server, a StatefulSet in the cluster serving `prism.quickme.at`, each pod a replica of Prism's Rocky database (`docs/worker.md`). `worker/Dockerfile` builds the image `ghcr.io/bierdav/prism-worker`, which also carries `prism` |
 | `rocky-prism/`, `rocky-prism-ffi/`, `uniffi-bindgen/` | Prism's Rocky schema and client API, shared by the worker and the apps, and the apps' bindings to it |
-| `deploy/` | The Kubernetes manifests Argo CD deploys (`apps/klaxon.yaml` in selfhosted-platform); CI pins the image here |
+| `deploy/` | The Kubernetes manifests Argo CD deploys (`apps/prism.yaml` in selfhosted-platform); CI pins the image here |
 | `docs/prism-api.md` | The contract between the workers and the apps |
 | `docs/placement.md` | Placement profiles: how Prism schedules models across T3 hosts and the phone API |
 | `macos/` | **Prism for macOS**: a menu-bar popout with the server's alerts and agents, the hosts' performance and the approvals, the approval dialog, Touch ID and the Secure Enclave key; `install.sh` builds it |
@@ -190,10 +190,7 @@ event.
 
 In the cluster, three workers run as a StatefulSet on different nodes; any
 of them can fail without losing an alert. One holds the
-`prism-worker-leader` Lease and does the once-only work. Prism started as the
-Klaxon Matrix bot; the machine tokens' HMAC prefix, the Argo CD application
-(`klaxon`) and the `source=klaxon` label of old machine events keep that
-name.
+`prism-worker-leader` Lease and does the once-only work.
 
 ### What the owner can do
 
@@ -336,9 +333,6 @@ prism ping                                      # check the token
   apply to them.
 - A minute's tidy-up repeats what a report could not finish and forgets
   events resolved a week ago. At most 50 checks per machine can fail at once.
-- Machine events once went through Alertmanager (`source=klaxon`). Prism
-  ignores what Alertmanager still sends of those, and takes over the alerts
-  they left, with their IDs, on the check's next report or the next tidy-up.
 - Each machine has its own token, `<machine>.<HMAC-SHA256 of the name>`,
   keyed with `PRISM_EVENT_KEY` (the `prism-events` Sealed Secret in
   selfhosted-platform). Prism takes the machine name from the verified
@@ -426,7 +420,7 @@ push to `main` that changes the cargo workspace (or the workflow):
 3. It commits that name and digest into [`deploy/kustomization.yaml`](deploy/kustomization.yaml).
    The pin commit is pushed with the workflow's own token, so it builds nothing.
 
-Argo CD deploys `deploy/` into `monitoring` through `apps/klaxon.yaml` in
+Argo CD deploys `deploy/` into `monitoring` through `apps/prism.yaml` in
 selfhosted-platform. That repository also owns the `prism-config`
 ConfigMap, the `prism-worker`, `prism-events` (event key), `prism-alerts`,
 `alerting-t3` and `prism-push` Sealed Secrets,
