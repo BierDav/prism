@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const DEFAULT_ALERT_FIX_PROFILE: &str = "default";
-
 pub const PLACEMENT_ROLES: &[&str] = &[
     "implementation",
     "research",
@@ -104,14 +102,12 @@ impl PlacementPolicy {
 
 impl Default for PlacementPolicy {
     fn default() -> Self {
-        let mut role_profiles = BTreeMap::new();
-        role_profiles.insert("review".into(), "review".into());
         Self {
             switch_at_percent: 95.0,
             weekly_slack_sessions: 3.0,
             weekly_move_slack_sessions: None,
             active_hours: None,
-            role_profiles,
+            role_profiles: BTreeMap::new(),
         }
     }
 }

@@ -6,13 +6,13 @@ use crate::rank::{
 };
 use crate::schema::prism_schema;
 use crate::types::{
-    DEFAULT_ALERT_FIX_PROFILE, PLACEMENT_ROLES, PlacementActions, PlacementActiveHours,
-    PlacementEntryDecision, PlacementEntryInput, PlacementEntryRow, PlacementEntryView,
-    PlacementHostModel, PlacementLoad, PlacementModelReasoningView, PlacementModelView,
-    PlacementMoveRow, PlacementMoveView, PlacementPolicy, PlacementProfileRow,
-    PlacementProfileView, PlacementSample, PlacementSelection, PlacementSyncActions,
-    PlacementSyncEntryResp, PlacementSyncModel, PlacementSyncMoveResp, PlacementSyncProfileResp,
-    PlacementSyncRequest, PlacementSyncResponse, PlacementSyncThread, PlacementView, PrismError,
+    PLACEMENT_ROLES, PlacementActions, PlacementActiveHours, PlacementEntryDecision,
+    PlacementEntryInput, PlacementEntryRow, PlacementEntryView, PlacementHostModel, PlacementLoad,
+    PlacementModelReasoningView, PlacementModelView, PlacementMoveRow, PlacementMoveView,
+    PlacementPolicy, PlacementProfileRow, PlacementProfileView, PlacementSample,
+    PlacementSelection, PlacementSyncActions, PlacementSyncEntryResp, PlacementSyncModel,
+    PlacementSyncMoveResp, PlacementSyncProfileResp, PlacementSyncRequest, PlacementSyncResponse,
+    PlacementSyncThread, PlacementView, PrismError, PutPlacementEntryInput,
     PutPlacementProfileRequest, SetPlacementActionsRequest,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -68,9 +68,7 @@ impl PrismClient {
         directory: String,
         network: Option<Network>,
     ) -> Result<Self, PrismError> {
-        let client = Self::open_with(&directory, network, First::Create).await?;
-        client.seed_if_empty().await?;
-        Ok(client)
+        Self::open_with(&directory, network, First::Create).await
     }
 
     /// Opens the enrolled device at `directory`. The first open (an absent or
@@ -195,77 +193,6 @@ impl PrismClient {
             .await
             .map_err(storage_err)?;
         let _ = rows.next().await.map_err(storage_err)?;
-        Ok(())
-    }
-
-    /// Seeds the Default, Review and Minor profiles when the profiles table is empty.
-    pub async fn seed_if_empty(&self) -> Result<(), PrismError> {
-        let mut rows = self
-            .db
-            .query("SELECT COUNT(*) AS cnt FROM profiles", params![])
-            .await
-            .map_err(storage_err)?;
-        let count = if let Some(row) = rows.next().await.map_err(storage_err)? {
-            row.get::<i64>("cnt").map_err(storage_err)?
-        } else {
-            0
-        };
-        drop(rows);
-        if count > 0 {
-            return Ok(());
-        }
-
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for profile in default_placement_seed() {
-            let pid = tx.next_id("profiles", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO profiles (id, slug, label, position) VALUES (?, ?, ?, ?)",
-                params![
-                    pid,
-                    profile.id.clone(),
-                    profile.label.clone(),
-                    profile.position
-                ],
-            )
-            .await
-            .map_err(storage_err)?;
-            for (i, entry) in profile.entries.iter().enumerate() {
-                let eid = tx
-                    .next_id("profile_entries", vec![])
-                    .await
-                    .map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO profile_entries (id, profile, position, instance_id, model, reasoning, enabled, session_share_of_weekly) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        eid,
-                        profile.id.clone(),
-                        i as i32,
-                        entry.instance_id.clone(),
-                        entry.model.clone(),
-                        entry.reasoning.clone(),
-                        entry.enabled,
-                        opt_f64_to_sql(entry.session_share_of_weekly)?,
-                    ],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-        }
-        let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-            params![aid, ACTION_ALERT_FIX, DEFAULT_ALERT_FIX_PROFILE],
-        )
-        .await
-        .map_err(storage_err)?;
-        let rid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-            params![rid, "review", "review"],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1006,6 +933,38 @@ impl PrismClient {
         })
     }
 
+    /// Saves every profile that ends in padding again, which drops it (see
+    /// `put_placement_profile`). Returns the ids it trimmed. Editors that
+    /// saved the padded list stored it before saves dropped it.
+    pub async fn trim_profile_padding(&self, now_unix: i64) -> Result<Vec<String>, PrismError> {
+        let mut trimmed = Vec::new();
+        for profile in self.placement_profiles().await? {
+            if !profile.entries.last().is_some_and(is_padding) {
+                continue;
+            }
+            let entries = profile
+                .entries
+                .iter()
+                .map(|e| PutPlacementEntryInput {
+                    instance_id: e.instance_id.clone(),
+                    model: e.model.clone(),
+                    reasoning: e.reasoning.clone(),
+                    enabled: e.enabled,
+                    session_share_of_weekly: e.session_share_of_weekly,
+                })
+                .collect();
+            let label = profile.label.clone();
+            self.put_placement_profile(
+                profile.id.clone(),
+                PutPlacementProfileRequest { label, entries },
+                now_unix,
+            )
+            .await?;
+            trimmed.push(profile.id);
+        }
+        Ok(trimmed)
+    }
+
     pub async fn put_placement_profile(
         &self,
         id: String,
@@ -1095,6 +1054,13 @@ impl PrismClient {
             });
         }
 
+        // The view lists every model a host reports, appending the ones a
+        // profile doesn't name as disabled rows. An editor that saves the
+        // list it shows sends them back: a disabled entry at the end with
+        // nothing set says no more than its absence, so it isn't stored.
+        while entries.last().is_some_and(is_padding) {
+            entries.pop();
+        }
         if previous.is_some_and(|p| p.label == label && p.entries == entries) {
             return Ok(());
         }
@@ -1700,7 +1666,8 @@ impl PrismClient {
         Ok(policy)
     }
 
-    /// The placement profile alert fixes launch in.
+    /// The placement profile alert fixes launch in, or `""` when the owner
+    /// picked none (T3 then uses its own default).
     pub async fn alert_fix_profile(&self) -> Result<String, PrismError> {
         let mut rows = self
             .db
@@ -1711,12 +1678,9 @@ impl PrismClient {
             .await
             .map_err(storage_err)?;
         if let Some(row) = rows.next().await.map_err(storage_err)? {
-            let p: String = row.get("profile").map_err(storage_err)?;
-            if !p.is_empty() {
-                return Ok(p);
-            }
+            return row.get("profile").map_err(storage_err);
         }
-        Ok(DEFAULT_ALERT_FIX_PROFILE.into())
+        Ok(String::new())
     }
 
     async fn text_generation_profile(&self) -> Result<String, PrismError> {
@@ -2029,6 +1993,12 @@ fn sql_to_opt_f64(v: &SqlValue) -> Option<f64> {
     }
 }
 
+/// A disabled entry with no reasoning and no session share: what the view
+/// adds for a model a profile doesn't name.
+fn is_padding(entry: &PlacementEntryRow) -> bool {
+    !entry.enabled && entry.reasoning.is_empty() && entry.session_share_of_weekly.is_none()
+}
+
 pub fn is_valid_profile_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     if bytes.is_empty() || bytes.len() > 40 {
@@ -2041,107 +2011,6 @@ pub fn is_valid_profile_id(id: &str) -> bool {
     bytes
         .iter()
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-fn default_placement_seed() -> Vec<PlacementProfileRow> {
-    let entry = |profile: &str,
-                 pos: i32,
-                 inst: &str,
-                 model: &str,
-                 share: Option<f64>|
-     -> PlacementEntryRow {
-        PlacementEntryRow {
-            profile_id: profile.into(),
-            position: pos,
-            instance_id: inst.into(),
-            model: model.into(),
-            reasoning: String::new(),
-            enabled: true,
-            session_share_of_weekly: share,
-        }
-    };
-    vec![
-        PlacementProfileRow {
-            id: "default".into(),
-            label: "Default".into(),
-            position: 0,
-            entries: vec![
-                entry("default", 0, "agy-pooled", "agy/gemini-4-neon", None),
-                entry(
-                    "default",
-                    1,
-                    "claudeAgent",
-                    "claude-david/claude-opus-5-5",
-                    Some(13.7),
-                ),
-                entry(
-                    "default",
-                    2,
-                    "claudeAgent",
-                    "claude-1/claude-opus-5-5",
-                    Some(13.2),
-                ),
-                entry(
-                    "default",
-                    3,
-                    "claudeAgent",
-                    "claude-alex/claude-opus-5-5",
-                    Some(25.9),
-                ),
-                entry("default", 4, "codex", "codex-david/gpt-6.2-sol", Some(15.5)),
-                entry("default", 5, "codex", "codex-2/gpt-6.2-sol", Some(15.2)),
-            ],
-        },
-        PlacementProfileRow {
-            id: "review".into(),
-            label: "Review".into(),
-            position: 1,
-            entries: vec![
-                entry("review", 0, "codex", "make/gpt-6.1-sol", None),
-                entry("review", 1, "agy-pooled", "agy/claude-opus-5-5", None),
-                entry("review", 2, "codex", "jetbrains/gpt-6.2-sol", None),
-                entry("review", 3, "codex", "codex-david/gpt-6.2-sol", Some(15.5)),
-                entry("review", 4, "codex", "codex-2/gpt-6.2-sol", Some(15.2)),
-                entry(
-                    "review",
-                    5,
-                    "claudeAgent",
-                    "claude-david/claude-opus-5-5",
-                    Some(13.7),
-                ),
-                entry(
-                    "review",
-                    6,
-                    "claudeAgent",
-                    "claude-1/claude-opus-5-5",
-                    Some(13.2),
-                ),
-                entry(
-                    "review",
-                    7,
-                    "claudeAgent",
-                    "claude-alex/claude-opus-5-5",
-                    Some(25.9),
-                ),
-            ],
-        },
-        PlacementProfileRow {
-            id: "minor".into(),
-            label: "Minor".into(),
-            position: 2,
-            entries: vec![
-                entry("minor", 0, "agy-pooled", "agy/gemini-3.8-flash-high", None),
-                entry(
-                    "minor",
-                    1,
-                    "agy-pooled",
-                    "agy/claude-opus-4-6-thinking",
-                    None,
-                ),
-                entry("minor", 2, "codex", "gh/auto", None),
-            ],
-        },
-    ]
 }
 
 #[cfg(test)]
@@ -2345,9 +2214,35 @@ mod tests {
         tx.commit().await.expect("commit");
     }
 
+    /// Saves the profile `id` with `models` (Claude accounts), all enabled.
+    async fn put_profile(client: &PrismClient, id: &str, models: &[&str]) {
+        let entries = models
+            .iter()
+            .map(|model| PutPlacementEntryInput {
+                instance_id: "claudeAgent".into(),
+                model: (*model).into(),
+                reasoning: String::new(),
+                enabled: true,
+                session_share_of_weekly: None,
+            })
+            .collect();
+        client
+            .put_placement_profile(
+                id.into(),
+                PutPlacementProfileRequest {
+                    label: id.into(),
+                    entries,
+                },
+                NOW,
+            )
+            .await
+            .expect("put profile");
+    }
+
     /// Returns claude-david's (running threads, predicted session %) as host-b sees it.
     async fn david_load(duplicates: bool) -> (i32, Option<f64>) {
         let (_dir, client) = open().await;
+        put_profile(&client, "coding", &[DAVID]).await;
         let threads = || vec![thread("thr-1", "coding", DAVID)];
         client
             .sync_placement(

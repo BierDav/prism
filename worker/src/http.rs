@@ -571,7 +571,8 @@ mod tests {
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
         let sync_resp: PlacementSyncResponse = serde_json::from_slice(&bytes).expect("resp json");
         assert_eq!(sync_resp.v, 1);
-        assert_eq!(sync_resp.profiles.len(), 3);
+        // Nothing is built in: a new database has no profiles.
+        assert!(sync_resp.profiles.is_empty());
     }
 
     async fn post_webhook(app: &Router, body: &str, auth: Option<&str>) -> StatusCode {

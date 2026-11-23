@@ -27,8 +27,9 @@ const TICK: Duration = Duration::from_secs(2);
 const RECONCILE_EVERY: Duration = Duration::from_secs(60);
 const SCAN_EVERY: Duration = Duration::from_secs(30);
 
-/// How long a worker leads before it seeds an empty database's profiles.
-const SEED_AFTER: Duration = Duration::from_secs(120);
+/// How long a worker leads before it trims the profiles' stored padding, so
+/// its replica has caught up with the profiles first.
+const TRIM_AFTER: Duration = Duration::from_secs(120);
 
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -358,16 +359,22 @@ impl LeaderWork {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_reconcile: Option<tokio::time::Instant> = None;
         let leading_since = tokio::time::Instant::now();
-        let mut seeded = false;
+        let mut trimmed = false;
         loop {
             ticker.tick().await;
-            // An enrolled database starts without profiles. The leader seeds
-            // the defaults once it has led for SEED_AFTER, so its replica has
-            // caught up and doesn't add them beside profiles it hasn't seen yet.
-            if !seeded && leading_since.elapsed() >= SEED_AFTER {
-                match rocky_prism::retry_unavailable(|| self.client.seed_if_empty()).await {
-                    Ok(()) => seeded = true,
-                    Err(err) => eprintln!("prism-worker: seeding profiles failed; retrying: {err}"),
+            if !trimmed && leading_since.elapsed() >= TRIM_AFTER {
+                let now = (self.now)();
+                match rocky_prism::retry_unavailable(|| self.client.trim_profile_padding(now)).await
+                {
+                    Ok(ids) => {
+                        trimmed = true;
+                        if !ids.is_empty() {
+                            eprintln!("prism-worker: trimmed padding from profiles {ids:?}");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("prism-worker: trimming profiles failed; retrying: {err}")
+                    }
                 }
             }
             if let Err(err) = self.tick().await {
@@ -619,8 +626,28 @@ mod tests {
                 .expect("open"),
         );
         let ntfy = FakeNtfy::default();
+        // Nothing is built in: the owner's own alert-fix profile.
+        client
+            .put_placement_profile(
+                "fixes".into(),
+                rocky_prism::PutPlacementProfileRequest {
+                    label: "Fixes".into(),
+                    entries: Vec::new(),
+                },
+                0,
+            )
+            .await
+            .expect("profile");
+        client
+            .set_placement_actions(rocky_prism::SetPlacementActionsRequest {
+                alert_fix: Some("fixes".into()),
+                text_generation: None,
+                role_profiles: None,
+            })
+            .await
+            .expect("alert-fix profile");
         let t3 = FakeT3::default();
-        t3.profiles.lock().expect("profiles").push("default".into());
+        t3.profiles.lock().expect("profiles").push("fixes".into());
         let ntfy_url = serve(ntfy.router()).await;
         let t3_url = serve(t3.router()).await;
         let cfg = Arc::new(
@@ -740,7 +767,7 @@ mod tests {
             sha256_hex(&launch_key("investigate", "david-phone", "r1"))
         );
         assert_eq!(launch["clientRequestId"], expected_id);
-        assert_eq!(launch["placementProfile"], "default");
+        assert_eq!(launch["placementProfile"], "fixes");
         assert_eq!(launch["projectId"], "project-platform");
         assert_eq!(
             launch["workspaceStrategy"],
@@ -788,7 +815,7 @@ mod tests {
         );
         let (first, _, _) = work
             .t3
-            .fix_alert(&row, "restart the node", "david-phone", "r2", "default")
+            .fix_alert(&row, "restart the node", "david-phone", "r2", "fixes")
             .await
             .expect("launch");
         let next = rig.work("prism-worker-1");
@@ -847,7 +874,7 @@ mod tests {
             .expect("r4");
         assert_eq!(
             failed.error,
-            "The profile default is not available on david-server. Choose another profile."
+            "The profile fixes is not available on david-server. Choose another profile."
         );
     }
 
@@ -1064,7 +1091,7 @@ mod tests {
         let launches = rig.t3.launches.lock().expect("launches").clone();
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0]["runtimeMode"], "full-access");
-        assert_eq!(launches[0]["placementProfile"], "default");
+        assert_eq!(launches[0]["placementProfile"], "fixes");
         assert_eq!(launches[0]["projectId"], "project-platform");
         assert_eq!(
             launches[0]["clientRequestId"],

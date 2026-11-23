@@ -759,14 +759,8 @@ impl T3Hub {
         Ok((launch, title, target))
     }
 
-    /// Launches a thread in a placement profile, at most once per key.
-    async fn launch(
-        &self,
-        key: &str,
-        prompt: &str,
-        t: &Target,
-        profile: &str,
-    ) -> Result<Launch, T3Error> {
+    /// Whether T3 on `t` offers the placement profile `profile`.
+    async fn offers_profile(&self, t: &Target, profile: &str) -> Result<bool, T3Error> {
         let caps = self
             .call(
                 &t.client,
@@ -775,14 +769,25 @@ impl T3Hub {
                 Value::Object(Map::new()),
             )
             .await?;
-        let offered = caps
+        Ok(caps
             .pointer("/placement/profiles")
             .and_then(Value::as_array)
             .is_some_and(|ps| {
                 ps.iter()
                     .any(|p| p.get("id").and_then(Value::as_str) == Some(profile))
-            });
-        if !offered {
+            }))
+    }
+
+    /// Launches a thread in a placement profile (T3's default when
+    /// `profile` is empty), at most once per key.
+    async fn launch(
+        &self,
+        key: &str,
+        prompt: &str,
+        t: &Target,
+        profile: &str,
+    ) -> Result<Launch, T3Error> {
+        if !profile.is_empty() && !self.offers_profile(t, profile).await? {
             let host = if t.host.is_empty() {
                 "the cluster machine"
             } else {
@@ -802,7 +807,10 @@ impl T3Hub {
         args.insert("message".into(), prompt.into());
         args.insert("runtimeMode".into(), "full-access".into());
         args.insert("interactionMode".into(), "default".into());
-        args.insert("placementProfile".into(), profile.into());
+        // No profile: T3 places the thread with its own default.
+        if !profile.is_empty() {
+            args.insert("placementProfile".into(), profile.into());
+        }
         if t.workspace.is_empty() {
             args.insert("scratch".into(), true.into());
         } else {

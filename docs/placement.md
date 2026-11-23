@@ -79,9 +79,15 @@ CREATE TABLE placement_moves (
 
 The policy, the alert-fix profile and the text-generation profile are
 settings (`placement_policy`, `alert_fix_profile`,
-`text_generation_profile`) in Prism's existing settings store. The first start
-seeds Coding, Review and Minor from fleet's `agents/profiles/full.nix` as of
-2026-11-21 when `placement_profiles` is empty.
+`text_generation_profile`) in Prism's existing settings store. Nothing is
+built in: a new database has no profiles, roles or actions until the owner
+creates them in the apps. With no alert-fix profile, alert fixes launch
+without one and T3 places them with its own default.
+
+The view lists every model a host reports under every profile, the ones a
+profile doesn't name appended as disabled. Saving drops disabled entries at
+the end that carry no reasoning or share, so an editor that saves the list
+it shows doesn't store them.
 
 Policy (as in the fork's `PlacementPolicy`):
 
