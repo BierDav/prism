@@ -412,9 +412,10 @@ leader, enrollment and the HTTP routes. In short:
 [`.github/workflows/worker.yaml`](.github/workflows/worker.yaml) runs on every
 push to `main` that changes the cargo workspace (or the workflow):
 
-1. `worker/Dockerfile` runs the workspace's tests and builds `prism-worker`
-   and `prism`, natively on an x64 and an arm64 runner, and pushes both
-   images.
+1. Natively on an x64 and an arm64 runner, it runs the workspace's tests
+   (cargo-nextest, split across runners) and, side by side, builds
+   `prism-worker` and `prism` and pushes them in a distroless image
+   (`worker/Dockerfile`, target `prebuilt`).
 2. The workflow merges them into one manifest list,
    `ghcr.io/bierdav/prism-worker:<sha>-<run>` (public).
 3. It commits that name and digest into [`deploy/kustomization.yaml`](deploy/kustomization.yaml).

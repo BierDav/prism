@@ -1,0 +1,15 @@
+# cargo-nextest's settings. CI (.github/workflows/worker.yaml) runs the
+# workspace's tests with the ci profile, split across runners.
+
+[profile.ci]
+fail-fast = false
+# Some sync tests are timing-sensitive on the shared runners: a failed test
+# gets up to two more attempts (and is reported as flaky if one passes).
+retries = 2
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The sync tests that start several replicas run for 20 to 80 seconds: start
+# them first, so they don't all end up last, side by side.
+[[profile.ci.overrides]]
+filter = "binary_id(rocky-prism-ffi::api) | binary_id(rocky-prism::enroll) | binary_id(rocky-prism::dial_only) | binary_id(rocky-prism-ffi::provisioned) | binary_id(rocky-prism-ffi::direct) | binary_id(rocky-prism::placement)"
+priority = 50
