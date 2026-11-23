@@ -3,7 +3,7 @@
 //! knows them as peers (`prism-worker peer -`); Rocky syncs only with known
 //! peers.
 
-use rocky_prism::{PrismClient, PrismRoot, PutPlacementProfileRequest, peer_contact};
+use rocky_prism::{PrismClient, PrismError, PrismRoot, PutPlacementProfileRequest, peer_contact};
 use rocky_sdk::Network;
 use std::{
     net::SocketAddr,
@@ -41,14 +41,18 @@ async fn open(dir: &Path, provisioning: &str, attachment: &rocky_tcp::Attachment
     .expect("open from provisioning")
 }
 
-async fn profile_ids(client: &PrismClient) -> Vec<String> {
-    let view = client
-        .placement_view("cluster".into(), 0)
-        .await
-        .expect("placement view");
+/// The profiles `client` sees, or `None` while its replica is briefly
+/// unavailable (`PrismError::Unavailable`, e.g. a session Rocky revoked while
+/// it imports synced rows), which callers retry.
+async fn profile_ids(client: &PrismClient) -> Option<Vec<String>> {
+    let view = match client.placement_view("cluster".into(), 0).await {
+        Ok(view) => view,
+        Err(PrismError::Unavailable(_)) => return None,
+        Err(error) => panic!("placement view: {error:?}"),
+    };
     let mut ids: Vec<String> = view.profiles.into_iter().map(|p| p.id).collect();
     ids.sort();
-    ids
+    Some(ids)
 }
 
 async fn put_profile(client: &PrismClient, id: &str) {
@@ -69,7 +73,7 @@ async fn wait_for(client: &PrismClient, expected: &[&str]) {
     let deadline = Instant::now() + SYNC_WAIT;
     loop {
         let ids = profile_ids(client).await;
-        if ids == expected {
+        if ids.as_deref().is_some_and(|ids| ids == expected) {
             return;
         }
         assert!(
