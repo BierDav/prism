@@ -1,8 +1,9 @@
 use crate::enroll::{contact_node, decode_provisioning};
 use crate::rank::{
     PLACEMENT_BURN_WINDOW_SECS, compute_burn_rate, guess_driver, live_used, model_key,
-    placement_drain_target, placement_move_target, placement_waits_for_reset,
-    rank_placement_profile, same_placement_entry, selection_for_entry, vienna_tz,
+    placement_compact_target, placement_compact_window_start, placement_drain_target,
+    placement_move_target, placement_waits_for_reset, rank_placement_profile, same_placement_entry,
+    selection_for_entry, vienna_tz,
 };
 use crate::schema::prism_schema;
 use crate::types::{
@@ -528,7 +529,7 @@ impl PrismClient {
         let mut recent_move_by_thread: BTreeSet<String> = BTreeSet::new();
         let mut winner_at: BTreeMap<String, i64> = BTreeMap::new();
         let mut lost_races: Vec<String> = Vec::new();
-        for m in existing_moves {
+        for m in &existing_moves {
             if m.at >= cooldown_since {
                 recent_move_by_thread.insert(m.thread_id.clone());
             }
@@ -548,7 +549,9 @@ impl PrismClient {
                     .entry(m.thread_id.clone())
                     .or_default()
                     .push(m.id.clone());
-                asked_by_thread.entry(m.thread_id.clone()).or_insert(m);
+                asked_by_thread
+                    .entry(m.thread_id.clone())
+                    .or_insert_with(|| m.clone());
             }
         }
 
@@ -604,8 +607,25 @@ impl PrismClient {
                     .insert(model_key(&drain.to.instance_id, &drain.to.model))
                     .then_some(drain)
             };
+            // Compacting in place happens once per session window: the thread then
+            // runs on until the limit and moves with the short context.
+            let compact = || {
+                if !t.running {
+                    return None;
+                }
+                let target = placement_compact_target(dec, &t.selection)?;
+                let since = placement_compact_window_start(dec, &t.selection, now_time);
+                let compacted = existing_moves.iter().any(|m| {
+                    m.thread_id == t.thread_id
+                        && m.at >= since
+                        && same_placement_entry(&m.from, &m.to)
+                        && same_placement_entry(&m.from, &t.selection)
+                });
+                (!compacted).then_some(target)
+            };
             let Some(target) = placement_move_target(dec, &t.selection)
                 .or_else(|| if t.running { drain() } else { None })
+                .or_else(compact)
             else {
                 continue;
             };

@@ -679,9 +679,33 @@ fn test_weekly_to_spend_runs_into_the_limit() {
         running: 1,
         burn_per_thread_per_hour: Some(30.0),
     };
-    let dec = paced_state((97.0, 180), (50.0, 240), 10.0, load);
+    let dec = paced_state((97.0, 180), (50.0, 240), 10.0, load.clone());
     assert_ne!(dec.state, "over_threshold", "{}", dec.reason);
     assert!(dec.weekly_slack_sessions.is_some_and(|s| s < 0.0));
+    // It compacts in place at the point it would otherwise have moved, so the move
+    // at the limit hands over a short context.
+    assert!(
+        dec.compact_before_limit
+            .as_deref()
+            .is_some_and(|r| r.contains("session limit is at 97%")),
+        "{:?}",
+        dec.compact_before_limit
+    );
+    // Far from the limit it does not.
+    let dec = paced_state((50.0, 180), (50.0, 240), 10.0, load);
+    assert_eq!(dec.compact_before_limit, None);
+    // An entry that moves before its limit compacts as part of the move instead.
+    let dec = paced_state(
+        (97.0, 180),
+        (20.0, 72 * 60),
+        10.0,
+        PlacementLoad {
+            running: 1,
+            burn_per_thread_per_hour: Some(30.0),
+        },
+    );
+    assert_eq!(dec.state, "over_threshold");
+    assert_eq!(dec.compact_before_limit, None);
 }
 
 #[test]
@@ -849,6 +873,109 @@ async fn test_placement_sync_and_moves() {
         .expect("machine_placement_moves");
     assert!(rows.iter().all(|m| m.state != "asked"));
 
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_placement_compacts_in_place_before_a_limit_it_runs_into() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+        .await
+        .expect("open_or_create");
+    let start = utc_dt(2026, 11, 21, 18, 0, 0);
+    let now = start.timestamp();
+    let at = |minutes: i64| {
+        (start + Duration::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    let entry = |model: &str| PutPlacementEntryInput {
+        instance_id: "claudeAgent".into(),
+        model: model.into(),
+        reasoning: String::new(),
+        enabled: true,
+        session_share_of_weekly: Some(10.0),
+    };
+    client
+        .put_placement_profile(
+            "drain".into(),
+            PutPlacementProfileRequest {
+                label: "Drain".into(),
+                entries: vec![
+                    entry("claude-david/claude-opus-5-5"),
+                    entry("claude-1/claude-opus-5-5"),
+                ],
+            },
+            now,
+        )
+        .await
+        .expect("put profile");
+    let model = |name: &str, session: f64, weekly: f64, weekly_reset: i64| PlacementSyncModel {
+        instance_id: "claudeAgent".into(),
+        model: name.into(),
+        label: name.into(),
+        driver: String::new(),
+        hidden: false,
+        provider: String::new(),
+        reasoning: None,
+        blocked: None,
+        session: Some(PlacementWindow {
+            used_percent: session,
+            resets_at: at(120),
+        }),
+        weekly: Some(PlacementWindow {
+            used_percent: weekly,
+            resets_at: at(weekly_reset),
+        }),
+    };
+    // claude-david is past the switch point, but half its weekly allowance is
+    // left four hours before the weekly reset: it runs into the limit.
+    let req = |running: bool| PlacementSyncRequest {
+        v: 1,
+        environment_id: "env-a".into(),
+        models: vec![
+            model("claude-david/claude-opus-5-5", 97.0, 50.0, 240),
+            model("claude-1/claude-opus-5-5", 10.0, 20.0, 72 * 60),
+        ],
+        threads: vec![PlacementSyncThread {
+            thread_id: "thr-1".into(),
+            title: "Long task".into(),
+            profile: "drain".into(),
+            selection: sel("claudeAgent", "claude-david/claude-opus-5-5"),
+            running,
+        }],
+        moves: Vec::new(),
+    };
+
+    // An idle thread is left alone.
+    let resp = client
+        .sync_placement("david-mb".into(), req(false), now)
+        .await
+        .expect("sync idle");
+    assert!(resp.moves.is_empty());
+
+    // A running one compacts in place: a move whose `to` is its `from`.
+    let resp = client
+        .sync_placement("david-mb".into(), req(true), now)
+        .await
+        .expect("sync running");
+    assert_eq!(resp.moves.len(), 1, "{:?}", resp.moves);
+    assert!(same_placement_entry(&resp.moves[0].from, &resp.moves[0].to));
+    assert_eq!(resp.moves[0].to.model, "claude-david/claude-opus-5-5");
+    assert!(
+        resp.moves[0]
+            .reason
+            .starts_with("Compacting before the limit"),
+        "{}",
+        resp.moves[0].reason
+    );
+
+    // Once per session window: later syncs, past the move cooldown, ask no more.
+    for later in [300, 900, 3600] {
+        let resp = client
+            .sync_placement("david-mb".into(), req(true), now + later)
+            .await
+            .expect("sync later");
+        assert!(resp.moves.is_empty(), "at +{later}s: {:?}", resp.moves);
+    }
     client.close().await.expect("close");
 }
 

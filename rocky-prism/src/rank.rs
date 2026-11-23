@@ -227,6 +227,7 @@ pub fn decide_entry(
         running_threads: load.running,
         predicted_session_percent: None,
         weekly_slack_sessions: None,
+        compact_before_limit: None,
     };
     if !entry.enabled {
         base.state = "disabled".into();
@@ -286,17 +287,21 @@ pub fn decide_entry(
     // the session or weekly window would run out within PLACEMENT_PREEMPT_LEAD_SECS
     // at the current pace. Two cases run into the limit instead. An entry whose
     // weekly allowance still has to be spent (slack at most weeklyMoveSlackSessions)
-    // keeps going until it is exhausted, and then moves without compaction. A
-    // window that resets within PLACEMENT_LIMIT_WAIT_SECS is waited for
-    // (placement_waits_for_reset), which keeps the prompt cache.
+    // keeps going until it is exhausted, and then moves without compaction (the
+    // spent account cannot run one); its running threads are compacted in place
+    // at the same point instead (compact_before_limit), so that move hands over
+    // a short context. A window that resets within PLACEMENT_LIMIT_WAIT_SECS is
+    // waited for (placement_waits_for_reset), which keeps the prompt cache.
     let fills_weekly = weekly_slack_sessions.is_some_and(|s| s <= policy.weekly_move_slack());
-    if !fills_weekly
-        && let Some(reason) =
-            preempt_reason(session.as_ref(), weekly.as_ref(), entry, policy, load, now)
+    if let Some(reason) =
+        preempt_reason(session.as_ref(), weekly.as_ref(), entry, policy, load, now)
     {
-        base.state = "over_threshold".into();
-        base.reason = reason;
-        return base;
+        if !fills_weekly {
+            base.state = "over_threshold".into();
+            base.reason = reason;
+            return base;
+        }
+        base.compact_before_limit = Some(reason);
     }
 
     let mut predicted_session_percent = None;
@@ -480,6 +485,49 @@ pub fn placement_drain_target(
             to.selection.model
         ),
     })
+}
+
+/// A move onto the thread's own entry, which T3 carries out as interrupt,
+/// `/compact` on this account, and continue here: for a running thread on an
+/// entry that runs into its limit on purpose and is close to it
+/// (`compact_before_limit`). None when the entry is not close or not runnable.
+pub fn placement_compact_target(
+    decision: &PlacementProfileDecision,
+    current: &PlacementSelection,
+) -> Option<PlacementMoveTarget> {
+    let own = decision
+        .ranked
+        .iter()
+        .find(|d| same_placement_entry(&d.selection, current))
+        .filter(|d| is_placement_runnable(&d.state))?;
+    let why = own.compact_before_limit.as_ref()?;
+    Some(PlacementMoveTarget {
+        to: own.selection.clone(),
+        reason: format!(
+            "Compacting before the limit, to hand over a short context when it is reached: {why} {} still has weekly allowance to spend, so the thread stays on it until then.",
+            current.model
+        ),
+    })
+}
+
+/// Since when an in-place compaction of a thread on `current` counts as done:
+/// the start of the entry's session window, or one window back when it is
+/// unknown.
+pub fn placement_compact_window_start(
+    decision: &PlacementProfileDecision,
+    current: &PlacementSelection,
+    now: DateTime<Utc>,
+) -> i64 {
+    let window_secs = (PLACEMENT_SESSION_HOURS * 3600.0) as i64;
+    decision
+        .ranked
+        .iter()
+        .find(|d| same_placement_entry(&d.selection, current))
+        .and_then(|d| d.session.as_ref())
+        .and_then(|w| parse_placement_time(&w.resets_at))
+        .map_or(now.timestamp() - window_secs, |reset| {
+            (reset.timestamp() - window_secs).min(now.timestamp())
+        })
 }
 
 pub fn placement_move_target(

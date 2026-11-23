@@ -163,6 +163,13 @@ pub struct PlacementEntryDecision {
         skip_serializing_if = "Option::is_none"
     )]
     pub weekly_slack_sessions: Option<f64>,
+    /// Why a running thread on this entry is compacted in place: the entry
+    /// runs into its limit on purpose (its weekly allowance still has to be
+    /// spent), and the limit is close. The thread compacts on this account and
+    /// continues here, so the move at the limit hands over a short context.
+    /// Not sent: T3 sees it only as a move whose `to` is its `from`.
+    #[serde(skip)]
+    pub compact_before_limit: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
