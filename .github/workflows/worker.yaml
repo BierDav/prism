@@ -24,7 +24,8 @@ permissions:
   contents: write
   packages: write
 concurrency:
-  group: prism-worker-image
+  # main's runs queue one after another; a branch's runs never displace them.
+  group: prism-worker-image${{ github.ref != 'refs/heads/main' && format('-{0}', github.ref) || '' }}
   cancel-in-progress: false
 env:
   IMAGE: ghcr.io/bierdav/prism-worker
