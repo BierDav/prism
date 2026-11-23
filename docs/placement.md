@@ -121,7 +121,12 @@ Two cases run into the limit instead:
 - The entry's weekly allowance still has to be spent (weekly slack at most
   `weeklyMoveSlackSessions`). The thread keeps going until the entry is
   `exhausted`. It then moves without compaction (T3 skips `/compact` on a
-  spent account), or waits when the limit resets within 30 minutes.
+  spent account), or waits when the limit resets within 30 minutes. So that
+  this move hands over a short context rather than the whole conversation, a
+  running thread is compacted in place at the point it would otherwise have
+  moved: Prism lists a move whose `to` is its `from`, and T3 interrupts it,
+  runs `/compact` on the same account and continues there. Prism asks this
+  once per thread per session window.
 - The window resets within 30 minutes. The thread hits the limit and waits
   for the reset on the same account (above), keeping its prompt cache.
 
@@ -220,7 +225,8 @@ Response:
   ("its provider instance is not configured"). `runningThreads` and the burn
   rate are counted over every host's last report.
 - `moves`: threads of this host that should move now, as the fork's
-  `placementMoveTarget` decides for each reported thread (running or not).
+  `placementMoveTarget` decides for each reported thread (running or not),
+  plus the in-place compactions above (`to` equal to `from`).
   Prism lists a move until the host reports the thread on `to` or
   acknowledges it; it never asks for a second move of the same thread
   within 2 minutes.
