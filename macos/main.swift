@@ -4,8 +4,9 @@
 //   pubkey                  print this Mac's device key (authorized_keys form)
 //   self-test               prove the SSHSIG signatures (shared/'s SshSig with a
 //                           P-256 key, as the Secure Enclave signs) against
-//                           ssh-keygen -Y verify, and the shared Kotlin module
-//                           (Shared.swift)
+//                           ssh-keygen -Y verify, the shared Kotlin module
+//                           (Shared.swift), and the hotspot's and calls'
+//                           vectors (Hotspot.swift, PhoneCalls.swift)
 //   sign -n NAMESPACE FILE  sign FILE (or stdin, "-") after Touch ID, like
 //                           ssh-keygen -Y sign: FILE.sig, or stdout for stdin
 //   preview                 the popout in a window, for screenshots (Preview.swift)
@@ -58,7 +59,8 @@ case "self-test":
     let shared = SharedSelfTest.run()
     let hotspot = Hotspot.selfTest()
     let wifi = WiFiPolicy.selfTest()
-    exit(signatures && shared && hotspot && wifi ? 0 : 1)
+    let calls = PhoneCalls.selfTest()
+    exit(signatures && shared && hotspot && wifi && calls ? 0 : 1)
 
 case "hotspot-uuid":
     var rest = Array(arguments.dropFirst())
@@ -115,6 +117,7 @@ case nil, "--config":
         AppDelegate.store = PrismStore(
             config: config.rocky, device: config.host, relayURL: config.relayUrl, relayTokenFile: config.relayTokenFile)
         AppDelegate.hotspot = Hotspot(keyFile: config.hotspotKeyFile)
+        AppDelegate.calls = PhoneCalls(keyFile: config.calls == true ? config.hotspotKeyFile : nil)
     }
     PrismApp.main()
 

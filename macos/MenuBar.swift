@@ -16,7 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor static var approver: Approver!
     @MainActor static var store: PrismStore!
     @MainActor static var hotspot: Hotspot!
+    @MainActor static var calls: PhoneCalls!
     private var panel: ApprovalPanel?
+    private var callPanel: CallPanel?
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,6 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         approver.start()
         Self.store.start()
         Self.hotspot.start()
+        let calls = Self.calls!
+        let callPanel = CallPanel(calls: calls)
+        calls.onChange = { [weak callPanel] in callPanel?.update() }
+        self.callPanel = callPanel
+        calls.start()
     }
 
     /// A notification about an agent opens its thread in T3 Code.

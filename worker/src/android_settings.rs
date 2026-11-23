@@ -29,7 +29,7 @@ const MAX_BODY: usize = 64 << 10;
 /// The settings the server may hand a phone: every key of the app's
 /// res/xml/app_restrictions.xml except how the phone reaches this server and
 /// NetBird's enrollment, which only enrollment over USB sets.
-const SETTING_KEYS: [&str; 16] = [
+const SETTING_KEYS: [&str; 17] = [
     "relay_url",
     "relay_token",
     "t3_url",
@@ -47,6 +47,7 @@ const SETTING_KEYS: [&str; 16] = [
     "assistant_model",
     "matrix_homeserver",
     "matrix_access_token",
+    "call_mac",
 ];
 
 /// A device's settings as the phone reads them (Go's `AndroidSettings`).

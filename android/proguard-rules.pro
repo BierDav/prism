@@ -11,6 +11,8 @@
 -keep class at.quickme.prism.shell.UserServiceStarter { public static void main(java.lang.String[]); }
 # The hotspot's tool, run the same way by Hotspot.kt (shell/HotspotTool.kt).
 -keep class at.quickme.prism.shell.HotspotTool { public static void main(java.lang.String[]); }
+# A call's bridge to the Mac, run the same way by Calls.kt (shell/CallBridge.kt).
+-keep class at.quickme.prism.shell.CallBridge { public static void main(java.lang.String[]); }
 # Shizuku apps unparcel it by this name (moe/shizuku/api/BinderContainer.kt).
 -keep class moe.shizuku.api.BinderContainer { *; }
 
