@@ -131,8 +131,6 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
-      imagePullSecrets:
-        - name: gitea-registry
       containers:
         - name: prism-worker
           image: prism-worker

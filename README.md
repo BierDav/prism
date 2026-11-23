@@ -429,7 +429,7 @@ push to `main` that changes the cargo workspace (or the workflow):
 Argo CD deploys `deploy/` into `monitoring` through `apps/klaxon.yaml` in
 selfhosted-platform. That repository also owns the `prism-config`
 ConfigMap, the `prism-worker`, `prism-events` (event key), `prism-alerts`,
-`alerting-t3`, `prism-push` and `gitea-registry` Sealed Secrets,
+`alerting-t3` and `prism-push` Sealed Secrets,
 Alertmanager's webhook, the relay's ACL (`manifests/secrets/sudo-relay.yaml`)
 and the T3 credential renewal script (`scripts/setup-alerting-t3.py`).
 
