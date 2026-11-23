@@ -174,7 +174,7 @@ pub async fn process_agent_request(
     now: i64,
     req: &rocky_prism::AgentRequestRow,
 ) -> Result<(), String> {
-    if let Err(err) = check_agent_request(&req) {
+    if let Err(err) = check_agent_request(req) {
         client
             .finish_agent_request(&req.request_id, worker, now, "", "", &err)
             .await

@@ -11,6 +11,76 @@ use rocky_prism::{
 };
 use std::collections::BTreeMap;
 
+/// The tests' own profiles (Prism builds none in): Default, also the
+/// alert-fix profile, Review, the review role's, and Minor.
+async fn default_profile(client: &PrismClient) {
+    let entry = |instance_id: &str, model: &str, share: Option<f64>| PutPlacementEntryInput {
+        instance_id: instance_id.into(),
+        model: model.into(),
+        reasoning: String::new(),
+        enabled: true,
+        session_share_of_weekly: share,
+    };
+    let profiles = [
+        (
+            "default",
+            "Default",
+            vec![
+                entry("agy-pooled", "agy/gemini-4-neon", None),
+                entry("claudeAgent", "claude-david/claude-opus-5-5", Some(13.7)),
+                entry("claudeAgent", "claude-1/claude-opus-5-5", Some(13.2)),
+                entry("claudeAgent", "claude-alex/claude-opus-5-5", Some(25.9)),
+                entry("codex", "codex-david/gpt-6.2-sol", Some(15.5)),
+                entry("codex", "codex-2/gpt-6.2-sol", Some(15.2)),
+            ],
+        ),
+        (
+            "review",
+            "Review",
+            vec![
+                entry("codex", "make/gpt-6.1-sol", None),
+                entry("agy-pooled", "agy/claude-opus-5-5", None),
+                entry("codex", "jetbrains/gpt-6.2-sol", None),
+                entry("codex", "codex-david/gpt-6.2-sol", Some(15.5)),
+                entry("codex", "codex-2/gpt-6.2-sol", Some(15.2)),
+                entry("claudeAgent", "claude-david/claude-opus-5-5", Some(13.7)),
+                entry("claudeAgent", "claude-1/claude-opus-5-5", Some(13.2)),
+                entry("claudeAgent", "claude-alex/claude-opus-5-5", Some(25.9)),
+            ],
+        ),
+        (
+            "minor",
+            "Minor",
+            vec![
+                entry("agy-pooled", "agy/gemini-3.8-flash-high", None),
+                entry("agy-pooled", "agy/claude-opus-4-6-thinking", None),
+                entry("codex", "gh/auto", None),
+            ],
+        ),
+    ];
+    for (id, label, entries) in profiles {
+        client
+            .put_placement_profile(
+                id.into(),
+                PutPlacementProfileRequest {
+                    label: label.into(),
+                    entries,
+                },
+                0,
+            )
+            .await
+            .expect("profile");
+    }
+    client
+        .set_placement_actions(SetPlacementActionsRequest {
+            alert_fix: Some("default".into()),
+            text_generation: None,
+            role_profiles: Some(BTreeMap::from([("review".into(), Some("review".into()))])),
+        })
+        .await
+        .expect("actions");
+}
+
 fn sel(instance_id: &str, model: &str) -> PlacementSelection {
     PlacementSelection {
         instance_id: instance_id.into(),
@@ -653,6 +723,7 @@ async fn test_placement_sync_and_moves() {
     let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
         .await
         .expect("open_or_create");
+    default_profile(&client).await;
     let now = utc_dt(2026, 11, 21, 18, 0, 0).timestamp();
     let resets_at = (utc_dt(2026, 11, 21, 18, 0, 0) + Duration::hours(2))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -823,8 +894,10 @@ async fn test_placement_phone_api() {
         .placement_view("david-server".into(), now)
         .await
         .expect("view");
-    assert_eq!(view.alert_fix_profile, "default");
-    assert_eq!(view.profiles.len(), 3);
+    // Nothing is built in.
+    assert_eq!(view.alert_fix_profile, "");
+    assert!(view.profiles.is_empty());
+    default_profile(&client).await;
 
     // Reject invalid reasoning level.
     let err = client
@@ -871,6 +944,42 @@ async fn test_placement_phone_api() {
     assert_eq!(view.profiles.len(), 4);
     let custom = view.profiles.iter().find(|p| p.id == "custom").unwrap();
     assert_eq!(custom.configured_entry_count, 1);
+
+    // Saving the list the view shows, padded with a disabled model the
+    // profile doesn't name, stores only what the profile names.
+    let padded = |reasoning: &str| PutPlacementProfileRequest {
+        label: "Custom".into(),
+        entries: vec![
+            PutPlacementEntryInput {
+                instance_id: "claudeAgent".into(),
+                model: "claude-david/claude-opus-5-5".into(),
+                reasoning: "high".into(),
+                enabled: true,
+                session_share_of_weekly: None,
+            },
+            PutPlacementEntryInput {
+                instance_id: "codex".into(),
+                model: "codex-david/gpt-6.2-sol".into(),
+                reasoning: reasoning.into(),
+                enabled: false,
+                session_share_of_weekly: None,
+            },
+        ],
+    };
+    client
+        .put_placement_profile("custom".into(), padded(""), now)
+        .await
+        .expect("save padded");
+    let view = client
+        .placement_view("david-server".into(), now)
+        .await
+        .expect("view");
+    let custom = view.profiles.iter().find(|p| p.id == "custom").unwrap();
+    assert_eq!(custom.configured_entry_count, 1);
+    assert_eq!(
+        client.trim_profile_padding(now).await.expect("trim"),
+        Vec::<String>::new()
+    );
 
     // Keep the selected level when a hidden model's reported options change.
     report.models[0].hidden = true;
@@ -973,6 +1082,7 @@ async fn test_placement_full_selection_and_actions() {
     let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
         .await
         .expect("open_or_create");
+    default_profile(&client).await;
     let now = utc_dt(2026, 11, 21, 18, 0, 0).timestamp();
 
     let report = PlacementSyncRequest {

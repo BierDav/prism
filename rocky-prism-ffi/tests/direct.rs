@@ -338,7 +338,8 @@ async fn without_the_workers_the_phone_fixes_starts_and_stops_in_t3() {
     let launches = phone.t3.launches.lock().expect("launches").clone();
     assert_eq!(launches.len(), 1);
     assert_eq!(launches[0]["runtimeMode"], "full-access");
-    assert_eq!(launches[0]["placementProfile"], "default");
+    // No alert-fix profile is set: T3 places it with its own default.
+    assert!(launches[0].get("placementProfile").is_none());
 
     // The same request again is the same launch.
     let (status, _) = phone

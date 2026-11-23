@@ -339,8 +339,9 @@ async fn the_phone_reads_and_acts_through_its_replica() {
     .expect("open provisioned");
 
     // Reads, in the server's shapes.
+    // The alert and its agent are separate rows: wait for both.
     let alerts = eventually(&on_phone, "/v1/alerts?state=open", |b| {
-        b["alerts"].as_array().is_some_and(|a| !a.is_empty())
+        b["alerts"][0]["agents"][0]["state"] == "running"
     })
     .await;
     let alert = &alerts["alerts"][0];
