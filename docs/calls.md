@@ -85,7 +85,7 @@ self-test`): with `hotspot_key` 00..1f, `nm` = 16 × 0xa1 and
 Phone → Mac:
 
 ```json
-{"type": "call", "state": "ringing", "number": "+43…", "name": "…",
+{"type": "call", "state": "ringing", "number": "+…", "name": "…",
  "audio": "phone", "since": 1795465104000}
 ```
 

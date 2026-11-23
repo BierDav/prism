@@ -40,6 +40,7 @@ import android.os.Process
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import at.quickme.prism.core.CallLink
@@ -110,7 +111,16 @@ object CallBridge {
         telecom = context.getSystemService(TelecomManager::class.java)
         audio = context.getSystemService(AudioManager::class.java)
 
-        state = telephony.callState
+        // One listener per SIM: each reports only its own calls. Made here,
+        // after the main looper exists (a PhoneStateListener takes it).
+        val subscriptions = context.getSystemService(SubscriptionManager::class.java)
+            ?.activeSubscriptionInfoList?.map { it.subscriptionId }.orEmpty()
+        for (id in subscriptions.ifEmpty { listOf(SubscriptionManager.DEFAULT_SUBSCRIPTION_ID) }) {
+            val tm = telephony.createForSubscriptionId(id)
+            states[id] = tm.callStateForSubscription
+            listeners += tm to SimListener(id)
+        }
+        state = aggregate()
         if (state == TelephonyManager.CALL_STATE_IDLE) {
             println("no call")
             System.exit(0)
@@ -120,7 +130,7 @@ object CallBridge {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "prism:call")
         wake.acquire(MAX_CALL_MS)
 
-        telephony.listen(callListener, PhoneStateListener.LISTEN_CALL_STATE)
+        for ((tm, listener) in listeners) tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
         audio.addOnModeChangedListener(modes) { mode -> main.post { modeChanged(mode) } }
         Thread(::connectLoop, "call-link").start()
         Log.i(TAG, "bridging the call to $host:$port")
@@ -135,17 +145,31 @@ object CallBridge {
 
     // --- The call ---
 
+    /** Each SIM's call state, on the main thread. */
+    private val states = HashMap<Int, Int>()
+    @Suppress("DEPRECATION")
+    private val listeners = ArrayList<Pair<TelephonyManager, PhoneStateListener>>()
+
     @Suppress("DEPRECATION") // PhoneStateListener: TelephonyCallback has no number
-    private val callListener = object : PhoneStateListener() {
+    private class SimListener(private val id: Int) : PhoneStateListener() {
         @Suppress("OVERRIDE_DEPRECATION")
-        override fun onCallStateChanged(s: Int, phoneNumber: String?) = callChanged(s, phoneNumber)
+        override fun onCallStateChanged(s: Int, phoneNumber: String?) = callChanged(id, s, phoneNumber)
     }
 
-    private fun callChanged(s: Int, phoneNumber: String?) {
+    /** The phone's state over all SIMs: a call in progress, else one ringing, else idle. */
+    private fun aggregate(): Int = when {
+        TelephonyManager.CALL_STATE_OFFHOOK in states.values -> TelephonyManager.CALL_STATE_OFFHOOK
+        TelephonyManager.CALL_STATE_RINGING in states.values -> TelephonyManager.CALL_STATE_RINGING
+        else -> TelephonyManager.CALL_STATE_IDLE
+    }
+
+    private fun callChanged(id: Int, simState: Int, phoneNumber: String?) {
         if (!phoneNumber.isNullOrBlank() && phoneNumber != number) {
             number = phoneNumber
             name = lookup(phoneNumber)
         }
+        states[id] = simState
+        val s = aggregate()
         val was = state
         state = s
         when (s) {

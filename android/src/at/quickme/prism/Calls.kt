@@ -11,9 +11,12 @@
 package at.quickme.prism
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.telephony.TelephonyCallback
+import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import at.quickme.prism.core.CallLink
@@ -32,9 +35,6 @@ object Calls {
 
     @Volatile private var bridging = false
 
-    /** The call state the listener last saw. */
-    @Volatile private var callState = TelephonyManager.CALL_STATE_IDLE
-
     /** Starts following the call state; once per process. */
     @JvmStatic
     @Synchronized
@@ -45,16 +45,23 @@ object Calls {
             Log.i(TAG, "no READ_PHONE_STATE yet; not following calls")
             return
         }
-        val telephony = app.getSystemService(TelephonyManager::class.java) ?: return
-        telephony.registerTelephonyCallback(app.mainExecutor, Listener(app))
+        // The broadcast covers every SIM; a TelephonyCallback sees only one.
+        app.registerReceiver(object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
+                if (state == TelephonyManager.EXTRA_STATE_RINGING || state == TelephonyManager.EXTRA_STATE_OFFHOOK) bridge(app)
+            }
+        }, IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED), Context.RECEIVER_EXPORTED)
         watching = true
+        // A call that is already going on.
+        if (inCall(app)) bridge(app)
     }
 
-    private class Listener(private val app: Context) : TelephonyCallback(), TelephonyCallback.CallStateListener {
-        override fun onCallStateChanged(state: Int) {
-            callState = state
-            if (state != TelephonyManager.CALL_STATE_IDLE) bridge(app)
-        }
+    /** A call rings or goes on, on any SIM. */
+    private fun inCall(c: Context): Boolean = try {
+        c.getSystemService(TelecomManager::class.java)?.isInCall == true
+    } catch (e: SecurityException) {
+        false
     }
 
     /** The Mac's host and port from call_mac ("host" or "host:port"), or null. */
@@ -110,7 +117,7 @@ object Calls {
             } catch (e: IOException) {
                 Log.w(TAG, "bridge: ${e.message}")
             }
-            if (callState == TelephonyManager.CALL_STATE_IDLE) return
+            if (!inCall(c)) return
             Thread.sleep(1_000)
         }
         Log.w(TAG, "the bridge kept dying; giving up on this call")
