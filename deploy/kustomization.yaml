@@ -11,6 +11,6 @@ resources:
   - worker.yaml
 images:
   - name: prism-worker
-    newName: gitea.quickme.at/david-cluster-1/prism-worker
-    newTag: c57e01654a4ee92969c4558bf92503ab8e3c1ddd-4131
-    digest: sha256:e140236bcd0bec2900ee938d77d832d35dadb46974c43be22a94ada33abdb52e
+    newName: ghcr.io/bierdav/prism-worker
+    newTag: f8872ebfb457a5c0e7f2ada927c2d7802c712fec-45281036730
+    digest: sha256:2152903fd4fae095234a2d760a2aa9c421bc8082f5e66eee5f6f8947d848fa72
