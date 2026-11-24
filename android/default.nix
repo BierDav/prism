@@ -593,7 +593,7 @@ in
         kotlinc -jvm-target 17 -Werror -d classes \
           -Xplugin=${kotlin}/lib/kotlinx-serialization-compiler-plugin.jar \
           -classpath ${serializationJars} \
-          $(find src -name '*.kt') $(find tests -name '*.kt')
+          $(find src -name '*.kt') $(find tests -path tests/live -prune -o -name '*.kt' -print)
         run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar:${serializationJars} "$@"; }
         run CoreTestKt
         run AssistantTestKt

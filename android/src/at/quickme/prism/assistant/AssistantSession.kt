@@ -1,0 +1,238 @@
+// The overlay's assistant conversation: the transcript it shows, the
+// harness's history behind it, and what the owner does on the cards. It
+// lives as long as the overlay; the conversation (transcript and history,
+// tool results included) is kept on the phone for the overlay's resume
+// window, so reopening within ten minutes continues it.
+//
+// Without assistant_api_key it isn't configured, and the overlay starts T3
+// agents directly, as before the assistant.
+
+package at.quickme.prism.assistant
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import at.quickme.prism.Settings
+import at.quickme.prism.assistant.core.Entry
+import at.quickme.prism.assistant.core.Event
+import at.quickme.prism.assistant.core.HandoffCard
+import at.quickme.prism.assistant.core.MessageCard
+import at.quickme.prism.assistant.core.SystemPrompt
+import at.quickme.prism.assistant.core.Transcript
+import ai.koog.prompt.message.Message
+import android.util.Log
+import java.io.ByteArrayOutputStream
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+
+class AssistantSession(
+    private val context: Context,
+    private val capture: ScreenCapture = ScreenCapture.None,
+) {
+    private val app = context.applicationContext
+    private val memory = AssistantMemory(app)
+
+    /** Whether the assistant can run: the gateway has a key. */
+    val configured: Boolean get() = Settings.assistantApiKey(app).isNotEmpty()
+
+    var transcript by mutableStateOf(memory.transcript())
+        private set
+
+    /** A turn is running. */
+    var running by mutableStateOf(false)
+        private set
+
+    private var history: List<Message> = memory.history()
+    private var notes = ArrayList<String>()
+
+    /** The T3 agent the overlay follows (its ID and title), for the model's context. */
+    var followed: () -> Pair<String, String>? = { null }
+
+    /** A hand-off happened: the overlay follows its agent ([HandoffCard.agentId] empty while it starts). */
+    var onHandoff: (entryId: String, card: HandoffCard) -> Unit = { _, _ -> }
+
+    private val matrix get() = MatrixClient(Settings.matrixHomeserver(app), Settings.matrixAccessToken(app))
+    private var matrixClient: MatrixClient? = null
+
+    private fun harness(): Harness {
+        val m = matrix.also { matrixClient = it }
+        return Harness(
+            Gateway(Settings.assistantUrl(app), Settings.assistantApiKey(app), Settings.assistantModel(app), Settings.deviceName(app)),
+            tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app),
+            systemPrompt = {
+                SystemPrompt.build(
+                    SystemPrompt.Context(
+                        now = ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy, HH:mm", Locale.ENGLISH)),
+                        timeZone = ZonedDateTime.now().zone.id,
+                        device = Settings.deviceName(app),
+                        battery = batteryText(app),
+                        matrix = m.configured,
+                        followedAgent = followed(),
+                    ),
+                )
+            },
+            prepareImage = ::scaleImage,
+        )
+    }
+
+    /**
+     * One turn: [text] and [attachments] to the assistant, the transcript
+     * updated as it works. Returns when the turn ended (or failed: the
+     * transcript says why).
+     */
+    suspend fun send(text: String, attachments: List<AssistAttachment> = emptyList()) {
+        if (running) return
+        running = true
+        val note = notes.joinToString(" ")
+        notes.clear()
+        val harness = harness()
+        try {
+            history = harness.run(
+                history, text, attachments,
+                emit = { e -> withContext(Dispatchers.Main) { apply(e) } },
+                saved = { history = it; save() },
+                note = note,
+            )
+        } catch (e: CancellationException) {
+            transcript = transcript.settled()
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "assistant turn failed", e)
+            transcript = transcript.settled().after(Event.Failed(problem(e)))
+        } finally {
+            running = false
+            save()
+            harness.close()
+        }
+    }
+
+    private fun apply(e: Event) {
+        transcript = transcript.after(e)
+        if (e is Event.ToolFinished && e.card is HandoffCard) {
+            val id = transcript.entries.last { it is Entry.Shown && it.card == e.card }.id
+            onHandoff(id, e.card)
+        }
+        save()
+    }
+
+    /** The hand-off of entry [entryId] now has its agent (it was still starting). */
+    fun started(entryId: String, agentId: String, title: String) {
+        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? HandoffCard ?: return
+        transcript = transcript.withCard(entryId, card.copy(agentId = agentId, title = title.ifEmpty { card.title }))
+        save()
+    }
+
+    /**
+     * The owner changed the message of entry [entryId] by hand: a Matrix
+     * message is edited in place (m.replace); the model hears of it in the
+     * next turn. Returns why it failed, or null.
+     */
+    suspend fun edit(entryId: String, text: String): String? {
+        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? MessageCard
+            ?: return "That message is gone."
+        if (!card.editable) return "An SMS can't be changed once sent. Ask Prism to send a correction."
+        val body = text.trim()
+        if (body.isEmpty() || body == card.text) return null
+        return try {
+            (matrixClient ?: matrix).edit(card.address, card.eventId, body)
+            transcript = transcript.withCard(entryId, card.copy(text = body, edited = true))
+            notes.add("The owner edited the Matrix message to ${card.to} (event ${card.eventId}) by hand; it now says: \"$body\".")
+            save()
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            problem(e)
+        }
+    }
+
+    /** A new conversation: nothing of this one is kept. */
+    fun clear() {
+        transcript = Transcript()
+        history = emptyList()
+        notes.clear()
+        memory.forget()
+    }
+
+    private fun save() {
+        memory.save(transcript, history)
+    }
+
+    private fun problem(e: Exception): String {
+        val m = e.message.orEmpty()
+        return when {
+            "401" in m || "403" in m -> "The gateway refused the assistant's key (assistant_api_key)."
+            "Status code: 5" in m -> "The model's gateway had a problem. Try again in a moment."
+            e is java.io.IOException || e.cause is java.io.IOException -> "No connection to the model's gateway."
+            else -> "The assistant failed: ${m.lineSequence().firstOrNull().orEmpty().take(200)}"
+        }
+    }
+
+    private companion object {
+        const val TAG = "PrismAssistant"
+    }
+}
+
+/** Images go to the model at most 1600 px on their long side, as JPEG. */
+internal fun scaleImage(a: AssistAttachment): AssistAttachment {
+    if (!a.isImage || a.mimeType == "image/gif") return a
+    return runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(a.bytes, 0, a.bytes.size, bounds)
+        val long = maxOf(bounds.outWidth, bounds.outHeight)
+        if (long <= 0) return a
+        if (long <= MAX_IMAGE && a.bytes.size <= 1_500_000) return a
+        var sample = 1
+        while (long / (sample * 2) >= MAX_IMAGE) sample *= 2
+        val decoded = BitmapFactory.decodeByteArray(a.bytes, 0, a.bytes.size, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return a
+        val scale = minOf(1f, MAX_IMAGE.toFloat() / maxOf(decoded.width, decoded.height))
+        val bitmap = if (scale < 1f) Bitmap.createScaledBitmap(decoded, (decoded.width * scale).toInt(), (decoded.height * scale).toInt(), true) else decoded
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        AssistAttachment(out.toByteArray(), "image/jpeg", a.name, a.screenshot)
+    }.getOrDefault(a)
+}
+
+private const val MAX_IMAGE = 1600
+
+/** The conversation on the phone, for the resume window. */
+internal class AssistantMemory(context: Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("assistant", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
+
+    private fun fresh() = System.currentTimeMillis() - prefs.getLong(AT, 0L) <= RESUME_MS
+
+    fun transcript(): Transcript = if (!fresh()) Transcript() else
+        runCatching { json.decodeFromString(Transcript.serializer(), prefs.getString(TRANSCRIPT, null) ?: return Transcript()) }
+            .getOrDefault(Transcript()).settled()
+
+    fun history(): List<Message> = if (!fresh()) emptyList() else Harness.decode(prefs.getString(HISTORY, null) ?: return emptyList())
+
+    fun save(transcript: Transcript, history: List<Message>) {
+        prefs.edit()
+            .putString(TRANSCRIPT, json.encodeToString(Transcript.serializer(), transcript))
+            .putString(HISTORY, Harness.encode(history))
+            .putLong(AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun forget() {
+        prefs.edit().remove(TRANSCRIPT).remove(HISTORY).remove(AT).apply()
+    }
+
+    private companion object {
+        const val TRANSCRIPT = "harness_transcript"
+        const val HISTORY = "harness_history"
+        const val AT = "harness_at"
+        /** As the overlay's own (AssistMemory): ten minutes. */
+        const val RESUME_MS = 10 * 60 * 1000L
+    }
+}

@@ -38,6 +38,17 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- The assistant's tools (src/at/quickme/prism/assistant/PhoneTools.kt):
+         calls placed and texts sent without asking, texts, contacts and the
+         calendar read to answer, alarms and timers in the clock app, Do Not
+         Disturb. The runtime ones Prism grants itself as the Device Owner. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
     <!-- Also on Android TV, which has neither a touchscreen nor
          a phone's hardware; the TV opens Prism from its home screen
@@ -52,6 +63,18 @@
         <!-- Google's speech recognizer for the assistant's voice input (Voice.kt). -->
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- The apps the assistant opens by name, and what opens a link,
+             directions or the clock (assistant/PhoneTools.kt). -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_TIMER" />
         </intent>
     </queries>
 
