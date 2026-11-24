@@ -5,6 +5,12 @@
 //   PRISM_CALL_KEY=<K, 64 hex> app_process -Djava.class.path=<Prism's APK> \
 //     /system/bin at.quickme.prism.shell.CallBridge HOST [PORT]
 //
+//   app_process ... at.quickme.prism.shell.CallBridge --data-during-calls
+//
+// turns on "Mobile data during calls" for every SIM but the one with mobile
+// data, and exits (dataDuringCalls()); Calls.kt runs it when it starts
+// following calls, and the bridge again at each call.
+//
 // It connects to the Mac (core/CallLink.kt): at HOST (its NetBird name), and
 // at once directly at every device on the phone's own networks (its
 // hotspot from the tethering module's clients, its hotspot and Wi-Fi from the
@@ -119,6 +125,13 @@ object CallBridge {
     fun main(args: Array<String>) {
         Looper.prepareMainLooper()
         main = Handler(Looper.getMainLooper())
+        if (args.getOrNull(0) == "--data-during-calls") {
+            Hidden.initMainlineModules()
+            context = Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
+            telephony = Hidden.manager(TelephonyManager::class.java, Hidden.shellContext(context))
+            println(dataDuringCalls())
+            System.exit(0)
+        }
         host = args.getOrNull(0) ?: usage()
         port = args.getOrNull(1)?.toIntOrNull() ?: CallLink.PORT
         key = System.getenv("PRISM_CALL_KEY")?.let { HotspotToken.parseKey(it) } ?: usage()
@@ -140,6 +153,7 @@ object CallBridge {
             states[id] = tm.callStateForSubscription
             listeners += tm to SimListener(id)
         }
+        Log.i(TAG, dataDuringCalls())
         state = aggregate()
         if (state == TelephonyManager.CALL_STATE_IDLE) {
             println("no call")
@@ -156,6 +170,43 @@ object CallBridge {
         Thread(::connectLoop, "call-link").start()
         Log.i(TAG, "bridging the call to $host:$port")
         Looper.loop()
+    }
+
+    /** TelephonyManager.MOBILE_DATA_POLICY_DATA_ON_NON_DEFAULT_DURING_VOICE_CALL (system API). */
+    private const val DATA_DURING_CALLS = 1
+
+    /**
+     * Turns on "Mobile data during calls" (Settings, a SIM's page) for every
+     * active SIM but the one with mobile data: with two SIMs, a call on the
+     * other stops mobile data otherwise, and with it the connection to the
+     * Mac over NetBird; with it, data moves to the calling SIM for the call.
+     * The shell holds MODIFY_PHONE_STATE, which setMobileDataPolicyEnabled
+     * (a system API) takes. Returns what it did, for the log.
+     */
+    private fun dataDuringCalls(): String {
+        val data = SubscriptionManager.getDefaultDataSubscriptionId()
+        val subs = try {
+            context.getSystemService(SubscriptionManager::class.java)?.activeSubscriptionInfoList
+                ?.map { it.subscriptionId }.orEmpty()
+        } catch (e: RuntimeException) {
+            return "data during calls: no SIMs: $e"
+        }
+        val done = ArrayList<String>()
+        for (id in subs) {
+            if (id == data) continue
+            val tm = telephony.createForSubscriptionId(id)
+            try {
+                if (Hidden.call(tm, "isMobileDataPolicyEnabled", DATA_DURING_CALLS) == true) {
+                    done += "SIM $id already"
+                } else {
+                    Hidden.call(tm, "setMobileDataPolicyEnabled", DATA_DURING_CALLS, true)
+                    done += "SIM $id on"
+                }
+            } catch (e: Throwable) {
+                done += "SIM $id: $e"
+            }
+        }
+        return "data during calls: " + done.ifEmpty { listOf("one SIM") }.joinToString(", ")
     }
 
     private fun usage(): Nothing {

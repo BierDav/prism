@@ -54,7 +54,27 @@ object Calls {
         }, IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED), Context.RECEIVER_EXPORTED)
         watching = true
         // A call that is already going on.
-        if (inCall(app)) bridge(app)
+        if (inCall(app)) bridge(app) else if (mac(app) != null) Thread({ dataDuringCalls(app) }, "calls-data").start()
+    }
+
+    /**
+     * Turns on "Mobile data during calls" for the SIMs without mobile data
+     * (CallBridge --data-during-calls), so a call on one of them doesn't cut
+     * the way to the Mac.
+     */
+    private fun dataDuringCalls(c: Context) {
+        if (!Shell.available()) return
+        val apk = c.applicationInfo.sourceDir
+        try {
+            val r = Shell.run(
+                30_000, "/system/bin/env", "CLASSPATH=$apk",
+                "/system/bin/app_process", "-Djava.class.path=$apk", "/system/bin", "--nice-name=prism_call",
+                CallBridge::class.java.name, "--data-during-calls",
+            )
+            Log.i(TAG, r.stdout.trim().lineSequence().lastOrNull() ?: "data during calls: $r")
+        } catch (e: IOException) {
+            Log.w(TAG, "data during calls: ${e.message}")
+        }
     }
 
     /** A call rings or goes on, on any SIM. */
