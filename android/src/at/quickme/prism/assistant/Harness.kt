@@ -53,6 +53,7 @@ import at.quickme.prism.assistant.core.Event
 import at.quickme.prism.assistant.core.Tools
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -157,8 +158,11 @@ class Harness(
         // The latest output of each tool call, by the tool that made it: tools
         // run one after another, so the one that just ran wrote it.
         var last: ToolOutput? = null
+        // Why the last tool call failed, as the tool said it (Koog wraps it
+        // in "Tool with name … failed to execute due to the error: …").
+        var why: String? = null
         val registry = ToolRegistry {
-            for (t in tools) tool(KoogTool(t) { last = it })
+            for (t in tools) tool(KoogTool(t, { last = it }, { why = it }))
         }
         var progress = sanitize(history)
         val strategy = functionalStrategy<Turn, List<Message>>("prism-assistant") { turn ->
@@ -179,9 +183,10 @@ class Harness(
                     val args = runCatching { call.argsJson }.getOrDefault(JsonObject(emptyMap()))
                     emit(Event.ToolStarted(callId, call.tool, Tools.label(call.tool, args)))
                     last = null
+                    why = null
                     val result = executeTool(call)
                     val output = last?.takeIf { result.resultKind is ToolResultKind.Success }
-                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: result.output, output?.card, failed = output == null))
+                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: why ?: result.output, output?.card, failed = output == null))
                     result to output?.image
                 }
                 val images = results.mapNotNull { it.second }.map(prepareImage)
@@ -255,6 +260,7 @@ class Harness(
     private class KoogTool(
         val tool: AssistantTool,
         val ran: (ToolOutput) -> Unit,
+        val failed: (String) -> Unit,
     ) : Tool<JsonObject, ToolOutput>(
         argsType = typeToken<JsonObject>(),
         resultType = typeToken<String>(),
@@ -262,7 +268,14 @@ class Harness(
     ) {
         override fun decodeArgs(rawArgs: JSONObject, serializer: JSONSerializer): JsonObject = rawArgs.toKotlinxJsonObject()
 
-        override suspend fun execute(args: JsonObject): ToolOutput = tool.run(Args(args)).also(ran)
+        override suspend fun execute(args: JsonObject): ToolOutput = try {
+            tool.run(Args(args)).also(ran)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            e.message?.takeIf { it.isNotBlank() }?.let(failed)
+            throw e
+        }
 
         override fun encodeResult(result: ToolOutput, serializer: JSONSerializer): JSONElement = JSONPrimitive(result.text)
 

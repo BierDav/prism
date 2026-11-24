@@ -152,7 +152,14 @@ fun AssistantTranscript(
     val entries = transcript.entries
     val handoff = transcript.latestHandoff()?.first
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
-        if (entries.isNotEmpty()) list.animateScrollToItem(entries.size)
+        if (entries.isEmpty()) return@LaunchedEffect
+        // To the end of the last item, also once the card has grown to fit
+        // what was added (animateContentSize): a list scrolled past its end
+        // stops at it.
+        repeat(2) {
+            list.scrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 100_000)
+            delay(400)
+        }
     }
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.62f).dp
     Surface(
