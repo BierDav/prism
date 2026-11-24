@@ -75,11 +75,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /** Runtime permissions as the Device Owner grants them to itself. */
 internal object Grants {
+    private val RESTRICTED = setOf(Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS)
+
     /** Grants what is missing of [permissions]; throws with what is still missing. */
     fun require(c: Context, vararg permissions: String) {
         val missing = permissions.filter { c.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isEmpty()) return
         if (Dpc.owner(c)) {
+            // SMS permissions are hard-restricted: granted only once the
+            // installer (Prism updates itself) exempts them.
+            for (p in missing) if (p in RESTRICTED) runCatching {
+                c.packageManager.addWhitelistedRestrictedPermission(c.packageName, p, PackageManager.FLAG_PERMISSION_WHITELIST_INSTALLER)
+            }
             val dpm = c.getSystemService(DevicePolicyManager::class.java)
             for (p in missing) runCatching {
                 dpm.setPermissionGrantState(Dpc.admin(c), c.packageName, p, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)
@@ -99,7 +106,7 @@ private fun Context.launch(intent: Intent) {
 
 /** Contacts and the numbers they have. */
 internal class Contacts(private val c: Context) {
-    data class Found(val name: String, val number: String, val type: Int, val label: String)
+    data class Found(val name: String, val number: String, val type: Int, val label: String, val contactId: Long = 0)
 
     fun search(query: String, limit: Int = 20): List<Found> {
         Grants.require(c, Manifest.permission.READ_CONTACTS)
@@ -112,6 +119,7 @@ internal class Contacts(private val c: Context) {
                 ContactsContract.CommonDataKinds.Phone.NUMBER,
                 ContactsContract.CommonDataKinds.Phone.TYPE,
                 ContactsContract.CommonDataKinds.Phone.LABEL,
+                ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
             ),
             null, null, null,
         )?.use { cur ->
@@ -120,7 +128,8 @@ internal class Contacts(private val c: Context) {
                 val number = cur.getString(1) ?: continue
                 val type = cur.getInt(2)
                 val label = ContactsContract.CommonDataKinds.Phone.getTypeLabel(c.resources, type, cur.getString(3)).toString()
-                if (out.none { it.name == name && PhoneNumbers.same(it.number, number) }) out.add(Found(name, number, type, label))
+                val contactId = cur.getLong(4)
+                if (out.none { it.contactId == contactId && PhoneNumbers.same(it.number, number) }) out.add(Found(name, number, type, label, contactId))
             }
         }
         return out
@@ -147,13 +156,16 @@ internal class Contacts(private val c: Context) {
         val found = search(to)
         if (found.isEmpty()) throw ToolArgumentException("No contact matches \"$to\". Ask the owner for the number.")
         val exact = found.filter { it.name.equals(to.trim(), ignoreCase = true) }
-        val people = (exact.ifEmpty { found }).groupBy { it.name }
+        // Per contact, not per name: two people can share one.
+        val people = (exact.ifEmpty { found }).groupBy { it.contactId }
         if (people.size > 1) {
             throw ToolArgumentException(
-                "Several contacts match \"$to\": " + people.keys.joinToString(", ") + ". Ask the owner which one.",
+                "Several contacts match \"$to\": " + people.values.joinToString(", ") { p -> p[0].name + " (" + p.joinToString(", ") { it.number } + ")" } +
+                    ". Ask the owner which one.",
             )
         }
-        val (name, numbers) = people.entries.first()
+        val numbers = people.values.first()
+        val name = numbers[0].name
         val mobiles = numbers.filter { it.type == ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE }
         val pick = when {
             numbers.size == 1 -> numbers[0]
@@ -248,9 +260,10 @@ internal fun phoneTools(c: Context, capture: ScreenCapture): List<AssistantTool>
                 Grants.require(c, Manifest.permission.SEND_SMS)
                 val text = args.string("text")
                 val (name, number) = withContext(Dispatchers.IO) { contacts.resolve(args.string("to")) }
-                sendSms(c, number, text)
+                val confirmed = sendSms(c, number, text)
                 return ToolOutput(
-                    "Sent to $name ($number). It can't be edited; send a correction if needed.",
+                    if (confirmed) "Sent to $name ($number). It can't be edited; send a correction if needed."
+                    else "Handed to the radio for $name ($number), not yet confirmed as sent; it will most likely go out. Don't send it again.",
                     MessageCard(MessageCard.SMS, name, number, text, at = System.currentTimeMillis()),
                 )
             }
@@ -426,8 +439,11 @@ internal fun phoneTools(c: Context, capture: ScreenCapture): List<AssistantTool>
     )
 }
 
-/** Sends [text] to [number] and waits until the radio took every part. */
-private suspend fun sendSms(c: Context, number: String, text: String) {
+/**
+ * Sends [text] to [number] and waits until the radio took every part; false
+ * when it didn't say within a minute (it may still go out: never resend).
+ */
+private suspend fun sendSms(c: Context, number: String, text: String): Boolean {
     val sms = c.getSystemService(SmsManager::class.java) ?: throw IllegalStateException("this phone can't send SMS")
     val parts = sms.divideMessage(text)
     val action = "at.quickme.prism.SMS_SENT." + UUID.randomUUID()
@@ -458,8 +474,8 @@ private suspend fun sendSms(c: Context, number: String, text: String) {
                 if (cont.isActive) cont.resume(listOf(-1000))
             }
         }
-    } ?: throw IllegalStateException("the SMS wasn't confirmed as sent within a minute; it may still go out")
-    val bad = results.firstOrNull { code -> code != Activity.RESULT_OK } ?: return
+    } ?: return false
+    val bad = results.firstOrNull { code -> code != Activity.RESULT_OK } ?: return true
     throw IllegalStateException(
         when (bad) {
             SmsManager.RESULT_ERROR_RADIO_OFF -> "the SMS wasn't sent: the phone's radio is off (airplane mode?)"
@@ -556,16 +572,15 @@ private fun setVolume(c: Context, args: Args): ToolOutput {
 
 private suspend fun setDnd(c: Context, on: Boolean) {
     val nm = c.getSystemService(NotificationManager::class.java)
-    if (!nm.isNotificationPolicyAccessGranted && Shell.available()) {
-        withContext(Dispatchers.IO) { Shell.run(10_000, "cmd", "notification", "allow_dnd", c.packageName) }
+    // The phone's own Do Not Disturb, through the shell: since Android 15
+    // an app's interruption filter only switches its own rule.
+    if (Shell.available()) {
+        val r = withContext(Dispatchers.IO) { Shell.run(10_000, "cmd", "notification", "set_dnd", if (on) "priority" else "off") }
+        if (r.ok()) return
     }
     if (nm.isNotificationPolicyAccessGranted) {
         nm.setInterruptionFilter(if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL)
         return
-    }
-    if (Shell.available()) {
-        val r = withContext(Dispatchers.IO) { Shell.run(10_000, "cmd", "notification", "set_dnd", if (on) "priority" else "off") }
-        if (r.ok()) return
     }
     throw IllegalStateException("Prism may not switch Do Not Disturb: it has no notification policy access and the shell isn't running")
 }

@@ -19,7 +19,7 @@ import kotlinx.serialization.json.putJsonObject
 
 object Matrix {
     /** A joined room: its ID, its name as a client would show it, whether it is a direct chat. */
-    data class Room(val id: String, val name: String, val direct: Boolean = false, val lastActive: Long = 0)
+    data class Room(val id: String, val name: String, val direct: Boolean = false, val lastActive: Long = 0, val encrypted: Boolean = false)
 
     /** A text message in a room, edits applied. */
     data class Message(val eventId: String, val sender: String, val senderName: String, val text: String, val at: Long, val edited: Boolean = false)
@@ -40,7 +40,7 @@ object Matrix {
             putJsonObject("room") {
                 putJsonObject("timeline") { put("limit", 1) }
                 putJsonObject("state") {
-                    put("types", JsonArray(listOf("m.room.name", "m.room.canonical_alias", "m.room.member").map(::JsonPrimitive)))
+                    put("types", JsonArray(listOf("m.room.name", "m.room.canonical_alias", "m.room.member", "m.room.encryption").map(::JsonPrimitive)))
                     put("lazy_load_members", true)
                 }
                 putJsonObject("ephemeral") { put("not_types", JsonArray(listOf(JsonPrimitive("*")))) }
@@ -114,7 +114,7 @@ object Matrix {
                 ?: id
             val last = room.obj("timeline")?.arr("events").orEmpty().mapNotNull { (it as? JsonObject)?.long("origin_server_ts") }.maxOrNull() ?: 0
             val isDirect = id in direct || (heroes.size == 1 && stateContent("m.room.name") == null)
-            Room(id, name, isDirect, last)
+            Room(id, name, isDirect, last, encrypted = stateContent("m.room.encryption") != null)
         }.sortedByDescending { it.lastActive }
     }
 

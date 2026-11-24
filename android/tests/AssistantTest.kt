@@ -53,7 +53,7 @@ private const val FORECAST = """{"latitude":48.19,"longitude":16.36,"timezone":"
 private const val SYNC = """{"next_batch":"s1",
  "account_data":{"events":[{"type":"m.direct","content":{"@anna:example.org":["!dm:example.org"]}}]},
  "rooms":{"join":{
-   "!team:example.org":{"summary":{},"state":{"events":[{"type":"m.room.name","state_key":"","content":{"name":"Team"}}]},
+   "!team:example.org":{"summary":{},"state":{"events":[{"type":"m.room.name","state_key":"","content":{"name":"Team"}},{"type":"m.room.encryption","state_key":"","content":{"algorithm":"m.megolm.v1.aes-sha2"}}]},
      "timeline":{"events":[{"type":"m.room.message","event_id":"${'$'}t1","sender":"@bob:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"hi"}}]}},
    "!dm:example.org":{"summary":{"m.heroes":["@anna:example.org"]},"state":{"events":[{"type":"m.room.member","state_key":"@anna:example.org","content":{"membership":"join","displayname":"Anna"}}]},
      "timeline":{"events":[{"type":"m.room.message","event_id":"${'$'}d1","sender":"@anna:example.org","origin_server_ts":5000,"content":{"msgtype":"m.text","body":"see you"}}]}}
@@ -119,6 +119,7 @@ fun main() {
     val rooms = Matrix.decodeRooms(SYNC, "@me:example.org")
     check(rooms.map { it.name } == listOf("Anna", "Team"), "rooms by activity, a direct chat named by its member: ${rooms.map { it.name }}")
     check(rooms.first().direct && !rooms.last().direct, "m.direct marks direct chats")
+    check(rooms.last().encrypted && !rooms.first().encrypted, "m.room.encryption marks an encrypted room")
     check(Matrix.find(rooms, "team").single().id == "!team:example.org", "a room by name")
     check(Matrix.find(rooms, "!dm:example.org").single().name == "Anna", "a room by ID")
     check(Matrix.find(rooms, "nobody").isEmpty(), "no room")

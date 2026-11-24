@@ -186,7 +186,7 @@ class Harness(
                 }
                 val images = results.mapNotNull { it.second }.map(prepareImage)
                 rounds++
-                response = llm.writeSession {
+                llm.writeSession {
                     appendPrompt {
                         user {
                             results.forEach { (result, _) -> toolResult(result.toMessagePart()) }
@@ -196,6 +196,11 @@ class Harness(
                             }
                         }
                     }
+                }
+                // Kept before the next request: an SMS sent stays sent even
+                // if that request fails or the overlay closes meanwhile.
+                remember()
+                response = llm.writeSession {
                     // Enough rounds: the model answers with what it has.
                     if (rounds >= MAX_ROUNDS) requestLLMWithoutTools() else requestLLM()
                 }

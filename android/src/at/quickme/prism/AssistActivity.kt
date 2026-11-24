@@ -79,6 +79,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
@@ -243,7 +244,7 @@ class AssistActivity : ComponentActivity(), OverlayWindow {
                     onClose = ::close,
                     unlock = ::unlock,
                     capture = capture,
-                    onExternal = { awaitingResult = true },
+                    onExternal = { awaitingResult = it },
                 )
                 }
             }
@@ -405,7 +406,8 @@ private fun Assist(
     unlock: suspend () -> Boolean,
     capture: PhoneScreenCapture,
     /** Before a picker or the camera opens over the overlay. */
-    onExternal: () -> Unit,
+    /** A picker or the camera is about to cover the overlay (true), or couldn't (false). */
+    onExternal: (Boolean) -> Unit,
 ) {
     // Milliseconds since the overlay appeared, to the glow's end.
     val clock = remember { Animatable(if (reducedMotion) GLOW_MS else 0f) }
@@ -498,10 +500,11 @@ private fun Assist(
                 return@launch
             }
             sendError = null
-            onExternal()
+            onExternal(true)
             try {
                 open()
             } catch (e: android.content.ActivityNotFoundException) {
+                onExternal(false)
                 sendError = "No app on this phone can do that."
             }
         }
@@ -564,6 +567,7 @@ private fun Assist(
         starting = null
         activity = AgentActivity(agent)
         agentId = agent.id
+        memory.started()
         memory.conversation(agent.id)
         handoffEntry?.let { session.started(it, agent.id, agent.title) }
     }
@@ -586,19 +590,32 @@ private fun Assist(
     session.onHandoff = ::handedOff
     session.followed = { agentId?.let { it to (activity?.agent?.displayTitle ?: agentTitle) } }
 
-    // Reopened while a hand-off was still starting: keep asking for its agent.
+    // Reopened while a start was still waiting for the leader: keep asking
+    // for its agent (it is newer than any agent followed before it).
     LaunchedEffect(Unit) {
-        val (_, card) = session.transcript.latestHandoff() ?: return@LaunchedEffect
-        if (card.agentId.isEmpty() && card.requestId.isNotEmpty() && agentId == null && starting == null) {
+        if (starting != null) return@LaunchedEffect
+        val (entry, card) = session.transcript.latestHandoff() ?: (null to null)
+        if (card != null && card.agentId.isEmpty() && card.requestId.isNotEmpty()) {
+            handoffEntry = entry
+            agentId = null
             starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+            return@LaunchedEffect
+        }
+        val (id, request, project) = memory.starting() ?: return@LaunchedEffect
+        if (!session.configured) {
+            agentId = null
+            agentTitle = request
+            pending.add(request)
+            starting = AssistantRequest(id, AUTO, AssistantProfile.model(context), project, request)
         }
     }
 
     // A start still waiting for the leader: ask again until it ran.
     LaunchedEffect(starting) {
         val request = starting ?: return@LaunchedEffect
+        var wait = 2000L
         while (true) {
-            delay(2000)
+            delay(wait)
             try {
                 val agent = PrismApi.call(context) {
                     startAgent("do", request.target, request.text, request.id, request.model, request.project)
@@ -608,10 +625,20 @@ private fun Assist(
                     return@LaunchedEffect
                 }
                 activity = AgentActivity(agent)
+                activityError = null
+                wait = 2000L
             } catch (e: PrismError) {
+                // The request's own refusal ends it; anything else (no
+                // replica, the workers busy) is asked again, more slowly.
+                if (e.status in 400..499 && e.status != 408 && e.status != 429) {
+                    starting = null
+                    memory.started()
+                    activity = null
+                    sendError = e.message
+                    return@LaunchedEffect
+                }
                 activityError = e.message
-                starting = null
-                return@LaunchedEffect
+                wait = minOf(wait * 2, 15_000L)
             }
         }
     }
@@ -744,6 +771,7 @@ private fun Assist(
                 agentTitle = request.ifEmpty { payload.attachments.firstOrNull()?.name.orEmpty() }
                 if (agent.id.isNotEmpty()) follow(agent) else {
                     activity = AgentActivity(agent)
+                    memory.starting(payload.id, payload.text, payload.project)
                     starting = payload
                 }
             } catch (e: PrismError) {
@@ -908,7 +936,8 @@ private fun Assist(
             onWave = ::listenToEdit,
             attachments = attached,
             onRemove = { attached.remove(it) },
-            attach = attachActions,
+            // Only the assistant reads attachments; a T3 agent gets text.
+            attach = if (session.configured) attachActions else null,
             menuOpen = menuOpen,
             onMenu = { menuOpen = it },
             onCard = { plate = it },
@@ -947,12 +976,14 @@ private fun Assist(
                     shape = ConversationShape,
                     onOpen = if (activity?.agent?.link != null || activity?.agent?.t3 != null) ::openThread else null,
                     onStop = ::stopAgent,
+                    onNew = ::newRequest,
                     modifier = Modifier.fillMaxWidth().chipEnter(0),
                 )
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).union(WindowInsets.statusBars))
+                .padding(top = 8.dp)
                 // Gemini's card: 40 dp from the sides (less on a narrow phone), 8 dp from the bottom, at most 696 dp wide.
                 .padding(horizontal = margin)
                 .padding(bottom = 8.dp)
@@ -1066,10 +1097,34 @@ internal class AssistMemory(context: Context) {
     }
 
     fun forgetConversation() {
-        prefs.edit().remove(CONVERSATION).remove(CONVERSATION_AT).apply()
+        prefs.edit().remove(CONVERSATION).remove(CONVERSATION_AT).remove(STARTING).apply()
+    }
+
+    /** A direct start the leader hadn't run yet when the overlay closed: its request ID, text and project. */
+    fun starting(): Triple<String, String, String>? {
+        if (System.currentTimeMillis() - prefs.getLong(CONVERSATION_AT, 0L) > RESUME_MS) return null
+        return try {
+            val o = JSONObject(prefs.getString(STARTING, null) ?: return null)
+            Triple(o.getString("id"), o.getString("text"), o.getString("project"))
+        } catch (_: org.json.JSONException) {
+            null
+        }
+    }
+
+    fun starting(id: String, text: String, project: String) {
+        prefs.edit()
+            .putString(STARTING, JSONObject().put("id", id).put("text", text).put("project", project).toString())
+            .remove(CONVERSATION)
+            .putLong(CONVERSATION_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun started() {
+        prefs.edit().remove(STARTING).apply()
     }
 
     companion object {
+        private const val STARTING = "starting"
         private const val DRAFT = "draft"
         private const val CONVERSATION = "conversation"
         private const val CONVERSATION_AT = "conversation_at"
@@ -1126,7 +1181,9 @@ internal fun AssistComposer(
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     Column(modifier.semantics { paneTitle = "Prism" }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
+        // Measured after the card, so the card always fits (the keyboard up)
+        // and the transcript scrolls in what is left.
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
         // Gemini's attach menu rises above the card.
         AnimatedVisibility(
             visible = menuOpen && attach != null,

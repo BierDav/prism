@@ -44,16 +44,26 @@ class MatrixClient(private val homeserver: String, private val token: String) {
     /** The one room [query] names (ID or name); ambiguity goes back to the model. */
     suspend fun room(query: String): Matrix.Room {
         val found = Matrix.find(rooms(), query).ifEmpty { Matrix.find(rooms(fresh = true), query) }
+        val exact = found.filter { it.id == query.trim() || it.name.equals(query.trim(), true) }
+        val pick = exact.singleOrNull() ?: found.singleOrNull().takeIf { exact.isEmpty() }
         return when {
             found.isEmpty() -> throw ToolArgumentException("No Matrix room matches \"$query\". matrix_rooms lists them.")
-            found.size > 1 && found.none { it.name.equals(query.trim(), true) } ->
-                throw ToolArgumentException("Several rooms match \"$query\": " + found.take(6).joinToString(", ") { "${it.name} (${it.id})" } + ". Which one?")
-            else -> found.firstOrNull { it.name.equals(query.trim(), true) } ?: found.first()
+            pick == null ->
+                throw ToolArgumentException("Several rooms match \"$query\": " + (exact.ifEmpty { found }).take(6).joinToString(", ") { "${it.name} (${it.id})" } + ". Which one?")
+            else -> pick
+        }
+    }
+
+    /** Prism sends and reads plain events only: an end-to-end encrypted room is refused. */
+    private suspend fun requirePlain(roomId: String) {
+        if (rooms().firstOrNull { it.id == roomId }?.encrypted == true) {
+            throw ToolArgumentException("That room is end-to-end encrypted; Prism can't read or send there yet.")
         }
     }
 
     suspend fun messages(roomId: String, limit: Int): List<Matrix.Message> {
         requireSetUp()
+        requirePlain(roomId)
         val body = get(Matrix.messagesPath(roomId, limit * 2))
         return Matrix.decodeMessages(body, Matrix.decodeNames(body)).takeLast(limit)
     }
@@ -61,6 +71,7 @@ class MatrixClient(private val homeserver: String, private val token: String) {
     /** Sends [text] to [roomId]; the new event's ID. */
     suspend fun send(roomId: String, text: String): String {
         requireSetUp()
+        requirePlain(roomId)
         return Matrix.eventId(
             Http.request("PUT", Matrix.base(homeserver) + Matrix.sendPath(roomId, "prism-" + UUID.randomUUID()), Matrix.text(text).toString(), headers()),
         )

@@ -105,8 +105,10 @@ class AssistantSession(
             transcript = transcript.settled()
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "assistant turn failed", e)
-            transcript = transcript.settled().after(Event.Failed(problem(e)))
+            // Never the exception itself: a gateway's error body can echo what it was sent.
+            val problem = problem(e)
+            Log.w(TAG, "assistant turn failed (${e.javaClass.simpleName}): $problem")
+            transcript = transcript.settled().after(Event.Failed(problem))
         } finally {
             running = false
             save()

@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Edit
@@ -81,6 +82,8 @@ internal fun AgentConversation(
     onOpen: (() -> Unit)?,
     onStop: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    /** Leaves this agent for a new request. */
+    onNew: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val agent = activity?.agent
@@ -127,6 +130,9 @@ internal fun AgentConversation(
                 }
                 if (onOpen != null) {
                     IconButton(onClick = onOpen) { Icon(PrismIcons.OpenInNew, "Open in T3", Modifier.size(20.dp)) }
+                }
+                if (onNew != null) {
+                    IconButton(onClick = onNew) { Icon(Icons.Rounded.Add, "New request", Modifier.size(20.dp)) }
                 }
             }
             LazyColumn(
