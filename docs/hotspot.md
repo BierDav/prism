@@ -29,9 +29,12 @@ to Always on. A long press opens the hotspot page (also on the Phone tab):
 Both modes use the hotspot's own name and password from Android's Settings,
 so the Mac joins a network it already knows (macOS auto-join). Instant mode
 starts it on a single band, never bridged dual-band, at most 80 MHz wide:
-5 GHz where it can, which finishes transfers sooner, and 2.4 GHz while the
-phone's own Wi-Fi sits on a 5 GHz channel the hotspot can't share (such as a
-DFS channel). One band keeps one radio, not two. Starting
+6 GHz where it can, else 5 GHz, which finish transfers sooner, and 2.4 GHz
+while the phone's own Wi-Fi sits on a 5 GHz channel the hotspot can't share
+(such as a DFS channel). One band keeps one radio, not two. Since 6 GHz takes
+WPA3-only security, an instant hotspot uses WPA3 (SAE) with the same
+password, whatever Settings has (WPA2 or WPA2/WPA3); the Mac joins it from
+the same known network. An open hotspot stays open, without 6 GHz. Starting
 never changes the phone's persisted hotspot configuration (only the page's
 Save does); each start carries its own configuration
 (`TetheringRequest.setSoftApConfiguration`).

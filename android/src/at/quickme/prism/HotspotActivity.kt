@@ -358,7 +358,7 @@ private fun ConfigEditor(saved: Hotspot.Config, bands: List<String>, normal: Boo
         Choice("Band", Hotspot.BANDS.filterKeys { it in bands || it == c.band }, c.band,
             note = when {
                 sixNeedsWpa3 -> "6 GHz takes WPA3: saving switches the security to WPA3"
-                !normal -> "For Always on: the instant hotspot runs on 5 GHz where it can, else 2.4 GHz"
+                !normal -> "For Always on: the instant hotspot picks 6 GHz where it can (WPA3), else 5 or 2.4 GHz"
                 c.band == "2+5" -> "Both at once: older devices on 2.4 GHz, newer ones on 5 GHz"
                 else -> null
             }) { draft = c.copy(band = it) }

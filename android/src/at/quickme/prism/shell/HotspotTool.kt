@@ -271,13 +271,24 @@ object HotspotTool {
         }
         if (mode == "instant") {
             // One AP, not bridged (setBand replaces the channels, and with
-            // them bridged bands), on 5 GHz where it can be: Android picks the
-            // highest band of the set it can use. 5 GHz alone fails while the
-            // phone's own Wi-Fi sits on a channel the AP can't share (a DFS
-            // channel such as 5500 MHz: "Wifi connected to unavailable freq"),
-            // so 2.4 GHz stays allowed. 80 MHz is what a MacBook uses on 5 GHz
-            // anyway, and finishes transfers sooner.
-            set("setBand", SoftApConfiguration.BAND_5GHZ or SoftApConfiguration.BAND_2GHZ)
+            // them bridged bands), on 6 GHz where it can be, else 5 GHz:
+            // Android picks the highest band of the set it can use. 5 GHz
+            // alone fails while the phone's own Wi-Fi sits on a channel the AP
+            // can't share (a DFS channel such as 5500 MHz: "Wifi connected to
+            // unavailable freq"), so 2.4 GHz stays allowed. 6 GHz takes
+            // WPA3-only (SAE): Wi-Fi drops 6 GHz from a hotspot with WPA2 or
+            // the WPA2/WPA3 transition, so instant mode uses SAE with the same
+            // password; the Mac (WPA3 since 2019's macOS) joins it from the
+            // same known network. An open hotspot stays open, on 5 GHz.
+            // 80 MHz is what a MacBook uses on 5 GHz anyway, and finishes
+            // transfers sooner.
+            val password = persisted.passphrase
+            var bands = SoftApConfiguration.BAND_5GHZ or SoftApConfiguration.BAND_2GHZ
+            if (persisted.securityType != SoftApConfiguration.SECURITY_TYPE_OPEN && password != null) {
+                set("setPassphrase", password, SoftApConfiguration.SECURITY_TYPE_WPA3_SAE)
+                bands = bands or SoftApConfiguration.BAND_6GHZ
+            }
+            set("setBand", bands)
             set("setMaxChannelBandwidth", channelWidth80())
             set("setAutoShutdownEnabled", true)
             set("setShutdownTimeoutMillis", INSTANT_TIMEOUT_MS)
