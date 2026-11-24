@@ -105,17 +105,22 @@ for as the Google app does), Gemini's edge glow plays once round the
 display (`EdgeGlow.kt`, its shader unchanged), and a swipe up on the
 overlay or Back takes it away. The composer and its chips look like
 Gemini's input card (Gemini's own colours, its halo round the card); it
-spreads over two rows while typing. Choose a model, machine and project above
-the text field, or tap the mic: Google's recognizer (Speech Services by
+spreads over two rows while typing and spans the screen while the keyboard
+is up or an answer shows. Agents start on the machine and project Prism picks
+from the request, with the assistant's placement profile (Phone tab ›
+Profiles › Actions › Assistant, this phone's own setting). Type, or tap the
+mic: Google's recognizer (Speech Services by
 Google, through Android's SpeechRecognizer; `Voice.kt`) listens while
 Gemini's voice bars move, and what it hears is sent (tap the bars to edit it
 first). Send starts the agent directly, after unlocking if needed
-(`AssistActivity.kt`), and the overlay stays: it follows the agent live,
+(`AssistActivity.kt`; while the leading worker hasn't run the start yet, the
+overlay asks again with the same request ID until the agent exists), and the
+overlay stays: it follows the agent live,
 its words and steps, from its T3 thread (`AssistConversation.kt`,
 `GET /v1/agents/{id}/activity`), and what you send next goes to the same
 thread (`POST /v1/agents/{id}/messages`); + starts a new request. The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
-alert fixes use).
+alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in
 the app switcher. If Android sends another assistant invocation from a
 diagonal corner swipe while Prism is in focus, that swipe closes the overlay.
