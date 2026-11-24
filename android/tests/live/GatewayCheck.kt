@@ -10,6 +10,7 @@
 // called the tools it should, without asking for confirmation, and kept the
 // conversation across turns.
 
+import at.quickme.prism.assistant.AssistAttachment
 import at.quickme.prism.assistant.AssistantTool
 import at.quickme.prism.assistant.Gateway
 import at.quickme.prism.assistant.Harness
@@ -84,6 +85,16 @@ fun main(): Unit = runBlocking {
     check(sent.size == 2 && "7" in sent[1].second, "a correction was sent (SMS can't be edited): $sent")
     check(history.size > 6, "the conversation kept its turns (${history.size} messages)")
     check(Harness.decode(Harness.encode(history)).size == history.size, "the conversation survives storage")
+
+    // An image goes to the model as image input (the composer's attachments, the screenshot tool's capture).
+    val image = java.io.File(System.getenv("ASSISTANT_IMAGE") ?: "res/drawable/ic_provider_antigravity.png")
+    if (image.exists()) {
+        val before = events.size
+        history = harness.run(history, "What colours does this logo have? One short sentence.", listOf(AssistAttachment(image.readBytes(), "image/png", image.name)), { e -> events.add(e); println("  $e".take(400)) }, {})
+        val answer = events.drop(before).filterIsInstance<Event.Answer>().lastOrNull()?.text.orEmpty()
+        check(listOf("blue", "green", "yellow", "red").count { it in answer.lowercase() } >= 2, "the model saw the image: $answer")
+        check(Harness.encode(history).length < 20_000, "the stored conversation leaves the image out")
+    }
     harness.close()
     println(if (failed == 0) "all passed" else "$failed failed")
     exitProcess(if (failed == 0) 0 else 1)
