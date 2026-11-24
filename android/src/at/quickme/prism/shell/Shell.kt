@@ -62,6 +62,8 @@ object Shell {
         @JvmField val timedOut: Boolean,
         /** stdout or stderr was longer than MAX_OUTPUT_BYTES and is cut. */
         @JvmField val truncated: Boolean,
+        /** stdout as it came, for commands that write binary (`screencap`). */
+        @JvmField val stdoutBytes: ByteArray = ByteArray(0),
     ) {
         /** Exit status 0 within the timeout. */
         fun ok(): Boolean = exitCode == 0 && !timedOut
@@ -229,7 +231,8 @@ object Shell {
         // keeps the pipe open: then take what came.
         out.finish(if (exited) 2_000 else 500)
         err.finish(if (exited) 2_000 else 500)
-        return Result(if (exited) code else -1, out.text(), err.text(), !exited, out.truncated || err.truncated)
+        val stdout = out.bytes()
+        return Result(if (exited) code else -1, String(stdout, Charsets.UTF_8), err.text(), !exited, out.truncated || err.truncated, stdout)
     }
 
     /** A system property as uid 2000 reads it, or null without the server. */
@@ -312,7 +315,9 @@ object Shell {
             }
         }
 
-        fun text(): String = synchronized(bytes) { String(bytes.toByteArray(), Charsets.UTF_8) }
+        fun bytes(): ByteArray = synchronized(bytes) { bytes.toByteArray() }
+
+        fun text(): String = String(bytes(), Charsets.UTF_8)
     }
 
     // --- Prism as the manager (ShellApps.kt) ---

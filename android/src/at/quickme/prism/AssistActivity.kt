@@ -19,6 +19,11 @@
 // request, with the assistant's placement profile (Phone › Profiles ›
 // Actions). The composer sends its request directly after unlock. While the
 // keyboard is up or an answer shows, the card spans the screen, as Gemini's.
+//
+// The card's + opens Gemini's attach menu (AssistAttach.kt): a photo from the
+// camera, the screen under the overlay, photos from the Photo Picker, any
+// file. What is attached shows at the top of the card and goes with the next
+// send (assistant/AttachmentReader.kt, assistant/PhoneScreenCapture.kt).
 
 package at.quickme.prism
 
@@ -33,10 +38,12 @@ import android.view.HapticFeedbackConstants
 import android.view.RoundedCorner
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -168,6 +175,13 @@ import at.quickme.prism.shared.ProjectCatalog
 import at.quickme.prism.shared.ProjectChoice
 import at.quickme.prism.shared.ProjectIcon
 import at.quickme.prism.shared.ProfileChoice
+import at.quickme.prism.assistant.AssistAttachment
+import at.quickme.prism.assistant.Attached
+import at.quickme.prism.assistant.AttachmentReader
+import at.quickme.prism.assistant.OverlayWindow
+import at.quickme.prism.assistant.PhoneScreenCapture
+import at.quickme.prism.assistant.Read
+import at.quickme.prism.core.AttachmentRules
 import at.quickme.prism.ui.GeminiIcons
 import at.quickme.prism.ui.HostColor
 import at.quickme.prism.ui.PrismIcons
@@ -177,17 +191,25 @@ import at.quickme.prism.ui.rememberScreenCorners
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import org.json.JSONArray
 import org.json.JSONObject
 
-class AssistActivity : ComponentActivity() {
+class AssistActivity : ComponentActivity(), OverlayWindow {
     private var session: PrismAssistantSession? = null
+
+    /** A picker or the camera is open for the overlay, which waits for what it gives. */
+    private var awaitingResult = false
+
+    /** The screen under the overlay, for "Screen" and the harness's screenshots. */
+    private val capture = PhoneScreenCapture(this) { session?.screenshot }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val active = PrismAssistantSession.current
@@ -216,15 +238,53 @@ class AssistActivity : ComponentActivity() {
                     reducedMotion = !ValueAnimator.areAnimatorsEnabled(),
                     onClose = ::close,
                     unlock = ::unlock,
+                    capture = capture,
+                    onExternal = { awaitingResult = true },
                 )
                 }
             }
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Back from a picker: its result came just before.
+        awaitingResult = false
+    }
+
+    /**
+     * Left for anything but a picker the overlay opened (another app came to
+     * the front): gone, as noHistory would have it, which the manifest can't
+     * say any more because the overlay must outlive the camera and the
+     * document picker it opens. Not while the screen sleeps.
+     */
+    override fun onStop() {
+        super.onStop()
+        val interactive = getSystemService(android.os.PowerManager::class.java)?.isInteractive != false
+        if (!awaitingResult && !isChangingConfigurations && interactive) close()
+    }
+
     override fun onDestroy() {
         session?.detach(this)
         super.onDestroy()
+    }
+
+    /** The overlay's window fully transparent while [block] captures the screen under it. */
+    override suspend fun <T> withoutOverlay(block: suspend () -> T): T = withContext(Dispatchers.Main) {
+        val before = window.attributes.alpha
+        window.attributes = window.attributes.apply { alpha = 0f }
+        try {
+            // SurfaceFlinger takes the new alpha with the next frames.
+            repeat(2) { awaitFrame() }
+            delay(32)
+            block()
+        } finally {
+            window.attributes = window.attributes.apply { alpha = before }
+        }
+    }
+
+    private suspend fun awaitFrame() = suspendCancellableCoroutine { done ->
+        android.view.Choreographer.getInstance().postFrameCallback { done.resume(Unit) }
     }
 
     /** Gone, after the overlay has taken itself back. */
@@ -339,6 +399,9 @@ private fun Assist(
     reducedMotion: Boolean,
     onClose: () -> Unit,
     unlock: suspend () -> Boolean,
+    capture: PhoneScreenCapture,
+    /** Before a picker or the camera opens over the overlay. */
+    onExternal: () -> Unit,
 ) {
     // Milliseconds since the overlay appeared, to the glow's end.
     val clock = remember { Animatable(if (reducedMotion) GLOW_MS else 0f) }
@@ -372,6 +435,97 @@ private fun Assist(
     val keyboard = LocalSoftwareKeyboardController.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    // What the owner attached with the +; it goes with the next send. The
+    // overlay keeps it (and the draft) while a picker or the camera is open.
+    val attached = remember { mutableStateListOf<Attached>() }
+    var menuOpen by remember { mutableStateOf(false) }
+    var reading by remember { mutableIntStateOf(0) }
+
+    fun attach(items: List<Attached>) {
+        val room = AttachmentRules.MAX_ATTACHMENTS - attached.size
+        if (items.size > room) sendError = AttachmentRules.tooMany()
+        attached.addAll(items.take(room.coerceAtLeast(0)))
+    }
+
+    /** Reads what a picker gave, in order, and says what couldn't be attached. */
+    fun attachUris(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        reading++
+        scope.launch {
+            try {
+                val read = uris.map { AttachmentReader.read(context, it) }
+                attach(read.filterIsInstance<Read.Ok>().map { it.attached })
+                read.filterIsInstance<Read.Failed>().firstOrNull()?.let { sendError = it.message }
+            } finally {
+                reading--
+            }
+        }
+    }
+
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(AttachmentRules.MAX_ATTACHMENTS),
+    ) { attachUris(it) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { attachUris(it) }
+    var cameraShot by remember { mutableStateOf<android.net.Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+        val shot = cameraShot
+        cameraShot = null
+        if (taken && shot != null) attachUris(listOf(shot))
+    }
+
+    /** Opens a picker over the overlay, once the phone is unlocked (none shows over the lock screen). */
+    fun pick(open: () -> Unit) {
+        menuOpen = false
+        if (attached.size >= AttachmentRules.MAX_ATTACHMENTS) {
+            sendError = AttachmentRules.tooMany()
+            return
+        }
+        keyboard?.hide()
+        voice.cancel()
+        scope.launch {
+            if (!unlock()) {
+                sendError = "Unlock the phone to add photos and files."
+                return@launch
+            }
+            sendError = null
+            onExternal()
+            try {
+                open()
+            } catch (e: android.content.ActivityNotFoundException) {
+                sendError = "No app on this phone can do that."
+            }
+        }
+    }
+
+    val attachActions = AttachActions(
+        camera = {
+            pick {
+                val shot = CameraShots.next(context)
+                cameraShot = shot
+                camera.launch(shot)
+            }
+        },
+        screen = {
+            menuOpen = false
+            if (attached.size >= AttachmentRules.MAX_ATTACHMENTS) {
+                sendError = AttachmentRules.tooMany()
+            } else {
+                reading++
+                scope.launch {
+                    try {
+                        val shot = capture.captureAttached(preferInvocation = true)
+                        if (shot != null) attach(listOf(shot)) else sendError = "Couldn't capture the screen."
+                    } finally {
+                        reading--
+                    }
+                }
+            }
+        },
+        photos = {
+            pick { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        },
+        files = { pick { filePicker.launch(arrayOf("*/*")) } },
+    )
     fun progress(): Float = if (reducedMotion) 0f else maxOf(back.value, swipe)
 
     LaunchedEffect(Unit) {
@@ -425,6 +579,8 @@ private fun Assist(
         }
     }
 
+    /** Leaves the agent followed for a new request (the transcript's new-conversation control calls it). */
+    @Suppress("unused")
     fun newRequest() {
         agentId = null
         starting = null
@@ -459,10 +615,10 @@ private fun Assist(
         }
     }
 
-    /** A follow-up into the agent's thread. */
-    fun reply(id: String, request: String) {
-        val payload = previous?.takeIf { it.text == request && it.target == id }
-            ?: AssistantRequest(PrismClient.requestId(), id, null, "", request)
+    /** A follow-up into the agent's thread, with [files] attached. */
+    fun reply(id: String, request: String, files: List<AssistAttachment>) {
+        val payload = previous?.takeIf { it.text == request && it.target == id && it.attachments == files }
+            ?: AssistantRequest(PrismClient.requestId(), id, null, "", request, files)
         previous = payload
         sending = true
         sendError = null
@@ -474,14 +630,16 @@ private fun Assist(
                     sendError = "Unlock the phone to send."
                     return@launch
                 }
-                pending.add(request)
+                if (request.isNotEmpty()) pending.add(request)
                 text = ""
-                val agent = PrismApi.call(context) { sendToAgent(id, request, payload.id) }
+                // The attachments go with payload; the harness takes them.
+                val agent = PrismApi.call(context) { sendToAgent(id, payload.text, payload.id) }
                 activity = activity?.copy(agent = agent) ?: AgentActivity(agent)
                 memory.conversation(id)
+                attached.removeAll { it.attachment in payload.attachments }
                 refresh++
             } catch (e: PrismError) {
-                pending.remove(request)
+                if (request.isNotEmpty()) pending.remove(request)
                 text = request
                 sendError = e.message
             } finally {
@@ -491,17 +649,21 @@ private fun Assist(
     }
 
     /**
-     * Sends [spoken] or the typed text: a follow-up to the agent shown, or a
-     * new agent on the machine and project Prism picks, with the assistant's
-     * profile (Phone › Profiles › Actions).
+     * Sends [spoken] or the typed text, with what is attached: a follow-up to
+     * the agent shown, or a new agent on the machine and project Prism picks,
+     * with the assistant's profile (Phone › Profiles › Actions). Attachments
+     * alone are a request too.
      */
     fun send(spoken: String? = null) {
         val request = (spoken ?: text).trim()
-        if (request.isEmpty() || sending || starting != null || leave.isRunning || leave.value > 0f) return
-        agentId?.let { return reply(it, request) }
+        val files = attached.map { it.attachment }
+        if (request.isEmpty() && files.isEmpty()) return
+        if (sending || reading > 0 || starting != null || leave.isRunning || leave.value > 0f) return
+        menuOpen = false
+        agentId?.let { return reply(it, request, files) }
         val model = AssistantProfile.model(context)
-        val payload = previous?.takeIf { it.target == AUTO && it.text == request && it.model == model }
-            ?: AssistantRequest(PrismClient.requestId(), AUTO, model, AUTO, request)
+        val payload = previous?.takeIf { it.target == AUTO && it.text == request && it.model == model && it.attachments == files }
+            ?: AssistantRequest(PrismClient.requestId(), AUTO, model, AUTO, request, files)
         previous = payload
         sending = true
         sendError = null
@@ -519,10 +681,11 @@ private fun Assist(
                 PrismPush.changed()
                 memory.clearDraft()
                 text = ""
+                attached.removeAll { it.attachment in payload.attachments }
                 // The overlay stays and follows the agent.
                 pending.clear()
-                pending.add(request)
-                agentTitle = request
+                if (request.isNotEmpty()) pending.add(request)
+                agentTitle = request.ifEmpty { payload.attachments.firstOrNull()?.name.orEmpty() }
                 if (agent.id.isNotEmpty()) follow(agent) else {
                     activity = AgentActivity(agent)
                     starting = payload
@@ -602,6 +765,8 @@ private fun Assist(
             throw e
         }
     }
+    // With the + menu open, Back closes the menu first.
+    BackHandler(enabled = menuOpen) { menuOpen = false }
 
     val corners = rememberScreenCorners()
     val primary = MaterialTheme.colorScheme.primary
@@ -649,7 +814,8 @@ private fun Assist(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClickLabel = "Close Prism",
-                    onClick = ::close,
+                    // A tap beside the + menu closes the menu, not the overlay.
+                    onClick = { if (menuOpen) menuOpen = false else close() },
                 )
                 .pointerInput(reach, reducedMotion) {
                     detectVerticalDragGestures(
@@ -665,7 +831,7 @@ private fun Assist(
         val following = agentId != null || starting != null
         // Gemini's card spans the screen while the keyboard is up or an
         // answer shows, and sits back in its margins otherwise.
-        val wide = WindowInsets.isImeVisible || following
+        val wide = WindowInsets.isImeVisible || following || menuOpen
         val margin by androidx.compose.animation.core.animateDpAsState(
             if (wide) WideMargin else sideMargin(LocalConfiguration.current.screenWidthDp),
             if (reducedMotion) snap() else tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
@@ -674,7 +840,7 @@ private fun Assist(
         CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { AssistComposer(
             text = text,
             onText = { text = it; sendError = null },
-            canSend = starting == null,
+            canSend = starting == null && reading == 0,
             sending = sending,
             onSend = { send() },
             animate = !reducedMotion,
@@ -683,7 +849,11 @@ private fun Assist(
             voice = voice,
             onMic = ::listen,
             onWave = ::listenToEdit,
-            onNew = if (following) ::newRequest else null,
+            attachments = attached,
+            onRemove = { attached.remove(it) },
+            attach = attachActions,
+            menuOpen = menuOpen,
+            onMenu = { menuOpen = it },
             onCard = { plate = it },
             selectors = {
                 if (!following) return@AssistComposer
@@ -734,13 +904,17 @@ private fun DrawScope.drawVeil(t: Float, gone: Float) {
     )
 }
 
-/** A request as sent, to send it again with the same [id]: [target] is the agent's ID for a follow-up. */
+/**
+ * A request as sent, to send it again with the same [id]: [target] is the
+ * agent's ID for a follow-up; [attachments] what the owner attached.
+ */
 private data class AssistantRequest(
     val id: String,
     val target: String,
     val model: ModelChoice?,
     val project: String,
     val text: String,
+    val attachments: List<AssistAttachment> = emptyList(),
 )
 
 /**
@@ -808,6 +982,20 @@ internal class AssistMemory(context: Context) {
     }
 }
 
+/**
+ * Where the camera writes the photo it takes for the overlay: a file in
+ * Prism's cache, shared with the camera app through Prism's FileProvider
+ * (res/xml/attach_paths.xml); the ones before are deleted.
+ */
+internal object CameraShots {
+    fun next(context: Context): android.net.Uri {
+        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
+        val file = java.io.File(dir, "photo-${System.currentTimeMillis()}.jpg")
+        return androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".attach", file)
+    }
+}
+
 /** The magic pick, as machine and project: Prism chooses from the request. */
 private const val AUTO = "auto"
 
@@ -828,7 +1016,13 @@ internal fun AssistComposer(
     voice: VoiceInput? = null,
     onMic: (() -> Unit)? = null,
     onWave: (() -> Unit)? = null,
-    onNew: (() -> Unit)? = null,
+    /** What is attached, shown at the top of the card. */
+    attachments: List<Attached> = emptyList(),
+    onRemove: (Attached) -> Unit = {},
+    /** The + menu's actions; without them the + is off. */
+    attach: AttachActions? = null,
+    menuOpen: Boolean = false,
+    onMenu: (Boolean) -> Unit = {},
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit = {},
     selectors: @Composable () -> Unit,
     modifier: Modifier = Modifier,
@@ -837,6 +1031,16 @@ internal fun AssistComposer(
     val keyboard = LocalSoftwareKeyboardController.current
     Column(modifier.semantics { paneTitle = "Prism" }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Column(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
+        // Gemini's attach menu rises above the card.
+        AnimatedVisibility(
+            visible = menuOpen && attach != null,
+            enter = if (animate) androidx.compose.animation.expandVertically(tween(300, easing = Decelerate), expandFrom = Alignment.Bottom) +
+                fadeIn(tween(200)) else EnterTransition.None,
+            exit = if (animate) androidx.compose.animation.shrinkVertically(tween(200, easing = Accelerate), shrinkTowards = Alignment.Bottom) +
+                fadeOut(tween(150)) else ExitTransition.None,
+        ) {
+            attach?.let { AttachMenu(it, Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
+        }
         error?.let { message ->
             Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.medium).padding(12.dp)) {
                 Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -850,6 +1054,7 @@ internal fun AssistComposer(
             sending = sending,
             onSend = onSend,
             onFocus = {
+                onMenu(false)
                 focus.requestFocus()
                 keyboard?.show()
             },
@@ -859,7 +1064,10 @@ internal fun AssistComposer(
             voice = voice,
             onMic = onMic,
             onWave = onWave,
-            onNew = onNew,
+            attachments = attachments,
+            onRemove = onRemove,
+            onPlus = attach?.let { { onMenu(!menuOpen) } },
+            menuOpen = menuOpen,
             onCard = onCard,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -867,9 +1075,9 @@ internal fun AssistComposer(
 }
 
 /**
- * Gemini's input card: one row (new, text, mic, send) while idle; once the
- * keyboard is up or there is text, two rows, the text across the whole card
- * and the buttons under it. The change animates: the text widens and moves,
+ * Gemini's input card: one row (+, text, mic, send) while idle; once the
+ * keyboard is up, there is text or something is attached, two rows, the text
+ * across the whole card and the buttons under it, the attachments above it. The change animates: the text widens and moves,
  * the buttons drop below it and the card grows. While Prism listens, the text
  * gives way to the voice's bars and send to a pulsing stop; a tap on the bars
  * stops too but keeps the words for editing.
@@ -889,7 +1097,11 @@ private fun Composer(
     voice: VoiceInput?,
     onMic: (() -> Unit)?,
     onWave: (() -> Unit)?,
-    onNew: (() -> Unit)?,
+    attachments: List<Attached>,
+    onRemove: (Attached) -> Unit,
+    /** The +: opens or closes the attach menu; null when there is none. */
+    onPlus: (() -> Unit)?,
+    menuOpen: Boolean,
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit,
     modifier: Modifier,
 ) {
@@ -899,7 +1111,7 @@ private fun Composer(
     val colors = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
     val typing = focused && WindowInsets.isImeVisible
-    val twoRows = !listening && (typing || text.isNotEmpty())
+    val twoRows = !listening && (typing || text.isNotEmpty() || attachments.isNotEmpty())
     val rows by animateFloatAsState(
         if (twoRows) 1f else 0f,
         if (animate) tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else snap(),
@@ -955,13 +1167,23 @@ private fun Composer(
                 alpha = PlateAppear.contentAlpha(t)
             },
             content = {
-                // Gemini's plus, in the text's colour even when there is nothing to start anew.
+                // Gemini's plus: the attach menu. A quarter turn to a cross while it is open.
+                val turn by animateFloatAsState(
+                    if (menuOpen) 45f else 0f,
+                    if (animate) tween(250, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else snap(),
+                    label = "plus",
+                )
                 IconButton(
-                    onClick = { onNew?.invoke() },
-                    enabled = onNew != null && !listening,
+                    onClick = { onPlus?.invoke() },
+                    enabled = onPlus != null && !listening && !sending,
                     colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurface, disabledContentColor = colors.onSurface),
+                    modifier = Modifier.semantics { selected = menuOpen },
                 ) {
-                    Icon(GeminiIcons.Plus, "New request", Modifier.size(28.dp))
+                    Icon(
+                        GeminiIcons.Plus,
+                        if (menuOpen) "Close the attach menu" else "Add photos, files and the screen",
+                        Modifier.size(28.dp).graphicsLayer { rotationZ = turn },
+                    )
                 }
                 if (listening) {
                     VoiceWave(
@@ -1001,7 +1223,7 @@ private fun Composer(
                         MicButton(onClick = onMic, pulsing = waiting, animate = animate)
                     }
                     AnimatedVisibility(
-                        visible = text.isNotBlank() || sending || listening,
+                        visible = text.isNotBlank() || attachments.isNotEmpty() || sending || listening,
                         enter = if (animate) scaleIn(initialScale = 0.6f) + fadeIn() else EnterTransition.None,
                         exit = if (animate) scaleOut(targetScale = 0.6f) + fadeOut() else ExitTransition.None,
                     ) {
@@ -1026,9 +1248,12 @@ private fun Composer(
                         }
                     }
                 }
+                // Always a child, even with nothing attached (then 0 tall).
+                Box { AttachmentRow(attachments, onRemove, animate) }
             },
         ) { measurables, constraints ->
             val (plusM, fieldM, trailingM) = measurables
+            val attachedM = measurables[3]
             val width = constraints.maxWidth
             val pad = 8.dp.roundToPx()
             val gap = 4.dp.roundToPx()
@@ -1038,6 +1263,9 @@ private fun Composer(
             val minHeight = 72.dp.roundToPx()
             val plus = plusM.measure(Constraints())
             val trailing = trailingM.measure(Constraints(maxWidth = width))
+            // What is attached goes above everything else, across the card.
+            val attached = attachedM.measure(Constraints(maxWidth = width))
+            val top = attached.height
             // The text's place in one row, and across the card in two.
             val x1 = pad + plus.width + gap
             val w1 = (width - x1 - gap - trailing.width - pad).coerceAtLeast(0)
@@ -1049,12 +1277,13 @@ private fun Composer(
             val buttons = maxOf(plus.height, trailing.height)
             val h1 = maxOf(minHeight, field.height + 2 * pad, buttons + 2 * pad)
             val h2 = field.height + buttons + pad
-            val height = lerp(h1, h2)
+            val height = top + lerp(h1, h2)
             layout(width, height) {
-                val fieldY = lerp((h1 - field.height) / 2, 0)
+                attached.placeRelative(0, 0)
+                val fieldY = top + lerp((h1 - field.height) / 2, 0)
                 field.placeRelative(lerp(x1, x2), fieldY)
                 // At one row the buttons sit in the card's middle; at two, under the text.
-                val buttonY = lerp((h1 - buttons) / 2, height - pad - buttons)
+                val buttonY = top + lerp((h1 - buttons) / 2, height - top - pad - buttons)
                 plus.placeRelative(pad, buttonY + (buttons - plus.height) / 2)
                 trailing.placeRelative(width - pad - trailing.width, buttonY + (buttons - trailing.height) / 2)
             }
