@@ -3,6 +3,7 @@
 
 package at.quickme.prism
 
+import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -104,7 +105,16 @@ internal data class PhoneStatus(
     val shell: Pair<Health, String>,
     val owner: Boolean,
     val updates: String,
+    val hotspot: Pair<Health, String> = Health.Off to "Instant",
 )
+
+/** The hotspot's line: its mode, and whether it's on. */
+internal fun hotspotStatus(c: Context): Pair<Health, String> = when {
+    !Hotspot.supported() -> Health.Off to "Needs Android 16"
+    Hotspot.mode(c) == Hotspot.NORMAL -> if (Hotspot.on) Health.Good to "Always on" else Health.Busy to "Always on · starting"
+    Hotspot.on -> Health.Good to "Instant · on"
+    else -> Health.Off to "Instant · comes on when your Mac asks"
+}
 
 @Composable
 fun PhoneTab(padding: PaddingValues) {
@@ -114,6 +124,7 @@ fun PhoneTab(padding: PaddingValues) {
         Netbird::listen to Netbird::unlisten,
         Updater::listen to Updater::unlisten,
         Shell::listen to Shell::unlisten,
+        Hotspot::listen to Hotspot::unlisten,
     )
     var released by remember { mutableIntStateOf(0) }
     val s = remember(changes, released) {
@@ -140,6 +151,7 @@ fun PhoneTab(padding: PaddingValues) {
                 (if (Shell.available()) Health.Good else Health.Busy) to Shell.statusText().replaceFirstChar { it.uppercase() },
                 Dpc.owner(context),
                 Updater.statusText(context).replaceFirstChar { it.uppercase() },
+                hotspotStatus(context),
             )
         }
     }
@@ -149,6 +161,7 @@ fun PhoneTab(padding: PaddingValues) {
     PhoneContent(
         padding, s, version,
         onNetbird = { context.startActivity(NetbirdActivity.intent(context)) },
+        onHotspot = { context.startActivity(HotspotActivity.intent(context)) },
         onCheckUpdates = { Updater.checkSoon(context) },
         onShell = { Shell.openSetup(context) },
         placementSettings = {
@@ -177,6 +190,7 @@ internal fun PhoneContent(
     onRelease: () -> Unit,
     placementSettings: @Composable () -> Unit,
     onShell: () -> Unit = {},
+    onHotspot: () -> Unit = {},
 ) {
     var confirmRelease by remember { mutableStateOf(false) }
     LazyColumn(
@@ -193,6 +207,11 @@ internal fun PhoneContent(
                 StatusRow(PrismIcons.Mesh, "NetBird", netbirdSummary(s), s.netbird.first) {
                     FilledTonalIconButton(onClick = onNetbird) {
                         Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "NetBird settings")
+                    }
+                }
+                StatusRow(PrismIcons.Hotspot, "Hotspot", s.hotspot.second, s.hotspot.first) {
+                    FilledTonalIconButton(onClick = onHotspot) {
+                        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Hotspot settings")
                     }
                 }
             }

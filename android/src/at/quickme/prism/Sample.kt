@@ -653,6 +653,19 @@ object Sample {
         Health.Good to SHELL_STATUS.replaceFirstChar { it.uppercase() },
         true,
         "Up to date: 1.0 (1)",
+        Health.Good to "Always on",
+    )
+
+    /** The hotspot page: Always on, with two devices. */
+    internal fun hotspot() = Hotspot.Info(
+        "normal",
+        Hotspot.Config("Pixel hotspot", "correct-horse-battery", android.net.wifi.SoftApConfiguration.SECURITY_TYPE_WPA3_SAE_TRANSITION,
+            "5", false),
+        listOf("2", "5", "2+5", "6"),
+        listOf(
+            Hotspot.Client("6a:3f:12:9c:04:e1", "10.71.48.23", "MacBook-Pro"),
+            Hotspot.Client("d2:7b:55:af:31:08", "10.71.48.118", "Pixel-Tablet"),
+        ),
     )
 
     /** The shell server's status line. */
