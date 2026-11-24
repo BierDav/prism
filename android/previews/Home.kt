@@ -1,8 +1,8 @@
 // The main screen: each tab with its sample data, as a whole screen and, for
 // the tabs that scroll, as tall as all of it; the inbox's bar above the
-// navigation bar while something waits; the assistant composer; and the
-// larger windows: an unfolded foldable, a tablet and a TV, with the rail and
-// an alert beside the list.
+// navigation bar while something waits; the assistant composer, with
+// attachments and its + menu; and the larger windows: an unfolded foldable,
+// a tablet and a TV, with the rail and an alert beside the list.
 
 package at.quickme.prism.previews
 
@@ -19,6 +19,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.LinearGradientShader
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import at.quickme.prism.AlertsState
@@ -26,6 +31,9 @@ import at.quickme.prism.AlertsTab
 import at.quickme.prism.ApprovalsContent
 import at.quickme.prism.ApprovalsStatus
 import at.quickme.prism.AssistComposer
+import at.quickme.prism.AttachActions
+import at.quickme.prism.assistant.AssistAttachment
+import at.quickme.prism.assistant.Attached
 import at.quickme.prism.HomeNav
 import at.quickme.prism.HomeScaffold
 import at.quickme.prism.Inbox
@@ -181,7 +189,7 @@ private fun AssistantConversationPreview() = Themed {
         at.quickme.prism.GeminiColors {
             AssistComposer(
                 text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false,
-                placeholder = "Reply to the agent", onMic = {}, onNew = {},
+                placeholder = "Reply to the agent", onMic = {},
                 selectors = {
                     at.quickme.prism.AgentConversation(
                         title = "Free up disk space", activity = activity, pending = emptyList(), error = null,
@@ -194,6 +202,70 @@ private fun AssistantConversationPreview() = Themed {
         }
     }
 }
+
+/** A picture for the samples: a sky over a hill, in [top] and [hill]. */
+private fun samplePicture(top: Color, hill: Color, sun: Color): ImageBitmap {
+    val image = ImageBitmap(160, 160)
+    val canvas = androidx.compose.ui.graphics.Canvas(image)
+    val paint = Paint()
+    paint.shader = LinearGradientShader(Offset(0f, 0f), Offset(0f, 160f), listOf(top, Color.White))
+    canvas.drawRect(0f, 0f, 160f, 160f, paint)
+    canvas.drawCircle(Offset(110f, 50f), 22f, Paint().apply { color = sun })
+    canvas.drawCircle(Offset(40f, 200f), 110f, Paint().apply { color = hill })
+    return image
+}
+
+private fun sampleImage(name: String, top: Color, hill: Color, sun: Color, screenshot: Boolean = false) =
+    Attached(AssistAttachment(ByteArray(0), "image/jpeg", name, screenshot), samplePicture(top, hill, sun))
+
+private fun sampleAttachments(): List<Attached> = listOf(
+    sampleImage("IMG_2041.jpg", Color(0xFF7FB2F0), Color(0xFF3F7D3A), Color(0xFFFFD54F)),
+    sampleImage("Screenshot.jpg", Color(0xFF263238), Color(0xFF546E7A), Color(0xFFB0BEC5), screenshot = true),
+    sampleImage("IMG_2042.jpg", Color(0xFFF4A261), Color(0xFF6D4C41), Color(0xFFFFF3E0)),
+    Attached(AssistAttachment(ByteArray(0), "application/pdf", "paperless-backup-report.pdf"), null),
+)
+
+/** The overlay as the samples show it: the live app under the scrim, the composer at the bottom. */
+@Composable
+private fun AssistantSample(
+    text: String,
+    attachments: List<Attached>,
+    menuOpen: Boolean = false,
+) = Themed {
+    Box(Modifier.fillMaxSize()) {
+        SampleHome(Tab.Alerts)
+        Box(Modifier.fillMaxSize().background(BottomSheetDefaults.ScrimColor))
+        at.quickme.prism.GeminiColors {
+            AssistComposer(
+                text = text, onText = {}, canSend = true, sending = false, onSend = {}, animate = false,
+                onMic = {},
+                attachments = attachments,
+                attach = remember { AttachActions({}, {}, {}, {}) },
+                menuOpen = menuOpen,
+                selectors = {},
+                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 16.dp).fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/** The composer with a photo attached and a question about it. */
+@ScreenPreviews
+@Composable
+private fun AssistantImagePreview() = AssistantSample(
+    "What plant is this?",
+    remember { sampleAttachments().take(1) },
+)
+
+/** Several pictures, the screen and a file attached, nothing typed: send is on all the same. */
+@ScreenPreviews
+@Composable
+private fun AssistantAttachmentsPreview() = AssistantSample("", remember { sampleAttachments() })
+
+/** The + menu open above the card: Camera, Screen, Photos, Files. */
+@ScreenPreviews
+@Composable
+private fun AssistantAttachMenuPreview() = AssistantSample("", emptyList(), menuOpen = true)
 
 // --- Larger windows ---
 
