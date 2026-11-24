@@ -251,7 +251,8 @@ The worker keeps the paths that outside callers use:
   never waits on Rocky's storage. It answers with the upstream's status
   (`502` when the upstream refuses the worker's credential or is
   unreachable, `504` after 10 s, `503` until configured).
-- `GET /health`, `GET /v1/health`
+- `GET /health`, `GET /v1/health` (`503` only while the replica is
+  incomplete; it reads nothing, so a busy database never delays it)
 
 The owner's admin routes, what `prism pair`, `machines`, `device-token` and
 `device-revoke` call. The Go server ran these commands in its pod against

@@ -20,6 +20,7 @@ use crate::agents::{process_agent_message, process_agent_request};
 use crate::approvals::process_approval_answer;
 use crate::config::Config;
 use crate::leader::{CLAIM_TIMEOUT_SECS, Clock, run_alert_action};
+use crate::magic::AUTO_CHOICE;
 use crate::push::Pusher;
 use crate::questions::process_question_answer;
 use crate::t3::{Secrets, T3Hub};
@@ -243,6 +244,17 @@ impl Direct {
         else {
             return Ok(false);
         };
+        // Picking the project asks the workers' text generation, which the
+        // published config leaves out. Claimed here, the request would end
+        // in that error, or, if the device never finished it, stay its own
+        // and never run, since no worker takes a device's claim. So it waits
+        // for the workers.
+        let tg = &self.cfg.text_generation;
+        if req.project_id == AUTO_CHOICE && (tg.url.is_empty() || tg.model.is_empty()) {
+            return Err(
+                "picking the project needs the workers, so the request waits for them.".into(),
+            );
+        }
         if !self
             .client
             .claim_agent_request(request_id, &self.claimer, now, self.stale_before(now))

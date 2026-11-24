@@ -49,35 +49,45 @@ pub struct ActivityItem {
     pub truncated: bool,
 }
 
+/// T3 sends `null` for a field it has no value for (an item's `title`, say),
+/// where `#[serde(default)]` alone covers only a missing one.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     position: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     item_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     run_id: String,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "null_default")]
     kind: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     text_truncated: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadRead {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     thread: ThreadMeta,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     items: Vec<ThreadItem>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     has_more: bool,
     earlier_position: Option<i64>,
 }
@@ -85,9 +95,9 @@ struct ThreadRead {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadMeta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     latest_run_id: String,
 }
 
@@ -904,5 +914,56 @@ mod tests {
             agent_title("fix", "brew", "david-mb"),
             "Fix: brew (david-mb)"
         );
+    }
+
+    /// T3's `t3_thread_read` (activity view) as it answers now: `null` for
+    /// an item's title, messageId and createdBy, and for the thread's
+    /// activeRunId. The watcher read it as "invalid type: null, expected a
+    /// string" and never updated the agent.
+    #[test]
+    fn thread_reads_take_t3_nulls_as_empty() {
+        let raw = json!({
+            "thread": {
+                "threadId": "mcp:launch:t1",
+                "status": "completed",
+                "latestRunId": "run:5",
+                "activeRunId": null,
+                "linkedPullRequest": null,
+            },
+            "items": [{
+                "position": 169,
+                "itemId": "turn-item:1",
+                "runId": "run:5",
+                "messageId": null,
+                "createdBy": null,
+                "type": "assistant_message",
+                "status": "completed",
+                "title": null,
+                "text": "Done.",
+                "textTruncated": false,
+                "nextTextOffset": null,
+            }, {
+                "position": 170,
+                "itemId": "turn-item:2",
+                "runId": null,
+                "type": "checkpoint",
+                "status": null,
+                "title": null,
+                "text": null,
+                "textTruncated": null,
+            }],
+            "nextPosition": 170,
+            "hasMore": false,
+            "earlierPosition": 168,
+        });
+        let read: ThreadRead = serde_json::from_value(raw).expect("thread read");
+        assert_eq!(read.thread.status, "completed");
+        assert_eq!(read.thread.latest_run_id, "run:5");
+        assert_eq!(read.items.len(), 2);
+        assert_eq!(read.items[0].title, "");
+        assert_eq!(read.items[0].text, "Done.");
+        assert_eq!(read.items[1].run_id, "");
+        assert!(!read.items[1].text_truncated);
+        assert_eq!(read.earlier_position, Some(168));
     }
 }
