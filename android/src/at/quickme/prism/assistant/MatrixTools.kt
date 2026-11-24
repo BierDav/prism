@@ -64,7 +64,10 @@ class MatrixClient(private val homeserver: String, private val token: String) {
             get(Matrix.encryptionPath(roomId))
             true
         } catch (e: HttpException) {
-            if (e.status == 404) false else throw IllegalStateException("Matrix didn't say whether that room is encrypted (HTTP ${e.status})")
+            // Only Matrix's own "no such state" means unencrypted; any other
+            // 404 (an endpoint it doesn't know) proves nothing.
+            if (e.status == 404 && "M_NOT_FOUND" in e.message.orEmpty()) false
+            else throw IllegalStateException("Matrix didn't say whether that room is encrypted (HTTP ${e.status})")
         }
         if (encrypted) throw ToolArgumentException("That room is end-to-end encrypted; Prism can't read or send there yet.")
     }

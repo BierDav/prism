@@ -317,7 +317,8 @@ private fun spans(spans: List<Markdown.Span>, link: Color, codeBackground: Color
 /** A tool's result, as Gemini's action card for it. */
 @Composable
 fun ToolCard(card: Card, agent: FollowedAgent? = null, onEdit: suspend (String) -> String? = { null }, now: (() -> Long)? = null) {
-    if (card is HandoffCard && agent != null && agent.agentId == card.agentId.ifEmpty { agent.agentId }) {
+    // The live agent only in its own card: a failed or other hand-off keeps its own text.
+    if (card is HandoffCard && agent != null && card.failed.isEmpty() && agent.agentId == card.agentId) {
         AgentConversation(
             title = card.title.ifEmpty { agent.title.ifEmpty { card.request } },
             activity = agent.activity,

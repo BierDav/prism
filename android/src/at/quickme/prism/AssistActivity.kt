@@ -634,6 +634,9 @@ private fun Assist(
                     starting = null
                     memory.started()
                     handoffEntry?.let { session.failedStart(it, e.message.orEmpty()) }
+                    // A new send gets a new request ID; the prompt comes back to edit.
+                    previous = null
+                    if (handoffEntry == null && text.isEmpty()) text = request.text
                     activity = null
                     sendError = e.message
                     return@LaunchedEffect
