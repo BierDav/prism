@@ -48,3 +48,25 @@
 -keep class * implements com.sun.jna.** { *; }
 -keep class at.quickme.prism.rocky.** { *; }
 -dontwarn java.awt.**
+
+# The assistant's harness (assistant/Harness.kt) on JetBrains Koog: its
+# prompts and messages are kotlinx-serialization classes (the conversation is
+# stored as JSON), looked up through their companions; Koog's optional
+# integrations (JVM server, Jackson, schema generation by reflection, SLF4J
+# bindings) aren't on Android's class path and never run.
+-keep,includedescriptorclasses class ai.koog.**$$serializer { *; }
+-keepclassmembers @kotlinx.serialization.Serializable class ai.koog.** {
+    static ** Companion;
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keepclassmembers class ai.koog.**$Companion {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep,includedescriptorclasses class at.quickme.prism.assistant.**$$serializer { *; }
+-keepclassmembers @kotlinx.serialization.Serializable class at.quickme.prism.assistant.** {
+    static ** Companion;
+    kotlinx.serialization.KSerializer serializer(...);
+}
+# Ktor's debugger detection (through Koog's Ktor server modules) asks the
+# JVM's management API, which Android doesn't have; it's never reached here.
+-dontwarn java.lang.management.**

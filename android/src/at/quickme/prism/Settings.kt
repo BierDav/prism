@@ -30,6 +30,7 @@ object Settings {
         "relay_url", "relay_token", "t3_url", "prism_url", "rocky_provisioning", "rocky_peers", "device_name",
         "telemetry_url", "telemetry_user", "telemetry_password", "netbird_setup_key", "netbird_management_url",
         "background_restricted", "background_charging_only", "activity_recognition_denied", "hotspot_key",
+        "assistant_url", "assistant_api_key", "assistant_model", "matrix_homeserver", "matrix_access_token",
     )
 
     /** Sent inside the app after provisioned settings changed. */
@@ -172,4 +173,27 @@ object Settings {
     /** NetBird's management service; NetBird's hosted one unless configured otherwise. */
     @JvmStatic
     fun netbirdManagementUrl(c: Context): String = get(c, "netbird_management_url").ifEmpty { "https://api.netbird.io:443" }
+
+    /**
+     * The assistant's model gateway (assistant/Harness.kt): an OpenAI-compatible
+     * chat completions API, by default the owner's (CLIProxyAPI).
+     */
+    @JvmStatic
+    fun assistantUrl(c: Context): String = get(c, "assistant_url").ifEmpty { "https://ai.quickme.at" }
+
+    /** The gateway's API key; unset, the overlay starts T3 agents directly, without the assistant. */
+    @JvmStatic
+    fun assistantApiKey(c: Context): String = get(c, "assistant_api_key")
+
+    /** The assistant's model on the gateway. */
+    @JvmStatic
+    fun assistantModel(c: Context): String = get(c, "assistant_model").ifEmpty { "agy-pro/gemini-4-neon" }
+
+    /** The owner's Matrix homeserver (client-server API base URL), for the assistant's Matrix tools. */
+    @JvmStatic
+    fun matrixHomeserver(c: Context): String = get(c, "matrix_homeserver")
+
+    /** The owner's Matrix access token; the assistant reads and sends Matrix messages as the owner. */
+    @JvmStatic
+    fun matrixAccessToken(c: Context): String = get(c, "matrix_access_token")
 }

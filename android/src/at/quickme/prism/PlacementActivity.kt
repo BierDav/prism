@@ -118,6 +118,7 @@ private fun PlacementHost(page: String, profileId: String, onBack: () -> Unit) {
     val placement = state.placement
     val error = state.error
     val saving = state.saving
+    var assistant by remember { mutableStateOf(AssistantProfile.get(context)) }
 
     if (page == "profile" && profileId.isNotEmpty()) {
         val profile = placement?.profiles?.firstOrNull { it.id == profileId }
@@ -140,6 +141,11 @@ private fun PlacementHost(page: String, profileId: String, onBack: () -> Unit) {
             onReload = { state.reload(context) },
             onAlertFix = { id -> state.actions(context, alertFix = id) },
             onTextGeneration = { id -> state.actions(context, textGeneration = id ?: "") },
+            assistant = assistant,
+            onAssistant = { id ->
+                AssistantProfile.set(context, id)
+                assistant = id
+            },
         )
     }
 }
@@ -425,7 +431,7 @@ private fun CompactEntryRow(
     }
 }
 
-/** Actions page: Alert fixes, Text generation, and Recent moves. */
+/** Actions page: Alert fixes, Text generation, the assistant, and Recent moves. */
 @Composable
 internal fun PlacementActionsContent(
     placement: Placement?,
@@ -435,6 +441,9 @@ internal fun PlacementActionsContent(
     onReload: () -> Unit,
     onAlertFix: (String) -> Unit,
     onTextGeneration: (String?) -> Unit,
+    /** The assistant overlay's profile on this phone (AssistantProfile), null: the default model. */
+    assistant: String? = null,
+    onAssistant: (String?) -> Unit = {},
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -516,6 +525,15 @@ internal fun PlacementActionsContent(
                         noneLabel = "None",
                         enabled = placement.profiles.isNotEmpty(),
                         onPick = onTextGeneration,
+                    )
+                    ProfileDropdown(
+                        label = "Assistant",
+                        supporting = "Agents the assistant overlay starts on this phone; Prism picks the machine and project.",
+                        profiles = placement.profiles,
+                        selectedId = assistant,
+                        noneLabel = "Default model",
+                        enabled = placement.profiles.isNotEmpty(),
+                        onPick = onAssistant,
                     )
                 }
             }

@@ -28,7 +28,7 @@ const MAX_BODY: usize = 64 << 10;
 /// The settings the server may hand a phone: every key of the app's
 /// res/xml/app_restrictions.xml except how the phone reaches this server and
 /// NetBird's enrollment, which only enrollment over USB sets.
-const SETTING_KEYS: [&str; 11] = [
+const SETTING_KEYS: [&str; 16] = [
     "relay_url",
     "relay_token",
     "t3_url",
@@ -40,6 +40,12 @@ const SETTING_KEYS: [&str; 11] = [
     "background_charging_only",
     "activity_recognition_denied",
     "hotspot_key",
+    // The assistant overlay's harness (android/src/at/quickme/prism/assistant).
+    "assistant_url",
+    "assistant_api_key",
+    "assistant_model",
+    "matrix_homeserver",
+    "matrix_access_token",
 ];
 
 /// A device's settings as the phone reads them (Go's `AndroidSettings`).
@@ -206,4 +212,31 @@ pub fn settings_pushes(rows: &[SettingRow], now: i64) -> Vec<Notification> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_assistant_settings_can_be_published() {
+        for key in [
+            "assistant_url",
+            "assistant_api_key",
+            "assistant_model",
+            "matrix_homeserver",
+            "matrix_access_token",
+        ] {
+            let body = PutBody {
+                device: "david-pixel".into(),
+                settings: BTreeMap::from([(key.to_string(), Some("x".to_string()))]),
+            };
+            assert_eq!(check(&body), Ok(()), "{key}");
+        }
+        let body = PutBody {
+            device: "david-pixel".into(),
+            settings: BTreeMap::from([("rocky_peers".to_string(), Some("x".to_string()))]),
+        };
+        assert!(check(&body).is_err(), "enrollment-only keys stay refused");
+    }
 }

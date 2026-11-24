@@ -14,14 +14,16 @@
 // (Voice.kt, VoiceWave.kt).
 //
 // Predictive Back and an upward swipe on the overlay dismiss it; the
-// navigation bar stays, and the live app remains underneath. Above the
-// composer, a row of chips each for the profile, the machine and the project,
-// most recently used first and the last one used picked; machines and
-// projects can be filtered. Projects are every machine's: one the machine
-// lacks is cloned there before the agent starts. Pinned at each row's right
-// edge: the magic pick (the machine by power and load, the project by the
-// server's model from the request), for projects no project, and search. The composer sends its request directly after
-// unlock.
+// navigation bar stays, and the live app remains underneath. The composer
+// alone asks: an agent starts on the machine and project Prism picks from the
+// request, with the assistant's placement profile (Phone › Profiles ›
+// Actions). The composer sends its request directly after unlock. While the
+// keyboard is up or an answer shows, the card spans the screen, as Gemini's.
+//
+// The card's + opens Gemini's attach menu (AssistAttach.kt): a photo from the
+// camera, the screen under the overlay, photos from the Photo Picker, any
+// file. What is attached shows at the top of the card and goes with the next
+// send (assistant/AttachmentReader.kt, assistant/PhoneScreenCapture.kt).
 
 package at.quickme.prism
 
@@ -36,10 +38,12 @@ import android.view.HapticFeedbackConstants
 import android.view.RoundedCorner
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -75,6 +79,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
@@ -170,6 +175,18 @@ import at.quickme.prism.shared.PrismError
 import at.quickme.prism.shared.ProjectCatalog
 import at.quickme.prism.shared.ProjectChoice
 import at.quickme.prism.shared.ProjectIcon
+import at.quickme.prism.shared.ProfileChoice
+import at.quickme.prism.assistant.AssistAttachment
+import at.quickme.prism.assistant.AssistantSession
+import at.quickme.prism.assistant.AssistantTranscript
+import at.quickme.prism.assistant.FollowedAgent
+import at.quickme.prism.assistant.core.HandoffCard
+import at.quickme.prism.assistant.Attached
+import at.quickme.prism.assistant.AttachmentReader
+import at.quickme.prism.assistant.OverlayWindow
+import at.quickme.prism.assistant.PhoneScreenCapture
+import at.quickme.prism.assistant.Read
+import at.quickme.prism.core.AttachmentRules
 import at.quickme.prism.ui.GeminiIcons
 import at.quickme.prism.ui.HostColor
 import at.quickme.prism.ui.PrismIcons
@@ -179,17 +196,25 @@ import at.quickme.prism.ui.rememberScreenCorners
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import org.json.JSONArray
 import org.json.JSONObject
 
-class AssistActivity : ComponentActivity() {
+class AssistActivity : ComponentActivity(), OverlayWindow {
     private var session: PrismAssistantSession? = null
+
+    /** A picker or the camera is open for the overlay, which waits for what it gives. */
+    private var awaitingResult = false
+
+    /** The screen under the overlay, for "Screen" and the harness's screenshots. */
+    private val capture = PhoneScreenCapture(this) { session?.screenshot }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val active = PrismAssistantSession.current
@@ -218,15 +243,53 @@ class AssistActivity : ComponentActivity() {
                     reducedMotion = !ValueAnimator.areAnimatorsEnabled(),
                     onClose = ::close,
                     unlock = ::unlock,
+                    capture = capture,
+                    onExternal = { awaitingResult = it },
                 )
                 }
             }
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Back from a picker: its result came just before.
+        awaitingResult = false
+    }
+
+    /**
+     * Left for anything but a picker the overlay opened (another app came to
+     * the front): gone, as noHistory would have it, which the manifest can't
+     * say any more because the overlay must outlive the camera and the
+     * document picker it opens. Not while the screen sleeps.
+     */
+    override fun onStop() {
+        super.onStop()
+        val interactive = getSystemService(android.os.PowerManager::class.java)?.isInteractive != false
+        if (!awaitingResult && !isChangingConfigurations && interactive) close()
+    }
+
     override fun onDestroy() {
         session?.detach(this)
         super.onDestroy()
+    }
+
+    /** The overlay's window fully transparent while [block] captures the screen under it. */
+    override suspend fun <T> withoutOverlay(block: suspend () -> T): T = withContext(Dispatchers.Main) {
+        val before = window.attributes.alpha
+        window.attributes = window.attributes.apply { alpha = 0f }
+        try {
+            // SurfaceFlinger takes the new alpha with the next frames.
+            repeat(2) { awaitFrame() }
+            delay(32)
+            block()
+        } finally {
+            window.attributes = window.attributes.apply { alpha = before }
+        }
+    }
+
+    private suspend fun awaitFrame() = suspendCancellableCoroutine { done ->
+        android.view.Choreographer.getInstance().postFrameCallback { done.resume(Unit) }
     }
 
     /** Gone, after the overlay has taken itself back. */
@@ -335,11 +398,16 @@ private val ConversationShape = androidx.compose.foundation.shape.RoundedCornerS
 
 private fun phase(t: Float, start: Float, length: Float) = ((t - start) / length).coerceIn(0f, 1f)
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Assist(
     reducedMotion: Boolean,
     onClose: () -> Unit,
     unlock: suspend () -> Boolean,
+    capture: PhoneScreenCapture,
+    /** Before a picker or the camera opens over the overlay. */
+    /** A picker or the camera is about to cover the overlay (true), or couldn't (false). */
+    onExternal: (Boolean) -> Unit,
 ) {
     // Milliseconds since the overlay appeared, to the glow's end.
     val clock = remember { Animatable(if (reducedMotion) GLOW_MS else 0f) }
@@ -349,25 +417,8 @@ private fun Assist(
     var swipe by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
     val memory = remember { AssistMemory(context) }
-    // The draft (prompt, picks, rows' order and scroll) lasts until a send;
-    // the lists come from the phone's cache at once and refresh behind.
-    val saved = remember { memory.draft() }
-    var text by remember { mutableStateOf(saved.text) }
-    var target by remember { mutableStateOf(saved.target ?: memory.recent(AssistMemory.MACHINES).firstOrNull() ?: "cluster") }
-    var modelKey by remember { mutableStateOf(saved.model) }
-    var project by remember { mutableStateOf(saved.project) }
-    // What each row picked as the draft began: it leads the row, then the
-    // recently used, so the pick starts at the right edge and a tap moves nothing.
-    var leadTarget by remember { mutableStateOf(saved.lead[ROW_MACHINE] ?: target) }
-    var leadModel by remember { mutableStateOf(saved.lead[ROW_MODEL]) }
-    var leadProject by remember { mutableStateOf(saved.lead[ROW_PROJECT]) }
-    val scrolls = remember { mutableStateMapOf<String, List<Int>>().apply { putAll(saved.scroll) } }
-    var machines by remember { mutableStateOf(memory.cached(AssistMemory.CACHE_MACHINES, Machines.serializer())) }
-    var machinesError by remember { mutableStateOf<String?>(null) }
-    var catalog by remember { mutableStateOf(memory.cached(AssistMemory.CACHE_PROJECTS, ProjectCatalog.serializer())) }
-    var options by remember { mutableStateOf(memory.cached(AssistMemory.options(target), AgentOptions.serializer())) }
-    var optionsError by remember { mutableStateOf<String?>(null) }
-    var reload by remember { mutableStateOf(0) }
+    // The draft lasts until a send.
+    var text by remember { mutableStateOf(memory.draft()) }
     var sending by remember { mutableStateOf(false) }
     // The agent this overlay follows once a request is sent (the last one,
     // if it was a few minutes ago), its live activity, and follow-ups sent
@@ -376,102 +427,123 @@ private fun Assist(
     var agentTitle by remember { mutableStateOf("") }
     var activity by remember { mutableStateOf<AgentActivity?>(null) }
     var activityError by remember { mutableStateOf<String?>(null) }
+    // A start the leading worker hasn't run yet: asked again with the same
+    // request ID until its agent exists (the replica answers 202 with an
+    // agent without an ID until then).
+    var starting by remember { mutableStateOf<AssistantRequest?>(null) }
     val pending = remember { mutableStateListOf<String>() }
     var refresh by remember { mutableIntStateOf(0) }
     val voice = remember { VoiceInput(context) }
     var editVoice by remember { mutableStateOf(false) }
     DisposableEffect(voice) { onDispose { voice.cancel() } }
     var sendError by remember { mutableStateOf<String?>(null) }
-    var previous by remember { mutableStateOf<Pair<AssistantRequest, String>?>(null) }
-    val model = options?.launchModels()?.firstOrNull { it.key == modelKey }
+    var previous by remember { mutableStateOf<AssistantRequest?>(null) }
+    // The on-device assistant (assistant/): it answers and acts on the phone,
+    // and hands computer work to a T3 agent, which the overlay then follows.
+    // Without its key, requests start a T3 agent directly, as before.
+    val session = remember { AssistantSession(context, capture) }
+    // The transcript entry of the hand-off whose agent the overlay follows.
+    var handoffEntry by remember { mutableStateOf(session.transcript.latestHandoff()?.first) }
     val keyboard = LocalSoftwareKeyboardController.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    // What the owner attached with the +; it goes with the next send. The
+    // overlay keeps it (and the draft) while a picker or the camera is open.
+    val attached = remember { mutableStateListOf<Attached>() }
+    var menuOpen by remember { mutableStateOf(false) }
+    var reading by remember { mutableIntStateOf(0) }
+
+    fun attach(items: List<Attached>) {
+        val room = AttachmentRules.MAX_ATTACHMENTS - attached.size
+        if (items.size > room) sendError = AttachmentRules.tooMany()
+        attached.addAll(items.take(room.coerceAtLeast(0)))
+    }
+
+    /** Reads what a picker gave, in order, and says what couldn't be attached. */
+    fun attachUris(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        reading++
+        scope.launch {
+            try {
+                val read = uris.map { AttachmentReader.read(context, it) }
+                attach(read.filterIsInstance<Read.Ok>().map { it.attached })
+                read.filterIsInstance<Read.Failed>().firstOrNull()?.let { sendError = it.message }
+            } finally {
+                reading--
+            }
+        }
+    }
+
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(AttachmentRules.MAX_ATTACHMENTS),
+    ) { attachUris(it) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { attachUris(it) }
+    var cameraShot by remember { mutableStateOf<android.net.Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+        val shot = cameraShot
+        cameraShot = null
+        if (taken && shot != null) attachUris(listOf(shot))
+    }
+
+    /** Opens a picker over the overlay, once the phone is unlocked (none shows over the lock screen). */
+    fun pick(open: () -> Unit) {
+        menuOpen = false
+        if (attached.size >= AttachmentRules.MAX_ATTACHMENTS) {
+            sendError = AttachmentRules.tooMany()
+            return
+        }
+        keyboard?.hide()
+        voice.cancel()
+        scope.launch {
+            if (!unlock()) {
+                sendError = "Unlock the phone to add photos and files."
+                return@launch
+            }
+            sendError = null
+            onExternal(true)
+            try {
+                open()
+            } catch (e: android.content.ActivityNotFoundException) {
+                onExternal(false)
+                sendError = "No app on this phone can do that."
+            }
+        }
+    }
+
+    val attachActions = AttachActions(
+        camera = {
+            pick {
+                val shot = CameraShots.next(context)
+                cameraShot = shot
+                camera.launch(shot)
+            }
+        },
+        screen = {
+            menuOpen = false
+            if (attached.size >= AttachmentRules.MAX_ATTACHMENTS) {
+                sendError = AttachmentRules.tooMany()
+            } else {
+                reading++
+                scope.launch {
+                    try {
+                        val shot = capture.captureAttached(preferInvocation = true)
+                        if (shot != null) attach(listOf(shot)) else sendError = "Couldn't capture the screen."
+                    } finally {
+                        reading--
+                    }
+                }
+            }
+        },
+        photos = {
+            pick { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        },
+        files = { pick { filePicker.launch(arrayOf("*/*")) } },
+    )
     fun progress(): Float = if (reducedMotion) 0f else maxOf(back.value, swipe)
 
     LaunchedEffect(Unit) {
         if (!reducedMotion) clock.animateTo(GLOW_MS, tween(GLOW_MS.toInt(), easing = LinearEasing))
     }
-
-    /** The project ids there are, every machine's (or the target's until those came). */
-    fun projectIds(): List<String> =
-        catalog?.projects?.map { it.id } ?: options?.projects.orEmpty().map { it.id }
-
-    /** Whether the project can be worked on from the target: a repository, or a folder there. */
-    fun here(id: String, o: AgentOptions): Boolean = target == AUTO ||
-        catalog?.projects?.firstOrNull { it.id == id }
-            ?.let { it.repository || it.machines.isEmpty() || o.machine in it.machines } != false
-
-    /** Keeps the picks that are still there; otherwise the last used, or the target's default. */
-    fun settle() {
-        val o = options ?: return
-        val models = o.launchModels()
-        if (models.none { it.key == modelKey }) {
-            modelKey = memory.recent(AssistMemory.MODELS).firstOrNull { key -> models.any { it.key == key } }
-                ?: models.firstOrNull { it.key == o.defaultModel.key }?.key
-                ?: models.firstOrNull()?.key
-        }
-        if (leadModel == null) leadModel = modelKey
-        val ids = projectIds()
-        val current = project
-        if (current == null || current != AUTO && (current !in ids || !here(current, o))) {
-            project = memory.recent(AssistMemory.PROJECTS).firstOrNull { it == AUTO || it in ids && here(it, o) }
-                ?: o.defaultProject?.takeIf { it in ids } ?: ids.lastOrNull()
-        }
-        if (leadProject == null) leadProject = project
-    }
-
-    LaunchedEffect(target, reload) {
-        optionsError = null
-        settle()
-        try {
-            val fresh = PrismApi.call(context) { agentOptions(target) }
-            memory.cache(AssistMemory.options(target), AgentOptions.serializer(), fresh)
-            options = fresh
-            settle()
-        } catch (e: PrismError) {
-            if (options == null) optionsError = e.message
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        try {
-            val fresh = PrismApi.call(context) { projects() }
-            memory.cache(AssistMemory.CACHE_PROJECTS, ProjectCatalog.serializer(), fresh)
-            catalog = fresh
-            settle()
-        } catch (_: PrismError) {
-            // The cached list, or the target's own projects, stay.
-        }
-    }
-
-    fun pickTarget(next: String) {
-        if (target == next) return
-        options = memory.cached(AssistMemory.options(next), AgentOptions.serializer())
-        optionsError = null
-        sendError = null
-        target = next
-    }
-
-    fun loadMachines() {
-        machinesError = null
-        scope.launch {
-            try {
-                val list = PrismApi.call(context) { machines() }
-                memory.cache(AssistMemory.CACHE_MACHINES, Machines.serializer(), list)
-                machines = list
-                // The machine last used can be gone or asleep now.
-                if (target != AUTO && list.choices().none { it.key == target }) {
-                    if (leadTarget == target) leadTarget = "cluster"
-                    pickTarget("cluster")
-                }
-            } catch (e: PrismError) {
-                if (machines == null) machinesError = e.message
-            }
-        }
-    }
-
-    LaunchedEffect(Unit) { loadMachines() }
 
     // While shown, the agent's thread as it goes: often while it works.
     LaunchedEffect(agentId, refresh) {
@@ -490,8 +562,99 @@ private fun Assist(
         }
     }
 
+    /** Follows the agent [agent] once it has a thread. */
+    fun follow(agent: at.quickme.prism.shared.Agent) {
+        starting = null
+        activity = AgentActivity(agent)
+        agentId = agent.id
+        memory.started()
+        memory.conversation(agent.id)
+        handoffEntry?.let { session.started(it, agent.id, agent.title) }
+    }
+
+    /** The assistant handed a request to T3: follow its agent, or its start until it runs. */
+    fun handedOff(entryId: String, card: HandoffCard) {
+        handoffEntry = entryId
+        pending.clear()
+        agentTitle = card.title.ifEmpty { card.request }
+        if (card.agentId.isNotEmpty()) {
+            if (card.followUp) pending.add(card.request)
+            follow(at.quickme.prism.shared.Agent(id = card.agentId, title = card.title))
+            refresh++
+        } else {
+            agentId = null
+            activity = null
+            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+        }
+    }
+    session.onHandoff = ::handedOff
+    session.followed = { agentId?.let { it to (activity?.agent?.displayTitle ?: agentTitle) } }
+
+    // Reopened while a start was still waiting for the leader: keep asking
+    // for its agent (it is newer than any agent followed before it).
+    LaunchedEffect(Unit) {
+        if (starting != null) return@LaunchedEffect
+        val (entry, card) = session.transcript.latestHandoff() ?: (null to null)
+        if (card != null && card.agentId.isEmpty() && card.requestId.isNotEmpty() && card.failed.isEmpty()) {
+            handoffEntry = entry
+            agentId = null
+            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+            return@LaunchedEffect
+        }
+        val (id, request, project) = memory.starting() ?: return@LaunchedEffect
+        if (!session.configured) {
+            agentId = null
+            agentTitle = request
+            pending.add(request)
+            starting = AssistantRequest(id, AUTO, AssistantProfile.model(context), project, request)
+        }
+    }
+
+    // A start still waiting for the leader: ask again until it ran.
+    LaunchedEffect(starting) {
+        val request = starting ?: return@LaunchedEffect
+        var wait = 2000L
+        while (true) {
+            delay(wait)
+            try {
+                val agent = PrismApi.call(context) {
+                    startAgent("do", request.target, request.text, request.id, request.model, request.project)
+                }
+                if (agent.id.isNotEmpty()) {
+                    follow(agent)
+                    return@LaunchedEffect
+                }
+                activity = AgentActivity(agent)
+                activityError = null
+                wait = 2000L
+            } catch (e: PrismError) {
+                // The request's own refusal ends it; anything else (no
+                // replica, the workers busy) is asked again, more slowly.
+                if (e.code == "failed" || e.status in 400..499 && e.status != 408 && e.status != 429) {
+                    starting = null
+                    memory.started()
+                    handoffEntry?.let { session.failedStart(it, e.message.orEmpty()) }
+                    // A new send gets a new request ID; the prompt comes back to edit.
+                    previous = null
+                    if (handoffEntry == null && text.isEmpty()) text = request.text
+                    activity = null
+                    sendError = e.message
+                    return@LaunchedEffect
+                }
+                activityError = e.message
+                wait = minOf(wait * 2, 15_000L)
+            }
+        }
+    }
+
+    /** Leaves the agent followed for a new request (the transcript's new-conversation control calls it). */
     fun newRequest() {
+        if (sending) return
+        previous = null
+        session.clear()
+        handoffEntry = null
         agentId = null
+        starting = null
         activity = null
         activityError = null
         pending.clear()
@@ -499,19 +662,7 @@ private fun Assist(
         memory.forgetConversation()
     }
 
-    LaunchedEffect(text, target, modelKey, project, leadTarget, leadModel, leadProject, scrolls.toMap()) {
-        memory.saveDraft(
-            AssistDraft(
-                text, target, modelKey, project,
-                buildMap {
-                    put(ROW_MACHINE, leadTarget)
-                    leadModel?.let { put(ROW_MODEL, it) }
-                    leadProject?.let { put(ROW_PROJECT, it) }
-                },
-                scrolls.toMap(),
-            ),
-        )
-    }
+    LaunchedEffect(text) { memory.saveDraft(text) }
 
     fun resetDismissal() {
         scope.launch {
@@ -535,10 +686,11 @@ private fun Assist(
         }
     }
 
-    /** A follow-up into the agent's thread. */
-    fun reply(id: String, request: String) {
-        val requestId = previous?.takeIf { it.first.text == request && it.first.target == id }?.second ?: PrismClient.requestId()
-        previous = AssistantRequest(id, null, "", request) to requestId
+    /** A follow-up into the agent's thread, with [files] attached. */
+    fun reply(id: String, request: String, files: List<AssistAttachment>) {
+        val payload = previous?.takeIf { it.text == request && it.target == id && it.attachments == files }
+            ?: AssistantRequest(PrismClient.requestId(), id, null, "", request, files)
+        previous = payload
         sending = true
         sendError = null
         keyboard?.hide()
@@ -549,14 +701,16 @@ private fun Assist(
                     sendError = "Unlock the phone to send."
                     return@launch
                 }
-                pending.add(request)
+                if (request.isNotEmpty()) pending.add(request)
                 text = ""
-                val agent = PrismApi.call(context) { sendToAgent(id, request, requestId) }
+                // The attachments go with payload; the harness takes them.
+                val agent = PrismApi.call(context) { sendToAgent(id, payload.text, payload.id) }
                 activity = activity?.copy(agent = agent) ?: AgentActivity(agent)
                 memory.conversation(id)
+                attached.removeAll { it.attachment in payload.attachments }
                 refresh++
             } catch (e: PrismError) {
-                pending.remove(request)
+                if (request.isNotEmpty()) pending.remove(request)
                 text = request
                 sendError = e.message
             } finally {
@@ -565,18 +719,41 @@ private fun Assist(
         }
     }
 
-    /** Sends [spoken] or the typed text: a new agent, or a follow-up to the one shown. */
+    /**
+     * Sends [spoken] or the typed text, with what is attached: a follow-up to
+     * the agent shown, or a new agent on the machine and project Prism picks,
+     * with the assistant's profile (Phone › Profiles › Actions). Attachments
+     * alone are a request too.
+     */
     fun send(spoken: String? = null) {
         val request = (spoken ?: text).trim()
-        if (request.isEmpty() || sending || leave.isRunning || leave.value > 0f) return
-        agentId?.let { return reply(it, request) }
-        val m = model ?: return
-        val p = project ?: return
-        if (options == null) return
-
-        val payload = AssistantRequest(target, m, p, request)
-        val requestId = previous?.takeIf { it.first == payload }?.second ?: PrismClient.requestId()
-        previous = payload to requestId
+        val files = attached.map { it.attachment }
+        if (request.isEmpty() && files.isEmpty()) return
+        if (session.configured) {
+            if (session.running || reading > 0 || leave.isRunning || leave.value > 0f) return
+            menuOpen = false
+            sendError = null
+            keyboard?.hide()
+            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            scope.launch {
+                if (!unlock()) {
+                    sendError = "Unlock the phone to send."
+                    return@launch
+                }
+                memory.clearDraft()
+                text = ""
+                attached.removeAll { it.attachment in files }
+                session.send(request, files)
+            }
+            return
+        }
+        if (sending || reading > 0 || starting != null || leave.isRunning || leave.value > 0f) return
+        menuOpen = false
+        agentId?.let { return reply(it, request, files) }
+        val model = AssistantProfile.model(context)
+        val payload = previous?.takeIf { it.target == AUTO && it.text == request && it.model == model && it.attachments == files }
+            ?: AssistantRequest(PrismClient.requestId(), AUTO, model, AUTO, request, files)
+        previous = payload
         sending = true
         sendError = null
         keyboard?.hide()
@@ -588,21 +765,21 @@ private fun Assist(
                     return@launch
                 }
                 val agent = PrismApi.call(context) {
-                    startAgent("do", payload.target, payload.text, requestId, m, payload.project)
+                    startAgent("do", payload.target, payload.text, payload.id, payload.model, payload.project)
                 }
                 PrismPush.changed()
-                memory.used(AssistMemory.MODELS, m.key)
-                memory.used(AssistMemory.MACHINES, payload.target)
-                memory.used(AssistMemory.PROJECTS, payload.project)
                 memory.clearDraft()
                 text = ""
+                attached.removeAll { it.attachment in payload.attachments }
                 // The overlay stays and follows the agent.
                 pending.clear()
-                pending.add(request)
-                agentTitle = request
-                activity = AgentActivity(agent)
-                agentId = agent.id
-                memory.conversation(agent.id)
+                if (request.isNotEmpty()) pending.add(request)
+                agentTitle = request.ifEmpty { payload.attachments.firstOrNull()?.name.orEmpty() }
+                if (agent.id.isNotEmpty()) follow(agent) else {
+                    activity = AgentActivity(agent)
+                    memory.starting(payload.id, payload.text, payload.project)
+                    starting = payload
+                }
             } catch (e: PrismError) {
                 sendError = e.message
             } finally {
@@ -668,7 +845,6 @@ private fun Assist(
             }
         }
     }
-
     // Predictive back: the overlay follows the gesture and goes on release.
     PredictiveBackHandler { progress ->
         try {
@@ -679,6 +855,8 @@ private fun Assist(
             throw e
         }
     }
+    // With the + menu open, Back closes the menu first.
+    BackHandler(enabled = menuOpen) { menuOpen = false }
 
     val corners = rememberScreenCorners()
     val primary = MaterialTheme.colorScheme.primary
@@ -726,7 +904,8 @@ private fun Assist(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClickLabel = "Close Prism",
-                    onClick = ::close,
+                    // A tap beside the + menu closes the menu, not the overlay.
+                    onClick = { if (menuOpen) menuOpen = false else close() },
                 )
                 .pointerInput(reach, reducedMotion) {
                     detectVerticalDragGestures(
@@ -739,105 +918,80 @@ private fun Assist(
                 },
         )
         val lift = with(LocalDensity.current) { 20.dp.toPx() }
-        val following = agentId
+        val following = agentId != null || starting != null
+        val chatting = session.configured && !session.transcript.isEmpty
+        // Gemini's card spans the screen while the keyboard is up or an
+        // answer shows, and sits back in its margins otherwise.
+        val wide = WindowInsets.isImeVisible || following || chatting || menuOpen
+        val margin by androidx.compose.animation.core.animateDpAsState(
+            if (wide) WideMargin else sideMargin(LocalConfiguration.current.screenWidthDp),
+            if (reducedMotion) snap() else tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
+            label = "margin",
+        )
         CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { AssistComposer(
             text = text,
             onText = { text = it; sendError = null },
-            canSend = following != null || options != null && model != null && project != null,
-            sending = sending,
+            canSend = (if (session.configured) !session.running else starting == null) && reading == 0,
+            sending = sending || session.running,
             onSend = { send() },
             animate = !reducedMotion,
-            error = (if (following == null) optionsError else null) ?: sendError ?: voice.error,
-            onReload = if (following == null && optionsError != null) ({ reload++ }) else null,
-            placeholder = if (following != null) "Reply to the agent" else "Ask Prism",
+            error = sendError ?: voice.error,
+            placeholder = if (following && !session.configured) "Reply to the agent" else "Ask Prism",
             voice = voice,
             onMic = ::listen,
             onWave = ::listenToEdit,
-            onNew = if (following != null) ::newRequest else null,
+            attachments = attached,
+            onRemove = { attached.remove(it) },
+            // Only the assistant reads attachments; a T3 agent gets text.
+            attach = if (session.configured) attachActions else null,
+            menuOpen = menuOpen,
+            onMenu = { menuOpen = it },
             onCard = { plate = it },
             selectors = {
-                if (following != null) {
-                    AgentConversation(
-                        title = agentTitle.ifEmpty { "Agent" },
+                val followed = (agentId ?: starting?.let { "" })?.let { id ->
+                    FollowedAgent(
+                        agentId = id,
+                        title = agentTitle.ifEmpty { activity?.agent?.title.orEmpty() },
                         activity = activity,
                         pending = pending,
                         error = activityError,
-                        shape = ConversationShape,
                         onOpen = if (activity?.agent?.link != null || activity?.agent?.t3 != null) ::openThread else null,
                         onStop = ::stopAgent,
+                    )
+                }
+                if (chatting) {
+                    AssistantTranscript(
+                        transcript = session.transcript,
+                        running = session.running,
+                        agent = followed,
+                        onNew = ::newRequest,
+                        onEdit = session::edit,
                         modifier = Modifier.fillMaxWidth().chipEnter(0),
                     )
                     return@AssistComposer
                 }
-                val choices = options
-                val models = choices?.launchModels().orEmpty()
-                val machineList = machines
-                val profiles = choices?.profiles.orEmpty()
-                AssistChips(
-                    row = 2,
-                    kind = if (profiles.isNotEmpty() || choices == null) "Profile" else "Model",
-                    choices = models.map { m ->
-                        AssistChoice(m.key, profiles.firstOrNull { it.model == m }?.let { it.label.ifEmpty { it.id } } ?: m.shortName)
-                    }.byRecent(leadModel, memory.recent(AssistMemory.MODELS)),
-                    selected = modelKey,
-                    enabled = !sending,
-                    onPick = { key -> modelKey = key; sendError = null },
-                    scroll = scrolls[ROW_MODEL],
-                    onScroll = { scrolls[ROW_MODEL] = it },
-                )
-                AssistChips(
-                    row = 1,
-                    kind = "Machine",
-                    choices = machineList?.choices()?.byRecent(leadTarget, memory.recent(AssistMemory.MACHINES))
-                        ?: listOf(machineChoice(target, if (target == "cluster") choices?.machine ?: "Cluster" else target)),
-                    selected = target,
-                    enabled = !sending,
-                    searchable = true,
-                    status = machinesError,
-                    onRetry = if (machinesError != null) ::loadMachines else null,
-                    onPick = ::pickTarget,
-                    pinned = listOf(
-                        PinnedChoice(
-                            AUTO, "Pick the machine: the strongest one that is not busy", PrismIcons.Sparkle,
-                            choices?.picked?.let { if (it == "cluster") choices.machine else it } ?: "Auto",
-                        ),
-                    ),
-                    scroll = scrolls[ROW_MACHINE],
-                    onScroll = { scrolls[ROW_MACHINE] = it },
-                )
-                val projectList = (catalog?.projects?.map { it.choice() }
-                    ?: choices?.projects.orEmpty().map { it.choice() }).filter { it.key.isNotEmpty() }
-                AssistChips(
-                    row = 0,
-                    kind = "Project",
-                    choices = projectList.byRecent(leadProject, memory.recent(AssistMemory.PROJECTS)),
-                    selected = project,
-                    enabled = !sending,
-                    searchable = true,
-                    onPick = { id ->
-                        project = id
-                        sendError = null
-                        // A folder without a git remote is on its machine only: go there.
-                        val home = catalog?.projects?.firstOrNull { it.id == id }
-                            ?.takeIf { !it.repository && it.machines.isNotEmpty() }?.machines
-                        if (home != null && target != AUTO && choices?.machine !in home) {
-                            val host = home.first()
-                            pickTarget(if (host == machineList?.cluster?.runsOn) "cluster" else host)
-                        }
-                    },
-                    scroll = scrolls[ROW_PROJECT],
-                    onScroll = { scrolls[ROW_PROJECT] = it },
-                    pinned = listOf(
-                        PinnedChoice("", "No project: a scratch folder", PrismIcons.Chat, "No project"),
-                        PinnedChoice(AUTO, "Pick the project from the request", PrismIcons.Sparkle, "Auto"),
-                    ),
+                if (!following) {
+                    if (!session.configured) NotSetUp(Modifier.chipEnter(0))
+                    return@AssistComposer
+                }
+                AgentConversation(
+                    title = agentTitle.ifEmpty { activity?.agent?.title?.takeIf { it.isNotEmpty() } ?: "Agent" },
+                    activity = activity,
+                    pending = pending,
+                    error = activityError,
+                    shape = ConversationShape,
+                    onOpen = if (activity?.agent?.link != null || activity?.agent?.t3 != null) ::openThread else null,
+                    onStop = ::stopAgent,
+                    onNew = ::newRequest,
+                    modifier = Modifier.fillMaxWidth().chipEnter(0),
                 )
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).union(WindowInsets.statusBars))
+                .padding(top = 8.dp)
                 // Gemini's card: 40 dp from the sides (less on a narrow phone), 8 dp from the bottom, at most 696 dp wide.
-                .padding(horizontal = sideMargin(LocalConfiguration.current.screenWidthDp))
+                .padding(horizontal = margin)
                 .padding(bottom = 8.dp)
                 .widthIn(max = 696.dp)
                 .fillMaxWidth()
@@ -857,6 +1011,20 @@ private fun Assist(
     }
 }
 
+/** Without assistant_api_key: what the overlay does instead. */
+@Composable
+private fun NotSetUp(modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Text(
+        "The assistant isn't set up on this phone (no assistant_api_key): requests start a T3 agent.",
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.onSurfaceVariant,
+        modifier = modifier
+            .background(colors.surfaceContainerHigh.copy(alpha = 0.92f), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
+
 /** A light indigo veil, heavier at the bottom where the composer sits. */
 private fun DrawScope.drawVeil(t: Float, gone: Float) {
     val a = Decelerate.transform(phase(t, 0f, 300f)) * gone
@@ -869,81 +1037,53 @@ private fun DrawScope.drawVeil(t: Float, gone: Float) {
     )
 }
 
-/** A request as sent, to send it again with the same ID: [target] is the agent's ID for a follow-up. */
-private data class AssistantRequest(val target: String, val model: ModelChoice?, val project: String, val text: String)
-
-/** The model of each choice the assistant offers: T3's placement profiles, or without any its models. */
-internal fun AgentOptions.launchModels(): List<ModelChoice> =
-    if (profiles.isNotEmpty()) profiles.map { it.model } else models
-
-private val ModelChoice.key get() = "$instanceId|$model"
-
-/** The machines an agent can start on now; the cluster's host first, as the cluster. */
-private fun Machines.choices(): List<AssistChoice> {
-    val host = cluster?.runsOn.orEmpty()
-    return listOf(machineChoice("cluster", host.ifEmpty { "Cluster" })) +
-        machines.filter { it.reachable && it.name != host }.map { machineChoice(it.name, it.name) }
-}
-
-/** A machine in its colour, as everywhere in Prism. */
-internal fun machineChoice(key: String, host: String) = AssistChoice(
-    key, host, accent = HostColor.of(host),
-    leading = { Icon(PrismIcons.Server, null, Modifier.size(ChipIconSize)) },
+/**
+ * A request as sent, to send it again with the same [id]: [target] is the
+ * agent's ID for a follow-up; [attachments] what the owner attached.
+ */
+private data class AssistantRequest(
+    val id: String,
+    val target: String,
+    val model: ModelChoice?,
+    val project: String,
+    val text: String,
+    val attachments: List<AssistAttachment> = emptyList(),
 )
 
-/** A project with its T3 icon; the scratch folder has none. */
-internal fun ProjectChoice.choice() = projectChoice(id, name, icon)
+/**
+ * The placement profile the assistant's agents start with (Phone ›
+ * Profiles › Actions › Assistant); the machine and the project are always
+ * Prism's pick. Unset, the worker's own default model applies.
+ */
+internal object AssistantProfile {
+    private const val KEY = "profile"
 
-internal fun CatalogProject.choice() = projectChoice(id, name, icon)
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences("assistant", Context.MODE_PRIVATE)
 
-private fun projectChoice(id: String, name: String, icon: ProjectIcon?) = AssistChoice(
-    id, name,
-    leading = if (id.isEmpty()) null else ({ ProjectGlyph(name, icon, size = ChipIconSize) }),
-)
+    fun get(context: Context): String? = prefs(context).getString(KEY, null)?.takeIf { it.isNotEmpty() }
 
-/** [lead] first, then the most recently used; the rest as the server lists them. */
-internal fun List<AssistChoice>.byRecent(lead: String?, recent: List<String>): List<AssistChoice> {
-    val order = if (lead == null) recent else listOf(lead) + recent
-    return sortedBy { order.indexOf(it.key).let { i -> if (i < 0) Int.MAX_VALUE else i } }
+    fun set(context: Context, id: String?) {
+        prefs(context).edit().apply { if (id.isNullOrEmpty()) remove(KEY) else putString(KEY, id) }.apply()
+    }
+
+    /** The launch's model: the profile on T3's placement instance, or null for the default. */
+    fun model(context: Context): ModelChoice? = get(context)?.let { ProfileChoice(it).model }
 }
 
-/** The assistant's choices on this phone, most recently used first. */
+/** What the overlay keeps on this phone: the draft and the agent it follows. */
 internal class AssistMemory(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("assistant", Context.MODE_PRIVATE)
 
-    /** The last answer for [key], or null. */
-    fun <T> cached(key: String, serializer: KSerializer<T>): T? = try {
-        prefs.getString("cache:$key", null)?.let { PrismClient.json.decodeFromString(serializer, it) }
-    } catch (_: Exception) {
-        null
-    }
-
-    fun <T> cache(key: String, serializer: KSerializer<T>, value: T) {
-        prefs.edit().putString("cache:$key", PrismClient.json.encodeToString(serializer, value)).apply()
-    }
-
-    fun draft(): AssistDraft = try {
-        val o = JSONObject(prefs.getString(DRAFT, null) ?: return AssistDraft())
-        fun str(name: String) = if (o.has(name) && !o.isNull(name)) o.getString(name) else null
-        fun obj(name: String) = o.optJSONObject(name) ?: JSONObject()
-        val lead = obj("lead").let { l -> l.keys().asSequence().associateWith { l.getString(it) } }
-        val scroll = obj("scroll").let { l ->
-            l.keys().asSequence().associateWith { k -> l.getJSONArray(k).let { a -> List(a.length()) { a.getInt(it) } } }
-        }
-        AssistDraft(o.optString("text"), str("target"), str("model"), str("project"), lead, scroll)
+    /** The draft's text; earlier versions kept it in a JSON object with the chips' picks. */
+    fun draft(): String = try {
+        JSONObject(prefs.getString(DRAFT, null) ?: return "").optString("text")
     } catch (_: org.json.JSONException) {
-        AssistDraft()
+        ""
     }
 
-    fun saveDraft(d: AssistDraft) {
-        val o = JSONObject()
-            .put("text", d.text)
-            .put("target", d.target ?: JSONObject.NULL)
-            .put("model", d.model ?: JSONObject.NULL)
-            .put("project", d.project ?: JSONObject.NULL)
-            .put("lead", JSONObject(d.lead))
-            .put("scroll", JSONObject().apply { d.scroll.forEach { (k, v) -> put(k, JSONArray(v)) } })
-        prefs.edit().putString(DRAFT, o.toString()).apply()
+    fun saveDraft(text: String) {
+        prefs.edit().putString(DRAFT, JSONObject().put("text", text).toString()).apply()
     }
 
     fun clearDraft() {
@@ -954,381 +1094,70 @@ internal class AssistMemory(context: Context) {
     fun conversation(): String? {
         val at = prefs.getLong(CONVERSATION_AT, 0L)
         if (System.currentTimeMillis() - at > RESUME_MS) return null
-        return prefs.getString(CONVERSATION, null)
+        return prefs.getString(CONVERSATION, null)?.takeIf { it.isNotEmpty() }
     }
 
     fun conversation(id: String) {
+        if (id.isEmpty()) return
         prefs.edit().putString(CONVERSATION, id).putLong(CONVERSATION_AT, System.currentTimeMillis()).apply()
     }
 
     fun forgetConversation() {
-        prefs.edit().remove(CONVERSATION).remove(CONVERSATION_AT).apply()
+        prefs.edit().remove(CONVERSATION).remove(CONVERSATION_AT).remove(STARTING).apply()
     }
 
-    fun recent(kind: String): List<String> = try {
-        val list = JSONArray(prefs.getString(kind, null) ?: return emptyList())
-        List(list.length()) { list.getString(it) }
-    } catch (_: org.json.JSONException) {
-        emptyList()
+    /** A direct start the leader hadn't run yet when the overlay closed: its request ID, text and project. */
+    fun starting(): Triple<String, String, String>? {
+        if (System.currentTimeMillis() - prefs.getLong(CONVERSATION_AT, 0L) > RESUME_MS) return null
+        return try {
+            val o = JSONObject(prefs.getString(STARTING, null) ?: return null)
+            Triple(o.getString("id"), o.getString("text"), o.getString("project"))
+        } catch (_: org.json.JSONException) {
+            null
+        }
     }
 
-    fun used(kind: String, key: String) {
-        val list = (listOf(key) + recent(kind).filter { it != key }).take(KEEP)
-        prefs.edit().putString(kind, JSONArray(list).toString()).apply()
+    fun starting(id: String, text: String, project: String) {
+        prefs.edit()
+            .putString(STARTING, JSONObject().put("id", id).put("text", text).put("project", project).toString())
+            .remove(CONVERSATION)
+            .putLong(CONVERSATION_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun started() {
+        prefs.edit().remove(STARTING).apply()
     }
 
     companion object {
-        const val MODELS = "models"
-        const val MACHINES = "machines"
-        /** A repository's ID is the same on every machine. */
-        const val PROJECTS = "projects:all"
-        const val CACHE_MACHINES = "machines"
-        const val CACHE_PROJECTS = "projects"
-        fun options(target: String) = "options:$target"
+        private const val STARTING = "starting"
         private const val DRAFT = "draft"
         private const val CONVERSATION = "conversation"
         private const val CONVERSATION_AT = "conversation_at"
         /** Opened again within this, the overlay shows the same agent. */
         private const val RESUME_MS = 10 * 60 * 1000L
-        private const val KEEP = 30
     }
 }
 
-/** What the overlay shows until a send: kept across openings. */
-internal data class AssistDraft(
-    val text: String = "",
-    val target: String? = null,
-    val model: String? = null,
-    val project: String? = null,
-    /** Each row's pick when the draft began, which leads it. */
-    val lead: Map<String, String> = emptyMap(),
-    /** Each row's first visible chip and its offset. */
-    val scroll: Map<String, List<Int>> = emptyMap(),
-)
+/**
+ * Where the camera writes the photo it takes for the overlay: a file in
+ * Prism's cache, shared with the camera app through Prism's FileProvider
+ * (res/xml/attach_paths.xml); the ones before are deleted.
+ */
+internal object CameraShots {
+    fun next(context: Context): android.net.Uri {
+        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
+        val file = java.io.File(dir, "photo-${System.currentTimeMillis()}.jpg")
+        return androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".attach", file)
+    }
+}
 
-/** The magic pick, as machine or project. */
+/** The magic pick, as machine and project: Prism chooses from the request. */
 private const val AUTO = "auto"
 
-private const val ROW_MODEL = "model"
-private const val ROW_MACHINE = "machine"
-private const val ROW_PROJECT = "project"
-
-/** Gemini's suggestion chips: 48 dp tall, 16 dp corners, the card's white, 14 sp text. */
-private val ChipHeight = 48.dp
-private val ChipIconSize = 20.dp
-private val ChipRadius = 24.dp
-private val ChipShape = androidx.compose.foundation.shape.RoundedCornerShape(ChipRadius)
-private val ChipText = androidx.compose.ui.text.TextStyle(fontFamily = at.quickme.prism.ui.TextFamily, fontSize = 14.sp, lineHeight = 20.sp)
-
-/** Gemini's chips are black or white whatever the palette; picked ones here are filled. */
-@Composable
-private fun Modifier.chipLook(fill: Color? = null): Modifier {
-    val colors = MaterialTheme.colorScheme
-    val dark = overlayDark()
-    return geminiChip(fill ?: if (dark) Color.Black else Color.White, colors.primary, dark, ChipRadius)
-}
-
-/**
- * A chip as Gemini draws its suggestions: the card's colour, no outline or
- * shadow, 12 dp before and 16 dp after. Picked, it is Gemini's light blue,
- * or [accent] (a machine's colour) with white on it.
- */
-@Composable
-private fun GeminiChip(
-    selected: Boolean,
-    onClick: () -> Unit,
-    enabled: Boolean,
-    accent: Color?,
-    leading: (@Composable () -> Unit)?,
-    modifier: Modifier = Modifier,
-    label: @Composable () -> Unit,
-) {
-    val colors = MaterialTheme.colorScheme
-    val fill = when {
-        !selected -> null
-        accent != null -> accent
-        else -> colors.primaryContainer
-    }
-    val content = when {
-        !selected -> colors.onSurface
-        accent != null -> Color.White
-        else -> colors.onPrimaryContainer
-    }
-    Surface(
-        onClick = onClick,
-        enabled = enabled,
-        shape = ChipShape,
-        color = Color.Transparent,
-        contentColor = content,
-        modifier = modifier.height(ChipHeight).chipLook(fill).semantics { this.selected = selected }
-            .graphicsLayer { alpha = if (enabled) 1f else 0.38f },
-    ) {
-        Row(
-            Modifier.padding(start = 12.dp, end = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (leading != null) {
-                CompositionLocalProvider(LocalContentColor provides if (selected || accent == null) content else accent) {
-                    leading()
-                }
-                Box(Modifier.width(8.dp))
-            }
-            label()
-        }
-    }
-}
-private val PinnedWidth = 48.dp
-
-/** A choice pinned at the row's right edge as an icon; its [label] shows while picked. */
-internal data class PinnedChoice(val key: String, val description: String, val icon: ImageVector, val label: String? = null)
-
-/** A chip: [accent] fills it while picked and tints its [leading] icon. */
-internal data class AssistChoice(
-    val key: String,
-    val label: String,
-    val accent: Color? = null,
-    val leading: (@Composable () -> Unit)? = null,
-)
-
-/**
- * One row of chips from the right edge leftwards, scrolling sideways. A
- * [searchable] row keeps its search chip at the right edge (it becomes a
- * field filtering the row; Done picks the first match), and the chips fade
- * out as they scroll under it.
- */
-@Composable
-internal fun AssistChips(
-    kind: String,
-    choices: List<AssistChoice>,
-    selected: String?,
-    enabled: Boolean,
-    onPick: (String) -> Unit,
-    searchable: Boolean = false,
-    status: String? = null,
-    onRetry: (() -> Unit)? = null,
-    scroll: List<Int>? = null,
-    onScroll: (List<Int>) -> Unit = {},
-    pinned: List<PinnedChoice> = emptyList(),
-    /** Which row this is from the bottom, for the order the chips come in. */
-    row: Int = 0,
-) {
-    var query by remember { mutableStateOf<String?>(null) }
-    val shown = query?.trim()?.takeIf { it.isNotEmpty() }
-        ?.let { q -> choices.filter { it.label.contains(q, ignoreCase = true) } } ?: choices
-    val state = rememberLazyListState(scroll?.getOrNull(0) ?: 0, scroll?.getOrNull(1) ?: 0)
-    val index = shown.indexOfFirst { it.key == selected }
-    LaunchedEffect(state) {
-        snapshotFlow { listOf(state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset) }
-            .drop(1)
-            .collectLatest {
-                delay(300)
-                onScroll(it)
-            }
-    }
-    // A row scrolled where it was last time stays there as it opens.
-    var restored by remember { mutableStateOf(scroll != null) }
-    // The width of what is pinned at the right edge, which the chips pass under.
-    var pinnedWidth by remember { mutableIntStateOf(0) }
-    val density = LocalDensity.current
-    // Bring the picked chip into view, as when the last one used is far along.
-    LaunchedEffect(index) {
-        if (restored) {
-            restored = false
-            return@LaunchedEffect
-        }
-        if (index < 0) return@LaunchedEffect
-        val info = state.layoutInfo
-        val seen = info.visibleItemsInfo.firstOrNull { it.index == index }
-        if (seen == null || seen.offset < info.viewportStartOffset || seen.offset + seen.size > info.viewportEndOffset) {
-            state.animateScrollToItem(index)
-        }
-    }
-    fun pick(key: String) {
-        query = null
-        onPick(key)
-    }
-    val gap = 8.dp
-    Box(Modifier.fillMaxWidth()) {
-        LazyRow(
-            state = state,
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { contentDescription = kind }
-                // Chips fade out under the search chip, and at the left edge
-                // while more lie beyond it.
-                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    val fade = 16.dp.toPx()
-                    if (pinnedWidth > 0) {
-                        val under = size.width - pinnedWidth
-                        drawRect(
-                            Brush.horizontalGradient(
-                                0f to Color.Black, 1f to Color.Transparent,
-                                startX = under - gap.toPx(), endX = under + minOf(fade, pinnedWidth / 2f),
-                            ),
-                            blendMode = BlendMode.DstIn,
-                        )
-                    }
-                    if (state.canScrollForward) {
-                        drawRect(
-                            Brush.horizontalGradient(0f to Color.Transparent, 1f to Color.Black, startX = 0f, endX = fade),
-                            blendMode = BlendMode.DstIn,
-                        )
-                    }
-                },
-            contentPadding = PaddingValues(end = if (pinnedWidth > 0) with(density) { pinnedWidth.toDp() } + gap else 0.dp),
-            reverseLayout = true,
-            horizontalArrangement = Arrangement.spacedBy(gap, Alignment.End),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            itemsIndexed(shown, key = { _, it -> "choice:" + it.key }) { i, choice ->
-                GeminiChip(
-                    modifier = Modifier.chipEnter(row + 1 + minOf(i, 5)),
-                    selected = choice.key == selected,
-                    onClick = { pick(choice.key) },
-                    enabled = enabled,
-                    accent = choice.accent,
-                    leading = choice.leading,
-                ) {
-                    Text(
-                        choice.label,
-                        style = ChipText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 220.dp),
-                    )
-                }
-            }
-            if (status != null) item(key = "status") {
-                Surface(
-                    onClick = { onRetry?.invoke() },
-                    enabled = onRetry != null,
-                    shape = ChipShape,
-                    color = Color.Transparent,
-                    modifier = Modifier.height(ChipHeight).chipLook(),
-                ) {
-                    Text(
-                        if (onRetry != null) "$status · Retry" else status,
-                        Modifier.wrapContentHeight().padding(horizontal = 14.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (onRetry != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-        if (pinned.isNotEmpty() || searchable) {
-            Row(
-                Modifier.align(Alignment.CenterEnd).onSizeChanged { pinnedWidth = it.width }.chipEnter(row),
-                horizontalArrangement = Arrangement.spacedBy(gap),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                // While searching, the field takes the room of the others.
-                if (query == null) pinned.forEach { p ->
-                    PinnedButton(p, selected = p.key == selected, enabled = enabled, onClick = { pick(p.key) })
-                }
-                if (searchable) {
-                    ChipSearch(
-                        kind = kind,
-                        query = query,
-                        onQuery = { query = it },
-                        enabled = enabled,
-                        onDone = { shown.firstOrNull()?.let { pick(it.key) } },
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** An icon at the row's edge; picked, it is filled and shows its label. */
-@Composable
-private fun PinnedButton(choice: PinnedChoice, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Surface(
-        onClick = onClick,
-        enabled = enabled,
-        shape = ChipShape,
-        color = Color.Transparent,
-        contentColor = if (selected) colors.onPrimaryContainer else colors.onSurface,
-        modifier = Modifier.height(ChipHeight).chipLook(if (selected) colors.primaryContainer else null).widthIn(min = PinnedWidth).semantics {
-            contentDescription = choice.description
-            this.selected = selected
-        },
-    ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(choice.icon, null, Modifier.size(ChipIconSize))
-            if (selected && choice.label != null) {
-                Text(
-                    choice.label, Modifier.padding(start = 8.dp).widthIn(max = 160.dp),
-                    style = ChipText, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-/** The search chip, or once tapped the field it turns into. */
-@Composable
-private fun ChipSearch(
-    kind: String,
-    query: String?,
-    onQuery: (String?) -> Unit,
-    enabled: Boolean,
-    onDone: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val colors = MaterialTheme.colorScheme
-    val focus = remember { FocusRequester() }
-    Surface(
-        onClick = { if (query == null) onQuery("") else focus.requestFocus() },
-        enabled = enabled,
-        shape = ChipShape,
-        color = Color.Transparent,
-        modifier = modifier.height(ChipHeight).chipLook().widthIn(min = PinnedWidth)
-            .semantics { if (query == null) contentDescription = "Filter ${kind.lowercase()}s" },
-    ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Rounded.Search, null, Modifier.size(ChipIconSize), tint = colors.onSurface)
-            if (query != null) {
-                BasicTextField(
-                    value = query,
-                    onValueChange = { onQuery(it) },
-                    singleLine = true,
-                    textStyle = ChipText.copy(color = colors.onSurface),
-                    cursorBrush = SolidColor(colors.onSurface),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onDone() }),
-                    modifier = Modifier.padding(start = 8.dp).width(140.dp).focusRequester(focus)
-                        .semantics { contentDescription = "Filter ${kind.lowercase()}s" },
-                    decorationBox = { field ->
-                        Box(contentAlignment = Alignment.CenterStart) {
-                            if (query.isEmpty()) Text(kind, style = ChipText, color = colors.outline)
-                            field()
-                        }
-                    },
-                )
-                Icon(
-                    Icons.Rounded.Close, "Clear filter",
-                    Modifier.padding(start = 6.dp).size(ChipIconSize).clickable(onClick = { onQuery(null) }),
-                    tint = colors.onSurfaceVariant,
-                )
-                LaunchedEffect(Unit) { focus.requestFocus() }
-            }
-        }
-    }
-}
-
+/** The card's margin while it spans the screen. */
+private val WideMargin = 8.dp
 /** Floating selectors and the text field move together above the keyboard. */
 @Composable
 internal fun AssistComposer(
@@ -1344,7 +1173,13 @@ internal fun AssistComposer(
     voice: VoiceInput? = null,
     onMic: (() -> Unit)? = null,
     onWave: (() -> Unit)? = null,
-    onNew: (() -> Unit)? = null,
+    /** What is attached, shown at the top of the card. */
+    attachments: List<Attached> = emptyList(),
+    onRemove: (Attached) -> Unit = {},
+    /** The + menu's actions; without them the + is off. */
+    attach: AttachActions? = null,
+    menuOpen: Boolean = false,
+    onMenu: (Boolean) -> Unit = {},
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit = {},
     selectors: @Composable () -> Unit,
     modifier: Modifier = Modifier,
@@ -1352,7 +1187,19 @@ internal fun AssistComposer(
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     Column(modifier.semantics { paneTitle = "Prism" }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
+        // Measured after the card, so the card always fits (the keyboard up)
+        // and the transcript scrolls in what is left.
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
+        // Gemini's attach menu rises above the card.
+        AnimatedVisibility(
+            visible = menuOpen && attach != null,
+            enter = if (animate) androidx.compose.animation.expandVertically(tween(300, easing = Decelerate), expandFrom = Alignment.Bottom) +
+                fadeIn(tween(200)) else EnterTransition.None,
+            exit = if (animate) androidx.compose.animation.shrinkVertically(tween(200, easing = Accelerate), shrinkTowards = Alignment.Bottom) +
+                fadeOut(tween(150)) else ExitTransition.None,
+        ) {
+            attach?.let { AttachMenu(it, Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
+        }
         error?.let { message ->
             Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.medium).padding(12.dp)) {
                 Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -1366,6 +1213,7 @@ internal fun AssistComposer(
             sending = sending,
             onSend = onSend,
             onFocus = {
+                onMenu(false)
                 focus.requestFocus()
                 keyboard?.show()
             },
@@ -1375,7 +1223,10 @@ internal fun AssistComposer(
             voice = voice,
             onMic = onMic,
             onWave = onWave,
-            onNew = onNew,
+            attachments = attachments,
+            onRemove = onRemove,
+            onPlus = attach?.let { { onMenu(!menuOpen) } },
+            menuOpen = menuOpen,
             onCard = onCard,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1383,9 +1234,9 @@ internal fun AssistComposer(
 }
 
 /**
- * Gemini's input card: one row (new, text, mic, send) while idle; once the
- * keyboard is up or there is text, two rows, the text across the whole card
- * and the buttons under it. The change animates: the text widens and moves,
+ * Gemini's input card: one row (+, text, mic, send) while idle; once the
+ * keyboard is up, there is text or something is attached, two rows, the text
+ * across the whole card and the buttons under it, the attachments above it. The change animates: the text widens and moves,
  * the buttons drop below it and the card grows. While Prism listens, the text
  * gives way to the voice's bars and send to a pulsing stop; a tap on the bars
  * stops too but keeps the words for editing.
@@ -1405,7 +1256,11 @@ private fun Composer(
     voice: VoiceInput?,
     onMic: (() -> Unit)?,
     onWave: (() -> Unit)?,
-    onNew: (() -> Unit)?,
+    attachments: List<Attached>,
+    onRemove: (Attached) -> Unit,
+    /** The +: opens or closes the attach menu; null when there is none. */
+    onPlus: (() -> Unit)?,
+    menuOpen: Boolean,
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit,
     modifier: Modifier,
 ) {
@@ -1415,7 +1270,7 @@ private fun Composer(
     val colors = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
     val typing = focused && WindowInsets.isImeVisible
-    val twoRows = !listening && (typing || text.isNotEmpty())
+    val twoRows = !listening && (typing || text.isNotEmpty() || attachments.isNotEmpty())
     val rows by animateFloatAsState(
         if (twoRows) 1f else 0f,
         if (animate) tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else snap(),
@@ -1471,13 +1326,23 @@ private fun Composer(
                 alpha = PlateAppear.contentAlpha(t)
             },
             content = {
-                // Gemini's plus, in the text's colour even when there is nothing to start anew.
+                // Gemini's plus: the attach menu. A quarter turn to a cross while it is open.
+                val turn by animateFloatAsState(
+                    if (menuOpen) 45f else 0f,
+                    if (animate) tween(250, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else snap(),
+                    label = "plus",
+                )
                 IconButton(
-                    onClick = { onNew?.invoke() },
-                    enabled = onNew != null && !listening,
+                    onClick = { onPlus?.invoke() },
+                    enabled = onPlus != null && !listening && !sending,
                     colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurface, disabledContentColor = colors.onSurface),
+                    modifier = Modifier.semantics { selected = menuOpen },
                 ) {
-                    Icon(GeminiIcons.Plus, "New request", Modifier.size(28.dp))
+                    Icon(
+                        GeminiIcons.Plus,
+                        if (menuOpen) "Close the attach menu" else "Add photos, files and the screen",
+                        Modifier.size(28.dp).graphicsLayer { rotationZ = turn },
+                    )
                 }
                 if (listening) {
                     VoiceWave(
@@ -1517,7 +1382,7 @@ private fun Composer(
                         MicButton(onClick = onMic, pulsing = waiting, animate = animate)
                     }
                     AnimatedVisibility(
-                        visible = text.isNotBlank() || sending || listening,
+                        visible = text.isNotBlank() || attachments.isNotEmpty() || sending || listening,
                         enter = if (animate) scaleIn(initialScale = 0.6f) + fadeIn() else EnterTransition.None,
                         exit = if (animate) scaleOut(targetScale = 0.6f) + fadeOut() else ExitTransition.None,
                     ) {
@@ -1542,9 +1407,12 @@ private fun Composer(
                         }
                     }
                 }
+                // Always a child, even with nothing attached (then 0 tall).
+                Box { AttachmentRow(attachments, onRemove, animate) }
             },
         ) { measurables, constraints ->
             val (plusM, fieldM, trailingM) = measurables
+            val attachedM = measurables[3]
             val width = constraints.maxWidth
             val pad = 8.dp.roundToPx()
             val gap = 4.dp.roundToPx()
@@ -1554,6 +1422,9 @@ private fun Composer(
             val minHeight = 72.dp.roundToPx()
             val plus = plusM.measure(Constraints())
             val trailing = trailingM.measure(Constraints(maxWidth = width))
+            // What is attached goes above everything else, across the card.
+            val attached = attachedM.measure(Constraints(maxWidth = width))
+            val top = attached.height
             // The text's place in one row, and across the card in two.
             val x1 = pad + plus.width + gap
             val w1 = (width - x1 - gap - trailing.width - pad).coerceAtLeast(0)
@@ -1565,12 +1436,13 @@ private fun Composer(
             val buttons = maxOf(plus.height, trailing.height)
             val h1 = maxOf(minHeight, field.height + 2 * pad, buttons + 2 * pad)
             val h2 = field.height + buttons + pad
-            val height = lerp(h1, h2)
+            val height = top + lerp(h1, h2)
             layout(width, height) {
-                val fieldY = lerp((h1 - field.height) / 2, 0)
+                attached.placeRelative(0, 0)
+                val fieldY = top + lerp((h1 - field.height) / 2, 0)
                 field.placeRelative(lerp(x1, x2), fieldY)
                 // At one row the buttons sit in the card's middle; at two, under the text.
-                val buttonY = lerp((h1 - buttons) / 2, height - pad - buttons)
+                val buttonY = top + lerp((h1 - buttons) / 2, height - top - pad - buttons)
                 plus.placeRelative(pad, buttonY + (buttons - plus.height) / 2)
                 trailing.placeRelative(width - pad - trailing.width, buttonY + (buttons - trailing.height) / 2)
             }

@@ -170,14 +170,20 @@ async fn ready(State(state): State<AppState>) -> StatusCode {
     }
 }
 
+/// Whether this worker takes the devices' requests. A device that gets no
+/// `ok` within its 5 s runs its request itself (`docs/direct-fix.md`), so this
+/// answers at once from the replica's last verdict, as `/ready` does, and
+/// never waits for a read: a busy replica (Preempted, Timeout, a query that
+/// takes seconds) still runs the requests, only an incomplete one doesn't.
 async fn v1_health(State(state): State<AppState>) -> Response {
-    match state.client.ping().await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
-        Err(_) => (
+    if *state.eligible.borrow() == Eligibility::Incomplete {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "ok": false })),
         )
-            .into_response(),
+            .into_response()
+    } else {
+        (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
     }
 }
 
@@ -256,10 +262,14 @@ async fn placement_sync(
     };
 
     let now = (state.now_fn)();
-    match state.client.sync_placement(machine, req, now).await {
+    let (threads, models) = (req.threads.len(), req.models.len());
+    match state.client.sync_placement(machine.clone(), req, now).await {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
         Err(err) => {
-            eprintln!("prism-worker: placement sync failed: {err}");
+            eprintln!(
+                "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {} bytes): {err}",
+                body.len()
+            );
             (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()
         }
     }
@@ -471,6 +481,50 @@ mod tests {
         );
         eligible.send_replace(Eligibility::Ready);
         assert_eq!(status("/ready").await, StatusCode::OK);
+    }
+
+    /// The devices' reachability check (`GET /v1/health`, 5 s) follows the
+    /// replica's verdict like `/ready` and reads nothing. It used to run a
+    /// `SELECT 1`, which a busy replica took over 5 s to answer (measured on
+    /// all three workers on 2026-11-24), so the phone took workers that were
+    /// up and leading for unreachable and ran its request itself.
+    #[tokio::test]
+    async fn v1_health_answers_from_the_replica_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(
+            PrismClient::open_or_create(dir.path().display().to_string(), None)
+                .await
+                .expect("open_or_create"),
+        );
+        let (eligible, rx) = watch::channel(Eligibility::Unknown);
+        let app = router(AppState::new(Arc::clone(&client), None).with_eligibility(rx));
+        let health = || {
+            let app = app.clone();
+            async move {
+                let res = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/health")
+                            .body(Body::empty())
+                            .expect("req"),
+                    )
+                    .await
+                    .expect("response");
+                let status = res.status();
+                let bytes = res.into_body().collect().await.expect("body").to_bytes();
+                let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+                (status, v["ok"].clone())
+            }
+        };
+        assert_eq!(health().await, (StatusCode::OK, json!(true)), "busy so far");
+        eligible.send_replace(Eligibility::Incomplete);
+        assert_eq!(
+            health().await,
+            (StatusCode::SERVICE_UNAVAILABLE, json!(false)),
+            "an incomplete replica can't run the requests, though SELECT 1 works"
+        );
+        eligible.send_replace(Eligibility::Ready);
+        assert_eq!(health().await, (StatusCode::OK, json!(true)));
     }
 
     #[tokio::test]
