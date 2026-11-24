@@ -10,6 +10,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.tooling.preview.Preview
 import at.quickme.prism.AlertContent
 import at.quickme.prism.ApproveScreen
+import at.quickme.prism.HotspotContent
+import at.quickme.prism.HotspotState
 import at.quickme.prism.NetbirdContent
 import at.quickme.prism.PlacementActionsContent
 import at.quickme.prism.PlacementProfileContent
@@ -77,6 +79,16 @@ private fun NetbirdPreview() = Themed {
     NetbirdContent(
         s.netbird, s.netbirdOn, s.netbirdConnected, s.exitNodes, s.exitNode, Sample.resources, Sample.enabledResources,
         onToggle = {}, onExitNode = {}, onResourceToggle = { _, _ -> }, onBack = {},
+    )
+}
+
+/** The hotspot: Always on, two devices, and its network. */
+@ScreenPreviews
+@Composable
+private fun HotspotPreview() = Themed {
+    HotspotContent(
+        HotspotState("normal", on = true, info = remember { Sample.hotspot() }, error = null, shell = true),
+        busy = null, notice = null, onKeepOn = {}, onTurnOn = {}, onTurnOff = {}, onSave = {}, onShell = {}, onBack = {},
     )
 }
 

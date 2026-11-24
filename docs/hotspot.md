@@ -8,14 +8,33 @@ Prism's Quick Settings tile ("Hotspot"):
 | **Instant** (default) | Off. It comes on when the owner's MacBook asks over Bluetooth LE, and goes off again 120 s after the last client left | One client |
 | **Normal** | On, and it stays on: no idle timeout, and Prism starts it again after a reboot or when it stops | Everyone with the password, as configured in Settings |
 
+The tile is active while the hotspot is on in either mode ("Always on", or
+"Instant · on" while an instant hotspot runs) and inactive while an instant
+one is off ("Instant"). A tap turns it off or on: Always on goes to instant
+mode (off), a running instant hotspot goes off at once, and an idle one goes
+to Always on. A long press opens the hotspot page (also on the Phone tab):
+
+- **Keep it on**: the mode; in instant mode, **Turn on now** (an instant
+  hotspot, as if the Mac had asked) or **Turn off now**.
+- **Connected devices**: host name, IPv4 and MAC address of each device on
+  the hotspot, every 3 s while the page is open (the tethering module's
+  `TetheredClient`s, which it tells only a caller with `NETWORK_SETTINGS`).
+- **Network**: name, security, password, band (2.4 GHz, 5 GHz, 2.4 and
+  5 GHz at once, 6 GHz, as this phone offers them) and hidden network. Saving
+  writes Android's persisted hotspot configuration, as Settings does, and
+  restarts a running Always-on hotspot with it; 6 GHz takes WPA3. An instant
+  hotspot uses the new name and password from its next start (and still picks
+  its own band).
+
 Both modes use the hotspot's own name and password from Android's Settings,
 so the Mac joins a network it already knows (macOS auto-join). Instant mode
 starts it on a single band, never bridged dual-band, at most 80 MHz wide:
 5 GHz where it can, which finishes transfers sooner, and 2.4 GHz while the
 phone's own Wi-Fi sits on a 5 GHz channel the hotspot can't share (such as a
-DFS channel). One band keeps one radio, not two. The
-phone's persisted hotspot configuration is never changed; each start carries
-its own configuration (`TetheringRequest.setSoftApConfiguration`).
+DFS channel). One band keeps one radio, not two. Starting
+never changes the phone's persisted hotspot configuration (only the page's
+Save does); each start carries its own configuration
+(`TetheringRequest.setSoftApConfiguration`).
 
 ## Who does what
 
