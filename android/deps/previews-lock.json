@@ -336,12 +336,6 @@
   "sha256": "c5fd725bffab51846bf3c77db1383c60aaaebfe1b7fe2f00d23fe1b7df0a439d"
  },
  {
-  "coordinate": "org.jetbrains.kotlin:kotlin-reflect:2.4.21",
-  "file": "kotlin-reflect-2.4.21.jar",
-  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-reflect/2.4.21/kotlin-reflect-2.4.21.jar",
-  "sha256": "7c9e8bda3cafa85b65692065acd22578b2843292b4e4baa8361bdc9175746e88"
- },
- {
   "coordinate": "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.2.10",
   "file": "kotlin-stdlib-jdk7-2.2.10.jar",
   "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.10/kotlin-stdlib-jdk7-2.2.10.jar",

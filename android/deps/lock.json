@@ -1,5 +1,107 @@
 [
  {
+  "coordinate": "ai.koog:agents-core-android:1.3.0",
+  "file": "agents-core-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/agents-core-android/1.3.0/agents-core-android-1.3.0.aar",
+  "sha256": "2c303686d498099db1abb0caa451a989380a9434bee4ffcdd48c8c82469133d8"
+ },
+ {
+  "coordinate": "ai.koog:agents-tools-android:1.3.0",
+  "file": "agents-tools-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/agents-tools-android/1.3.0/agents-tools-android-1.3.0.aar",
+  "sha256": "d81172722c1dacf878aa25f13b3ad7a64dd103ce94ac89b98998fa7d7e6980d7"
+ },
+ {
+  "coordinate": "ai.koog:agents-utils-android:1.3.0",
+  "file": "agents-utils-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/agents-utils-android/1.3.0/agents-utils-android-1.3.0.aar",
+  "sha256": "ba093403bfa70b2ffe58219c6055f361a5ed7140da63471eda2cdc54f6023ad4"
+ },
+ {
+  "coordinate": "ai.koog:http-client-core-android:1.3.0",
+  "file": "http-client-core-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/http-client-core-android/1.3.0/http-client-core-android-1.3.0.aar",
+  "sha256": "259145f620a1bfcb8f4e9c8071dc1d9cf439459c5bbf5bd8a3491ae1a91abff4"
+ },
+ {
+  "coordinate": "ai.koog:http-client-ktor-android:1.3.0",
+  "file": "http-client-ktor-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/http-client-ktor-android/1.3.0/http-client-ktor-android-1.3.0.aar",
+  "sha256": "ee6af891c1ccdae9c017158ef3aa8367e61d98b1937717f52baf3ca9630c1e37"
+ },
+ {
+  "coordinate": "ai.koog:prompt-executor-clients-android:1.3.0",
+  "file": "prompt-executor-clients-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-executor-clients-android/1.3.0/prompt-executor-clients-android-1.3.0.aar",
+  "sha256": "7a33db8ace7feb75d24f643ce28033d2a6392d433b123b7bf6713bf4af02d80f"
+ },
+ {
+  "coordinate": "ai.koog:prompt-executor-model-android:1.3.0",
+  "file": "prompt-executor-model-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-executor-model-android/1.3.0/prompt-executor-model-android-1.3.0.aar",
+  "sha256": "8e882ccbf3f9fee4b6191227a54d977e4e4123b15ea7db27a5cd526e8f6cdc4c"
+ },
+ {
+  "coordinate": "ai.koog:prompt-executor-openai-client-android:1.3.0",
+  "file": "prompt-executor-openai-client-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-executor-openai-client-android/1.3.0/prompt-executor-openai-client-android-1.3.0.aar",
+  "sha256": "2c425abe975d56cb1146227665a927cf8fdc074d5f871521ffa0315bf118a4fb"
+ },
+ {
+  "coordinate": "ai.koog:prompt-executor-openai-client-base-android:1.3.0",
+  "file": "prompt-executor-openai-client-base-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-executor-openai-client-base-android/1.3.0/prompt-executor-openai-client-base-android-1.3.0.aar",
+  "sha256": "6dc03f742c16ce1e01f7f3249638e4287f367b3ebde343f0d934fe26acd1ef07"
+ },
+ {
+  "coordinate": "ai.koog:prompt-llm-android:1.3.0",
+  "file": "prompt-llm-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-llm-android/1.3.0/prompt-llm-android-1.3.0.aar",
+  "sha256": "4b550712305a0f4e3fd5ad8ad41c3fd689f24d862c1722fce128d9a1af49b261"
+ },
+ {
+  "coordinate": "ai.koog:prompt-markdown-android:1.3.0",
+  "file": "prompt-markdown-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-markdown-android/1.3.0/prompt-markdown-android-1.3.0.aar",
+  "sha256": "0819fcef78acab3575b7ad72e520b77f8841c046c8904f0560280f0a3d78c3e8"
+ },
+ {
+  "coordinate": "ai.koog:prompt-model-android:1.3.0",
+  "file": "prompt-model-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-model-android/1.3.0/prompt-model-android-1.3.0.aar",
+  "sha256": "3ec4b07a39c3a54fdd138e5a4c496ed3db86cdda6aa722d4ec0d5946bf7352e2"
+ },
+ {
+  "coordinate": "ai.koog:prompt-processor-android:1.3.0",
+  "file": "prompt-processor-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-processor-android/1.3.0/prompt-processor-android-1.3.0.aar",
+  "sha256": "413380bac618e4ff70d174d3a097ba4c87471e7418c276507facfe87dc0cb675"
+ },
+ {
+  "coordinate": "ai.koog:prompt-structure-android:1.3.0",
+  "file": "prompt-structure-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/prompt-structure-android/1.3.0/prompt-structure-android-1.3.0.aar",
+  "sha256": "cbf459aff6c8874411c31be227df142c909b1b0ab6a6db8f5e5070cf203eb6f7"
+ },
+ {
+  "coordinate": "ai.koog:serialization-core-android:1.3.0",
+  "file": "serialization-core-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/serialization-core-android/1.3.0/serialization-core-android-1.3.0.aar",
+  "sha256": "d5db39586e5893a391fe6c987987b52e190fe1045c3ef7eb823a263f09164f6c"
+ },
+ {
+  "coordinate": "ai.koog:serialization-jackson:1.3.0",
+  "file": "serialization-jackson-1.3.0.jar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/serialization-jackson/1.3.0/serialization-jackson-1.3.0.jar",
+  "sha256": "7e752309aa9ea878ba722a0b4308a331246c51e719fc9c737dfc7c338c0db105"
+ },
+ {
+  "coordinate": "ai.koog:utils-android:1.3.0",
+  "file": "utils-android-1.3.0.aar",
+  "url": "https://repo1.maven.org/maven2/ai/koog/utils-android/1.3.0/utils-android-1.3.0.aar",
+  "sha256": "34dd0d190d78a28e5b2dbafe5a19c578433ee3fd15d1276ba1732c15408118c0"
+ },
+ {
   "coordinate": "androidx.activity:activity:1.13.0",
   "file": "activity-1.13.0.aar",
   "url": "https://dl.google.com/android/maven2/androidx/activity/activity/1.13.0/activity-1.13.0.aar",
@@ -390,6 +492,30 @@
   "sha256": "2617129ac934b8c5152e6fc616222428809ede444fe7fa83231917bea141ea7f"
  },
  {
+  "coordinate": "com.fasterxml.jackson.core:jackson-annotations:2.21",
+  "file": "jackson-annotations-2.21.jar",
+  "url": "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-annotations/2.21/jackson-annotations-2.21.jar",
+  "sha256": "53ca085f4a150f703f49e1aabd935bd03b43e1ea3d55d135438292af22cef56b"
+ },
+ {
+  "coordinate": "com.fasterxml.jackson.core:jackson-core:2.21.3",
+  "file": "jackson-core-2.21.3.jar",
+  "url": "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-core/2.21.3/jackson-core-2.21.3.jar",
+  "sha256": "baf8b739e9d9b93bcdb33f25046bfdb8dbd74c97de2a8698539fbe0c7eeac0bb"
+ },
+ {
+  "coordinate": "com.fasterxml.jackson.core:jackson-databind:2.21.3",
+  "file": "jackson-databind-2.21.3.jar",
+  "url": "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.21.3/jackson-databind-2.21.3.jar",
+  "sha256": "f397563d8e67630c10cab8c2334ca0e55af832fa3ebde160a379c2c96d43bf25"
+ },
+ {
+  "coordinate": "com.fasterxml.jackson.module:jackson-module-kotlin:2.21.3",
+  "file": "jackson-module-kotlin-2.21.3.jar",
+  "url": "https://repo1.maven.org/maven2/com/fasterxml/jackson/module/jackson-module-kotlin/2.21.3/jackson-module-kotlin-2.21.3.jar",
+  "sha256": "da3d1300a1e70b8c9d95ecbfa606c354a262cd8e59183e9644df201173977d56"
+ },
+ {
   "coordinate": "com.google.guava:listenablefuture:1.0",
   "file": "listenablefuture-1.0.jar",
   "url": "https://repo1.maven.org/maven2/com/google/guava/listenablefuture/1.0/listenablefuture-1.0.jar",
@@ -408,6 +534,18 @@
   "sha256": "681fed549d1d2c63710f42c9eab433d642c71af778babd67035c50f8c425aaff"
  },
  {
+  "coordinate": "com.typesafe:config:1.4.9",
+  "file": "config-1.4.9.jar",
+  "url": "https://repo1.maven.org/maven2/com/typesafe/config/1.4.9/config-1.4.9.jar",
+  "sha256": "47d13e3196c84f2a8ccd014ae563738c3da5b7406b38e03505ec0601a2f4fc37"
+ },
+ {
+  "coordinate": "io.github.oshai:kotlin-logging-android:8.0.01",
+  "file": "kotlin-logging-android-8.0.01.aar",
+  "url": "https://repo1.maven.org/maven2/io/github/oshai/kotlin-logging-android/8.0.01/kotlin-logging-android-8.0.01.aar",
+  "sha256": "e54697befec8eee94036f842fc8aa63ee52b1f6b0e6e30369e3353d81e3dbec6"
+ },
+ {
   "coordinate": "io.ktor:ktor-client-content-negotiation-jvm:3.6.1",
   "file": "ktor-client-content-negotiation-jvm-3.6.1.jar",
   "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-content-negotiation-jvm/3.6.1/ktor-client-content-negotiation-jvm-3.6.1.jar",
@@ -418,6 +556,12 @@
   "file": "ktor-client-core-jvm-3.6.1.jar",
   "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-core-jvm/3.6.1/ktor-client-core-jvm-3.6.1.jar",
   "sha256": "3a288b4d75a52d3b2460765067c2fc035bcd18ffcaa0a2296f4b9983cd2f041f"
+ },
+ {
+  "coordinate": "io.ktor:ktor-client-logging-jvm:3.6.1",
+  "file": "ktor-client-logging-jvm-3.6.1.jar",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-logging-jvm/3.6.1/ktor-client-logging-jvm-3.6.1.jar",
+  "sha256": "7380a158a665f8684bfa94d0c67441256f957e2180988d6b7b136ca7041c4ca8"
  },
  {
   "coordinate": "io.ktor:ktor-client-okhttp-jvm:3.6.1",
@@ -480,6 +624,24 @@
   "sha256": "6a163fad390ba4bc93ecfde2b570708065f904fe2ad24dd43784335e06418b44"
  },
  {
+  "coordinate": "io.ktor:ktor-server-cio-jvm:3.6.1",
+  "file": "ktor-server-cio-jvm-3.6.1.jar",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-server-cio-jvm/3.6.1/ktor-server-cio-jvm-3.6.1.jar",
+  "sha256": "41616d699ed2d8033b0b8ccf8d9af759ec7cc04e00b0b45711a3341618d81fce"
+ },
+ {
+  "coordinate": "io.ktor:ktor-server-core-jvm:3.6.1",
+  "file": "ktor-server-core-jvm-3.6.1.jar",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-server-core-jvm/3.6.1/ktor-server-core-jvm-3.6.1.jar",
+  "sha256": "273c891aab65cb5548734209b28d7e4220b5369b012ec4a56057103ed83ec272"
+ },
+ {
+  "coordinate": "io.ktor:ktor-server-sse-jvm:3.6.1",
+  "file": "ktor-server-sse-jvm-3.6.1.jar",
+  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-server-sse-jvm/3.6.1/ktor-server-sse-jvm-3.6.1.jar",
+  "sha256": "81ae13397891f5fe5372f81868499a8205f82b31d49afb9df1c5289d75b8ff30"
+ },
+ {
   "coordinate": "io.ktor:ktor-sse-jvm:3.6.1",
   "file": "ktor-sse-jvm-3.6.1.jar",
   "url": "https://repo1.maven.org/maven2/io/ktor/ktor-sse-jvm/3.6.1/ktor-sse-jvm-3.6.1.jar",
@@ -522,6 +684,12 @@
   "sha256": "8d0fd2aeb48d19dc49c563ebc00f274947e45f716c107535c12ead63decd688d"
  },
  {
+  "coordinate": "org.jetbrains.kotlin:kotlin-reflect:2.4.21",
+  "file": "kotlin-reflect-2.4.21.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-reflect/2.4.21/kotlin-reflect-2.4.21.jar",
+  "sha256": "7c9e8bda3cafa85b65692065acd22578b2843292b4e4baa8361bdc9175746e88"
+ },
+ {
   "coordinate": "org.jetbrains.kotlin:kotlin-stdlib:2.4.21",
   "file": "kotlin-stdlib-2.4.21.jar",
   "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar",
@@ -544,6 +712,18 @@
   "file": "kotlinx-coroutines-core-jvm-1.11.0.jar",
   "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.11.0/kotlinx-coroutines-core-jvm-1.11.0.jar",
   "sha256": "d1d75aa01dffbb4d1c520e67e4c4e7f5f6174718e7cb4632412503f2f0e604fa"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-coroutines-jdk9:1.11.0",
+  "file": "kotlinx-coroutines-jdk9-1.11.0.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-jdk9/1.11.0/kotlinx-coroutines-jdk9-1.11.0.jar",
+  "sha256": "39842d656bcfa707d48db3bbf6aa9804a6c5aa6ae766d46f2fb2964f99980408"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-coroutines-reactive:1.11.0",
+  "file": "kotlinx-coroutines-reactive-1.11.0.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-reactive/1.11.0/kotlinx-coroutines-reactive-1.11.0.jar",
+  "sha256": "fe9a650030c413d96f049e88ef92d86a17bbc3a129b9208cfbeaa0e90e60dca7"
  },
  {
   "coordinate": "org.jetbrains.kotlinx:kotlinx-coroutines-slf4j:1.11.0",
@@ -570,6 +750,30 @@
   "sha256": "765d8851d8ca694706931331b92386844800867e041b720f1f193dbda874d370"
  },
  {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-schema-annotations-jvm:0.4.4",
+  "file": "kotlinx-schema-annotations-jvm-0.4.4.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-schema-annotations-jvm/0.4.4/kotlinx-schema-annotations-jvm-0.4.4.jar",
+  "sha256": "60e84db88364dad1a99533b69dc4afa0cda3fafc7d59bb390b2a7d5ca9f00432"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-schema-generator-core-jvm:0.4.4",
+  "file": "kotlinx-schema-generator-core-jvm-0.4.4.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-schema-generator-core-jvm/0.4.4/kotlinx-schema-generator-core-jvm-0.4.4.jar",
+  "sha256": "0eb63f23a965a9be55a7ac899a26ea37ac6ce3d2457cabffe2446f772f567141"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-schema-generator-json-jvm:0.4.4",
+  "file": "kotlinx-schema-generator-json-jvm-0.4.4.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-schema-generator-json-jvm/0.4.4/kotlinx-schema-generator-json-jvm-0.4.4.jar",
+  "sha256": "e75fcfb1a84d6e3bde5528f6957a08102a4dbfd8a9b4aa8cc60b88992fc5f79c"
+ },
+ {
+  "coordinate": "org.jetbrains.kotlinx:kotlinx-schema-json-jvm:0.4.4",
+  "file": "kotlinx-schema-json-jvm-0.4.4.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-schema-json-jvm/0.4.4/kotlinx-schema-json-jvm-0.4.4.jar",
+  "sha256": "fe8928c8deb1537ec55e8bbe81b13c42c69ec8d3b38912e4454cb3dc936c52bd"
+ },
+ {
   "coordinate": "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.13.0",
   "file": "kotlinx-serialization-core-jvm-1.13.0.jar",
   "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.13.0/kotlinx-serialization-core-jvm-1.13.0.jar",
@@ -588,15 +792,27 @@
   "sha256": "389b0dd9b4b952db889c160a2478b1cbe54680804f5315756108389dbe9df251"
  },
  {
-  "coordinate": "org.jetbrains:annotations:23.0.0",
-  "file": "annotations-23.0.0.jar",
-  "url": "https://repo1.maven.org/maven2/org/jetbrains/annotations/23.0.0/annotations-23.0.0.jar",
-  "sha256": "7b0f19724082cbfcbc66e5abea2b9bc92cf08a1ea11e191933ed43801eb3cd05"
+  "coordinate": "org.jetbrains:annotations:26.0.2-1",
+  "file": "annotations-26.0.2-1.jar",
+  "url": "https://repo1.maven.org/maven2/org/jetbrains/annotations/26.0.2-1/annotations-26.0.2-1.jar",
+  "sha256": "2037be378980d3ba9333e97955f3b2cde392aa124d04ca73ce2eee6657199297"
+ },
+ {
+  "coordinate": "org.reactivestreams:reactive-streams:1.0.3",
+  "file": "reactive-streams-1.0.3.jar",
+  "url": "https://repo1.maven.org/maven2/org/reactivestreams/reactive-streams/1.0.3/reactive-streams-1.0.3.jar",
+  "sha256": "1dee0481072d19c929b623e155e14d2f6085dc011529a0a0dbefc84cf571d865"
  },
  {
   "coordinate": "org.slf4j:slf4j-api:2.0.19",
   "file": "slf4j-api-2.0.19.jar",
   "url": "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.19/slf4j-api-2.0.19.jar",
   "sha256": "e91ff6d720609e7a194ffe758c3ed5c84e798617ae07b0a0f6a4fe229741b4bb"
+ },
+ {
+  "coordinate": "org.slf4j:slf4j-simple:2.0.17",
+  "file": "slf4j-simple-2.0.17.jar",
+  "url": "https://repo1.maven.org/maven2/org/slf4j/slf4j-simple/2.0.17/slf4j-simple-2.0.17.jar",
+  "sha256": "ddfea59ac074c6d3e24ac2c38622d2d963895e17f70b38ed4bdae4d780be6964"
  }
 ]

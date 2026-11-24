@@ -26,6 +26,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -57,15 +58,24 @@ _cache = {}
 def fetch(url):
     if url in _cache:
         return _cache[url]
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "deps-resolver"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = r.read()
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            data = None
-        else:
-            raise
+    # A few tries: a connection reset halfway through ~150 artifacts
+    # shouldn't send the whole resolution back to the start.
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "deps-resolver"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = r.read()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                data = None
+                break
+            if e.code < 500 or attempt == 4:
+                raise
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == 4:
+                raise
+        time.sleep(1 + attempt * 2)
     _cache[url] = data
     return data
 
