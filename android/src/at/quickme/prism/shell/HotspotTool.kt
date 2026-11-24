@@ -3,10 +3,15 @@
 // shell server:
 //
 //   app_process -Djava.class.path=<Prism's APK> /system/bin \
-//     at.quickme.prism.shell.HotspotTool start instant|start normal|stop|status
+//     at.quickme.prism.shell.HotspotTool start instant|start normal|stop|status|info|configure
 //
 // It prints one line ("started instant", "already normal", "stopped",
-// "off", "error: …") and exits non-zero on failure.
+// "off", "error: …") and exits non-zero on failure. For the hotspot page
+// (HotspotActivity): "info" prints a JSON object with what runs, the
+// persisted configuration and the connected devices; "configure" takes a JSON
+// object of the same configuration from the environment
+// (PRISM_HOTSPOT_CONFIG, so the password isn't in the arguments), saves it as
+// the persisted configuration and restarts a running normal hotspot with it.
 //
 // Why the shell: the SoftApConfiguration setters it needs (band, bandwidth,
 // idle timeout, client limit) are system APIs, and starting tethering with a
@@ -24,9 +29,9 @@
 // process. Our listener only receives the result. So the hotspot stays up
 // after this process has exited, and nothing long-lived is needed.
 //
-// The persisted hotspot configuration (Settings) is never written: every
+// Starting never writes the persisted hotspot configuration (Settings): every
 // start carries its own copy (TetheringRequest.setSoftApConfiguration,
-// Android 16).
+// Android 16). Only "configure" does, as the Settings app would.
 
 package at.quickme.prism.shell
 
@@ -36,9 +41,13 @@ import android.net.TetheringInterface
 import android.net.TetheringManager
 import android.net.wifi.SoftApConfiguration
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiSsid
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+import java.lang.reflect.Proxy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -90,7 +99,9 @@ object HotspotTool {
                 "instant", "normal" -> start(context, tm, wm, mode)
                 else -> "error: start instant|normal" to 2
             }
-            else -> "error: usage: start instant|start normal|stop|status" to 2
+            "info" -> info(tm, wm).toString() to 0
+            "configure" -> configure(context, tm, wm, System.getenv("PRISM_HOTSPOT_CONFIG"))
+            else -> "error: usage: start instant|start normal|stop|status|info|configure" to 2
         }
     }
 
@@ -121,29 +132,63 @@ object HotspotTool {
 
     // --- What runs ---
 
+    /** What the tethering callback reports on registration: Wi-Fi's tethered interface and its clients. */
+    private class Snapshot(val wifi: TetheringInterface?, val clients: List<Any>?)
+
+    /**
+     * The tethering state, as the callback reports it at once on registration.
+     * The clients (TetheredClient, a system API, through onClientsChanged)
+     * come only to a caller with NETWORK_SETTINGS, so the callback is a proxy
+     * that also takes that method; null if they didn't come.
+     */
+    private fun snapshot(tm: TetheringManager, withClients: Boolean): Snapshot {
+        val wifi = AtomicReference<TetheringInterface?>()
+        val clients = AtomicReference<List<Any>?>()
+        val gotInterfaces = CountDownLatch(1)
+        val gotClients = CountDownLatch(1)
+        val type = TetheringManager.TetheringEventCallback::class.java
+        val callback = Proxy.newProxyInstance(type.classLoader, arrayOf(type)) { proxy, method, args ->
+            when (method.name) {
+                "onTetheredInterfacesChanged" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val interfaces = args?.getOrNull(0) as? Set<TetheringInterface>
+                    if (interfaces != null && method.parameterTypes[0] == Set::class.java) {
+                        wifi.set(interfaces.firstOrNull { it.type == TETHERING_WIFI })
+                        gotInterfaces.countDown()
+                    }
+                    null
+                }
+                "onClientsChanged" -> {
+                    clients.set((args?.getOrNull(0) as? Collection<*>)?.filterNotNull().orEmpty())
+                    gotClients.countDown()
+                    null
+                }
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === args?.getOrNull(0)
+                "toString" -> "HotspotTool.callback"
+                else -> null
+            }
+        } as TetheringManager.TetheringEventCallback
+        tm.registerTetheringEventCallback(executor, callback)
+        try {
+            if (!gotInterfaces.await(5, TimeUnit.SECONDS)) Log.w(TAG, "no tethering state within 5 s")
+            if (withClients && !gotClients.await(2, TimeUnit.SECONDS)) Log.w(TAG, "no tethered clients within 2 s")
+        } finally {
+            tm.unregisterTetheringEventCallback(callback)
+        }
+        return Snapshot(wifi.get(), clients.get())
+    }
+
     /**
      * Which configuration Wi-Fi tethering runs with: "off", "instant",
      * "normal", or "other" (started elsewhere, e.g. from Quick Settings with
      * the persisted configuration). The tethering module tells the requesting
      * uid, or a caller with NETWORK_SETTINGS, the request's configuration.
      */
-    private fun running(tm: TetheringManager): String {
-        val wifi = AtomicReference<TetheringInterface?>()
-        val got = CountDownLatch(1)
-        val callback = object : TetheringManager.TetheringEventCallback {
-            override fun onTetheredInterfacesChanged(interfaces: Set<TetheringInterface>) {
-                wifi.set(interfaces.firstOrNull { it.type == TETHERING_WIFI })
-                got.countDown()
-            }
-        }
-        tm.registerTetheringEventCallback(executor, callback)
-        try {
-            // The callback reports the current state at once on registration.
-            if (!got.await(5, TimeUnit.SECONDS)) Log.w(TAG, "no tethering state within 5 s")
-        } finally {
-            tm.unregisterTetheringEventCallback(callback)
-        }
-        val iface = wifi.get() ?: return "off"
+    private fun running(tm: TetheringManager): String = running(snapshot(tm, withClients = false))
+
+    private fun running(s: Snapshot): String {
+        val iface = s.wifi ?: return "off"
         val cfg = iface.softApConfiguration ?: return "other"
         return classify(cfg)
     }
@@ -226,13 +271,24 @@ object HotspotTool {
         }
         if (mode == "instant") {
             // One AP, not bridged (setBand replaces the channels, and with
-            // them bridged bands), on 5 GHz where it can be: Android picks the
-            // highest band of the set it can use. 5 GHz alone fails while the
-            // phone's own Wi-Fi sits on a channel the AP can't share (a DFS
-            // channel such as 5500 MHz: "Wifi connected to unavailable freq"),
-            // so 2.4 GHz stays allowed. 80 MHz is what a MacBook uses on 5 GHz
-            // anyway, and finishes transfers sooner.
-            set("setBand", SoftApConfiguration.BAND_5GHZ or SoftApConfiguration.BAND_2GHZ)
+            // them bridged bands), on 6 GHz where it can be, else 5 GHz:
+            // Android picks the highest band of the set it can use. 5 GHz
+            // alone fails while the phone's own Wi-Fi sits on a channel the AP
+            // can't share (a DFS channel such as 5500 MHz: "Wifi connected to
+            // unavailable freq"), so 2.4 GHz stays allowed. 6 GHz takes
+            // WPA3-only (SAE): Wi-Fi drops 6 GHz from a hotspot with WPA2 or
+            // the WPA2/WPA3 transition, so instant mode uses SAE with the same
+            // password; the Mac (WPA3 since 2019's macOS) joins it from the
+            // same known network. An open hotspot stays open, on 5 GHz.
+            // 80 MHz is what a MacBook uses on 5 GHz anyway, and finishes
+            // transfers sooner.
+            val password = persisted.passphrase
+            var bands = SoftApConfiguration.BAND_5GHZ or SoftApConfiguration.BAND_2GHZ
+            if (persisted.securityType != SoftApConfiguration.SECURITY_TYPE_OPEN && password != null) {
+                set("setPassphrase", password, SoftApConfiguration.SECURITY_TYPE_WPA3_SAE)
+                bands = bands or SoftApConfiguration.BAND_6GHZ
+            }
+            set("setBand", bands)
             set("setMaxChannelBandwidth", channelWidth80())
             set("setAutoShutdownEnabled", true)
             set("setShutdownTimeoutMillis", INSTANT_TIMEOUT_MS)
@@ -248,6 +304,120 @@ object HotspotTool {
         Class.forName("android.net.wifi.SoftApInfo").getField("CHANNEL_WIDTH_80MHZ").getInt(null)
     } catch (e: ReflectiveOperationException) {
         CHANNEL_WIDTH_80MHZ
+    }
+
+    // --- The hotspot page ---
+
+    /**
+     * What the page shows: what runs ("running"), the persisted configuration
+     * ("config", see config()), which bands this phone offers ("bands"), and
+     * the devices on Wi-Fi tethering ("clients": "mac", "ip", "host"; null if
+     * the tethering module didn't tell).
+     */
+    private fun info(tm: TetheringManager, wm: WifiManager): JSONObject {
+        val s = snapshot(tm, withClients = true)
+        val out = JSONObject().put("running", running(s))
+        (Hidden.call(wm, "getSoftApConfiguration") as SoftApConfiguration?)?.let { out.put("config", config(it)) }
+        val bands = JSONArray().put(BAND_2)
+        if (wm.is5GHzBandSupported) bands.put(BAND_5)
+        if (wm.is5GHzBandSupported && getter(wm, "isBridgedApConcurrencySupported") == true) bands.put(BAND_DUAL)
+        if (wm.is6GHzBandSupported) bands.put(BAND_6)
+        out.put("bands", bands)
+        val clients = s.clients
+        if (clients != null) {
+            val list = JSONArray()
+            for (c in clients) {
+                if ((getter(c, "getTetheringType") as Number?)?.toInt() != TETHERING_WIFI) continue
+                val o = JSONObject().put("mac", getter(c, "getMacAddress")?.toString() ?: "")
+                for (a in (getter(c, "getAddresses") as List<*>?).orEmpty().filterNotNull()) {
+                    val address = (getter(a, "getAddress") as android.net.LinkAddress?)?.address
+                    if (address is java.net.Inet4Address && !o.has("ip")) o.put("ip", address.hostAddress)
+                    (getter(a, "getHostname") as String?)?.takeIf { it.isNotBlank() }?.let { if (!o.has("host")) o.put("host", it) }
+                }
+                list.put(o)
+            }
+            out.put("clients", list)
+        }
+        return out
+    }
+
+    // The page's bands: what Settings offers ("Speed and compatibility").
+    private const val BAND_2 = "2"
+    private const val BAND_5 = "5"
+    private const val BAND_DUAL = "2+5"
+    private const val BAND_6 = "6"
+
+    /** The configuration as the page shows it: "name", "password", "security", "band", "hidden". */
+    @Suppress("DEPRECATION") // ssid: unquoted, which WifiSsid's toString() isn't
+    private fun config(cfg: SoftApConfiguration): JSONObject {
+        val channels = getter(cfg, "getChannels") as android.util.SparseIntArray?
+        val band = (getter(cfg, "getBand") as Number?)?.toInt() ?: SoftApConfiguration.BAND_2GHZ
+        return JSONObject()
+            .put("name", cfg.ssid ?: "")
+            .put("password", cfg.passphrase ?: "")
+            .put("security", cfg.securityType)
+            .put("band", when {
+                channels != null && channels.size() > 1 -> BAND_DUAL
+                band and SoftApConfiguration.BAND_6GHZ != 0 -> BAND_6
+                band and SoftApConfiguration.BAND_5GHZ != 0 -> BAND_5
+                else -> BAND_2
+            })
+            .put("hidden", cfg.isHiddenSsid)
+    }
+
+    /**
+     * Saves the page's configuration (a JSON object as config() makes) as the
+     * persisted one, like Settings: 5 GHz and 6 GHz keep the lower bands as a
+     * fallback, "2+5" runs both at once (bridged), and 6 GHz takes WPA3.
+     * A running normal hotspot restarts with it; an instant one keeps its
+     * copy until it next starts.
+     */
+    private fun configure(context: Context, tm: TetheringManager, wm: WifiManager, json: String?): Pair<String, Int> {
+        val o = try {
+            JSONObject(json ?: return "error: no PRISM_HOTSPOT_CONFIG" to 2)
+        } catch (e: org.json.JSONException) {
+            return "error: PRISM_HOTSPOT_CONFIG: ${e.message}" to 2
+        }
+        val persisted = Hidden.call(wm, "getSoftApConfiguration") as SoftApConfiguration?
+            ?: return "error: no persisted hotspot configuration" to 1
+        val name = o.optString("name", "")
+        if (name.isEmpty() || name.toByteArray().size > 32) return "error: the name takes 1 to 32 bytes" to 2
+        val band = o.optString("band", BAND_5)
+        var security = o.optInt("security", persisted.securityType)
+        val password = o.optString("password", "")
+        if (band == BAND_6) {
+            if (security == SoftApConfiguration.SECURITY_TYPE_OPEN) return "error: 6 GHz needs a password (WPA3)" to 2
+            security = SoftApConfiguration.SECURITY_TYPE_WPA3_SAE
+        }
+        if (security != SoftApConfiguration.SECURITY_TYPE_OPEN && password.length !in 8..63) {
+            return "error: the password takes 8 to 63 characters" to 2
+        }
+        val builder = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
+            .getConstructor(SoftApConfiguration::class.java).newInstance(persisted)
+        try {
+            Hidden.call(builder, "setWifiSsid", WifiSsid.fromBytes(name.toByteArray()))
+        } catch (e: NoSuchMethodException) {
+            Hidden.call(builder, "setSsid", name)
+        }
+        Hidden.call(builder, "setPassphrase", if (security == SoftApConfiguration.SECURITY_TYPE_OPEN) null else password, security)
+        val b2 = SoftApConfiguration.BAND_2GHZ
+        val b5 = SoftApConfiguration.BAND_5GHZ
+        when (band) {
+            BAND_2 -> Hidden.call(builder, "setBand", b2)
+            BAND_5 -> Hidden.call(builder, "setBand", b2 or b5)
+            BAND_6 -> Hidden.call(builder, "setBand", b2 or b5 or SoftApConfiguration.BAND_6GHZ)
+            BAND_DUAL -> Hidden.call(builder, "setBands", intArrayOf(b2, b2 or b5))
+            else -> return "error: band $band" to 2
+        }
+        Hidden.call(builder, "setHiddenSsid", o.optBoolean("hidden", false))
+        val cfg = Hidden.call(builder, "build") as SoftApConfiguration
+        if (Hidden.call(wm, "setSoftApConfiguration", cfg) != true) return "error: Wi-Fi refused the configuration" to 1
+        Log.i(TAG, "configured")
+        if (running(tm) != "normal") return "configured" to 0
+        // A running AP keeps its name and password: start it again with them.
+        if (!stop(tm, wm)) return "error: configured, but the running hotspot didn't stop" to 1
+        val (line, code) = start(context, tm, wm, "normal")
+        return (if (code == 0) "configured, restarted" else "configured; $line") to code
     }
 
     // --- Stopping ---

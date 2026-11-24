@@ -34,7 +34,7 @@ object PhoneMetrics {
         @JvmField val mode: String,
         @JvmField val on: Boolean,
         @JvmField val bleScanning: Boolean,
-        /** Starts by reason ("ble", "normal"), counted since Prism's data was cleared. */
+        /** Starts by reason ("ble", "normal", "manual": the hotspot page), counted since Prism's data was cleared. */
         @JvmField val starts: Map<String, Long>,
     )
 

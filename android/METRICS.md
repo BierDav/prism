@@ -146,7 +146,7 @@ The phone's hotspot (`Hotspot.kt`, `docs/hotspot.md`), as it is at push time.
 |---|---|---|
 | `phone_hotspot_mode` | `mode` = `instant`, `normal` | 1 for the current mode, 0 for the other |
 | `phone_hotspot_on` | | 1 while Wi-Fi tethering runs (Android 16 and newer; 0 before) |
-| `phone_hotspot_starts_total` | `reason` = `ble` (the Mac asked), `normal` (normal mode started it) | Starts Prism made, counted since Prism's data was cleared |
+| `phone_hotspot_starts_total` | `reason` = `ble` (the Mac asked), `normal` (normal mode started it), `manual` (Turn on on the hotspot page) | Starts Prism made, counted since Prism's data was cleared |
 | `phone_hotspot_ble_scanning` | | 1 while the Bluetooth LE scan for the Mac's request is registered (instant mode, `hotspot_key` set, Bluetooth and location on, not on Wi-Fi, hotspot off) |
 
 ## Prism itself

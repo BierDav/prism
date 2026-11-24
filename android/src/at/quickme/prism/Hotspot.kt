@@ -26,6 +26,11 @@
 // path. A low-power filtered scan costs next to nothing, since Android keeps
 // one running for itself anyway.
 //
+// The hotspot page (HotspotActivity, also the tile's long press) reads and
+// sets the hotspot's configuration and lists the devices on it through the
+// same tool (info(), configure()), and can switch an instant hotspot on or off
+// at once (startNow(), stopNow()).
+//
 // Android 16 (API 36) and newer: the tethering callback and a start with its
 // own configuration are public there; on older versions the tile still
 // switches modes, but nothing else happens.
@@ -58,7 +63,11 @@ import at.quickme.prism.core.HotspotToken
 import at.quickme.prism.core.PhoneMetrics
 import at.quickme.prism.shell.HotspotTool
 import at.quickme.prism.shell.Shell
+import org.json.JSONException
+import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
 object Hotspot {
@@ -173,7 +182,7 @@ object Hotspot {
         val p = prefs(c)
         return PhoneMetrics.Hotspot(
             mode(c), on, scanning,
-            mapOf("ble" to p.getLong("starts_ble", 0), "normal" to p.getLong("starts_normal", 0)),
+            mapOf("ble" to p.getLong("starts_ble", 0), "normal" to p.getLong("starts_normal", 0), "manual" to p.getLong("starts_manual", 0)),
         )
     }
 
@@ -299,32 +308,124 @@ object Hotspot {
      * Runs HotspotTool from Prism's APK as the shell user; its one line, or
      * null when the shell server isn't there (apply() runs again when it is).
      */
-    private fun tool(c: Context, vararg args: String): String? {
+    private fun tool(c: Context, vararg args: String): String? = tool(c, args.toList())
+
+    /** `env` goes to the tool's environment; `quiet` keeps its line (a password) out of the log. */
+    private fun tool(c: Context, args: List<String>, env: List<String> = emptyList(), quiet: Boolean = false): String? {
+        val what = args.joinToString(" ")
         if (!Shell.available()) {
-            Log.i(TAG, "no shell server for hotspot ${args.joinToString(" ")}; waiting for it")
+            Log.i(TAG, "no shell server for hotspot $what; waiting for it")
             shellWaiting = true
             return null
         }
         val apk = c.applicationInfo.sourceDir
         return try {
             val r = Shell.run(
-                60_000, "/system/bin/env", "CLASSPATH=$apk",
+                60_000, "/system/bin/env", "CLASSPATH=$apk", *env.toTypedArray(),
                 "/system/bin/app_process", "-Djava.class.path=$apk", "/system/bin", "--nice-name=prism_hotspot",
-                HotspotTool::class.java.name, *args,
+                HotspotTool::class.java.name, *args.toTypedArray(),
             )
             shellWaiting = false
             val line = r.stdout.trim().lineSequence().lastOrNull()?.trim() ?: ""
             if (r.ok()) {
-                Log.i(TAG, "hotspot ${args.joinToString(" ")}: $line")
+                if (!quiet) Log.i(TAG, "hotspot $what: $line")
             } else {
-                Log.w(TAG, "hotspot ${args.joinToString(" ")}: $r $line ${r.stderr.take(300)}")
+                Log.w(TAG, "hotspot $what: $r ${if (quiet) "" else line} ${r.stderr.take(300)}")
             }
             line
         } catch (e: IOException) {
-            Log.w(TAG, "hotspot ${args.joinToString(" ")}: ${e.message}")
+            Log.w(TAG, "hotspot $what: ${e.message}")
             shellWaiting = true
             null
         }
+    }
+
+    // --- The hotspot page (HotspotActivity) ---
+
+    /** A device on the hotspot: its MAC address, IPv4 address and host name (DHCP), as far as known. */
+    data class Client(val mac: String, val ip: String?, val host: String?)
+
+    /** The hotspot's configuration, as Settings has it: [band] is one of [BANDS]' keys. */
+    data class Config(val name: String, val password: String, val security: Int, val band: String, val hidden: Boolean)
+
+    /** What runs ("off", "instant", "normal", "other"), the configuration, the bands offered, and the devices (null: unknown). */
+    data class Info(val running: String, val config: Config?, val bands: List<String>, val clients: List<Client>?)
+
+    /** The bands the page offers, as the tool names them, with their labels. */
+    val BANDS = linkedMapOf("2" to "2.4 GHz", "5" to "5 GHz", "2+5" to "2.4 and 5 GHz", "6" to "6 GHz")
+
+    /** Runs `block` on the hotspot's thread, after what's queued there, and waits for it. */
+    private fun <T> onWorker(block: () -> T): T = try {
+        worker.submit(Callable { block() }).get()
+    } catch (e: ExecutionException) {
+        throw e.cause ?: e
+    }
+
+    private fun noShell(): IOException = IOException("Prism's shell access isn't running")
+
+    /** Blocks: the hotspot's state for the page. Throws IOException with a reason. */
+    @JvmStatic
+    fun info(c: Context): Info {
+        val line = onWorker { tool(c, listOf("info"), quiet = true) } ?: throw noShell()
+        if (line.startsWith("error")) throw IOException(line.removePrefix("error: "))
+        return try {
+            parseInfo(JSONObject(line))
+        } catch (e: JSONException) {
+            throw IOException("the hotspot tool's answer isn't JSON")
+        }
+    }
+
+    internal fun parseInfo(o: JSONObject): Info {
+        val config = o.optJSONObject("config")?.let {
+            Config(it.optString("name"), it.optString("password"), it.optInt("security"), it.optString("band", "5"),
+                it.optBoolean("hidden"))
+        }
+        val bands = o.optJSONArray("bands")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: listOf("2", "5")
+        val clients = o.optJSONArray("clients")?.let { a ->
+            (0 until a.length()).map { i ->
+                val c = a.getJSONObject(i)
+                Client(c.optString("mac"), c.optString("ip").ifEmpty { null }, c.optString("host").ifEmpty { null })
+            }
+        }
+        return Info(o.optString("running", "off"), config, bands, clients)
+    }
+
+    /** Blocks: saves the configuration; a running Always-on hotspot restarts with it. Returns the tool's line. */
+    @JvmStatic
+    fun configure(c: Context, config: Config): String {
+        val json = JSONObject()
+            .put("name", config.name).put("password", config.password).put("security", config.security)
+            .put("band", config.band).put("hidden", config.hidden)
+        val line = onWorker {
+            tool(c, listOf("configure"), env = listOf("PRISM_HOTSPOT_CONFIG=$json"))
+        } ?: throw noShell()
+        if (line.startsWith("error")) throw IOException(line.removePrefix("error: "))
+        changed()
+        return line
+    }
+
+    /** Blocks: in instant mode, switches the hotspot on now, as the Mac's request does. */
+    @JvmStatic
+    fun startNow(c: Context) {
+        val line = onWorker {
+            if (mode(c) != INSTANT) return@onWorker "already on"
+            val r = tool(c, "start", INSTANT) ?: return@onWorker null
+            if (r.startsWith("started")) counted(c, "manual")
+            if (r.startsWith("started") || r.startsWith("already")) {
+                checked = true
+                instantOn = true
+                main.post { updateScan(c) }
+            }
+            r
+        } ?: throw noShell()
+        if (line.startsWith("error")) throw IOException(line.removePrefix("error: "))
+    }
+
+    /** Blocks: in instant mode, switches the hotspot off now. */
+    @JvmStatic
+    fun stopNow(c: Context) {
+        val line = onWorker { if (mode(c) != INSTANT) "always on" else tool(c, "stop") } ?: throw noShell()
+        if (line.startsWith("error")) throw IOException(line.removePrefix("error: "))
     }
 
     // --- The Mac's request (Bluetooth LE) ---

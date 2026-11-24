@@ -146,6 +146,13 @@ object PrismIcons {
         stroke { moveTo(10.5f, 18.4f); lineTo(13.5f, 18.4f) }
     }
 
+    /** The hotspot: a dot with two arcs (the tile's glyph, res/drawable/ic_hotspot.xml). */
+    val Hotspot = icon("Hotspot") {
+        fill { circle(12f, 13f, 2f) }
+        stroke { moveTo(8.46f, 16.54f); arcTo(5f, 5f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 15.54f, y1 = 16.54f) }
+        stroke { moveTo(5.64f, 19.36f); arcTo(9f, 9f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 18.36f, y1 = 19.36f) }
+    }
+
     val Tv = icon("Tv") {
         stroke { roundRect(2.5f, 4f, 21.5f, 17f, 2.2f) }
         stroke { moveTo(8f, 20.5f); lineTo(16f, 20.5f) }
