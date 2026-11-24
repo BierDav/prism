@@ -26,12 +26,6 @@ import at.quickme.prism.AlertsTab
 import at.quickme.prism.ApprovalsContent
 import at.quickme.prism.ApprovalsStatus
 import at.quickme.prism.AssistComposer
-import at.quickme.prism.AssistChips
-import at.quickme.prism.AssistChoice
-import at.quickme.prism.PinnedChoice
-import at.quickme.prism.ui.PrismIcons
-import at.quickme.prism.choice
-import at.quickme.prism.machineChoice
 import at.quickme.prism.HomeNav
 import at.quickme.prism.HomeScaffold
 import at.quickme.prism.Inbox
@@ -150,31 +144,18 @@ private fun InboxBarQuestionPreview() = Part {
     at.quickme.prism.InboxBar(rememberSampleInbox(emptyList(), questions), screenHeight = 2856f)
 }
 
-/** The assistant composer over the live app, with the launch choices and a draft. */
+/** The assistant composer over the live app, with a draft. */
 @ScreenPreviews
 @Composable
 private fun AssistantPreview() = Themed {
     Box(Modifier.fillMaxSize()) {
         SampleHome(Tab.Alerts)
         Box(Modifier.fillMaxSize().background(BottomSheetDefaults.ScrimColor))
-        val options = remember { Sample.agentOptions() }
         at.quickme.prism.GeminiColors {
         AssistComposer(
             text = "Fix the stale Paperless backup", onText = {}, canSend = true, sending = false,
             onSend = {}, animate = false,
-            selectors = {
-                AssistChips("Profile", options.profiles.map { AssistChoice(it.id, it.label) },
-                    selected = "coding", enabled = true, onPick = {})
-                AssistChips("Machine", listOf(options.machine, "david-mb", "david-nuc-2").map { machineChoice(it, it) },
-                    selected = "auto", enabled = true, searchable = true, onPick = {},
-                    pinned = listOf(PinnedChoice("auto", "Pick the machine", PrismIcons.Sparkle, "david-mb")))
-                AssistChips("Project", options.projects.map { it.choice() }.filter { it.key.isNotEmpty() },
-                    selected = options.defaultProject, enabled = true, searchable = true, onPick = {},
-                    pinned = listOf(
-                        PinnedChoice("", "No project", PrismIcons.Chat, "No project"),
-                        PinnedChoice("auto", "Pick the project", PrismIcons.Sparkle, "Auto"),
-                    ))
-            },
+            selectors = {},
             modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth(),
         )
         }
