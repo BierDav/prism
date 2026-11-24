@@ -356,14 +356,24 @@ let
   };
 
   # The platform-independent core and the screens' pure logic on a JVM:
-  # untrusted text, the metrics encoding, the hotspot token (tests/).
+  # untrusted text, the metrics encoding, the hotspot token, the assistant's
+  # tool arguments, weather, Matrix events, transcript and Markdown (tests/).
   coreSources = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
       ./src/at/quickme/prism/core
+      ./src/at/quickme/prism/assistant/core
       ./tests
     ];
   };
+  # kotlinx-serialization (deps/lock.json) for the assistant's core.
+  serializationJars = lib.concatMapStringsSep ":" (d: "${d.src}") (
+    lib.filter (
+      d:
+      lib.hasPrefix "kotlinx-serialization-core-jvm-" d.file
+      || lib.hasPrefix "kotlinx-serialization-json-jvm-" d.file
+    ) fetched
+  );
 
   # --- The previews ---
 
@@ -581,9 +591,12 @@ in
       ''
         cp -r ${coreSources} src && chmod -R u+w src && cd src
         kotlinc -jvm-target 17 -Werror -d classes \
+          -Xplugin=${kotlin}/lib/kotlinx-serialization-compiler-plugin.jar \
+          -classpath ${serializationJars} \
           $(find src -name '*.kt') $(find tests -name '*.kt')
-        run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar "$@"; }
+        run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar:${serializationJars} "$@"; }
         run CoreTestKt
+        run AssistantTestKt
         run HotspotTestKt
         run MetricsTestKt remote-write.bin
         python3 tests/remote_write_decode.py remote-write.bin
