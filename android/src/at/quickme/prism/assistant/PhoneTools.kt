@@ -264,7 +264,7 @@ internal fun phoneTools(c: Context, capture: ScreenCapture): List<AssistantTool>
                 return ToolOutput(
                     if (confirmed) "Sent to $name ($number). It can't be edited; send a correction if needed."
                     else "Handed to the radio for $name ($number), not yet confirmed as sent; it will most likely go out. Don't send it again.",
-                    MessageCard(MessageCard.SMS, name, number, text, at = System.currentTimeMillis()),
+                    MessageCard(MessageCard.SMS, name, number, text, at = System.currentTimeMillis(), unconfirmed = !confirmed),
                 )
             }
         },
@@ -578,7 +578,7 @@ private suspend fun setDnd(c: Context, on: Boolean) {
         val r = withContext(Dispatchers.IO) { Shell.run(10_000, "cmd", "notification", "set_dnd", if (on) "priority" else "off") }
         if (r.ok()) return
     }
-    if (nm.isNotificationPolicyAccessGranted) {
+    if (nm.isNotificationPolicyAccessGranted && android.os.Build.VERSION.SDK_INT < 35) {
         nm.setInterruptionFilter(if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL)
         return
     }

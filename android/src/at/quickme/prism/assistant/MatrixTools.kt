@@ -54,11 +54,19 @@ class MatrixClient(private val homeserver: String, private val token: String) {
         }
     }
 
-    /** Prism sends and reads plain events only: an end-to-end encrypted room is refused. */
+    /**
+     * Prism sends and reads plain events only: an end-to-end encrypted room
+     * is refused. Asked of the homeserver each time (a room can turn
+     * encryption on at any moment); a room it can't vouch for is refused too.
+     */
     private suspend fun requirePlain(roomId: String) {
-        if (rooms().firstOrNull { it.id == roomId }?.encrypted == true) {
-            throw ToolArgumentException("That room is end-to-end encrypted; Prism can't read or send there yet.")
+        val encrypted = try {
+            get(Matrix.encryptionPath(roomId))
+            true
+        } catch (e: HttpException) {
+            if (e.status == 404) false else throw IllegalStateException("Matrix didn't say whether that room is encrypted (HTTP ${e.status})")
         }
+        if (encrypted) throw ToolArgumentException("That room is end-to-end encrypted; Prism can't read or send there yet.")
     }
 
     suspend fun messages(roomId: String, limit: Int): List<Matrix.Message> {
@@ -80,6 +88,7 @@ class MatrixClient(private val homeserver: String, private val token: String) {
     /** Replaces the text of [eventId] (one of the owner's) in [roomId] with [text]. */
     suspend fun edit(roomId: String, eventId: String, text: String): String {
         requireSetUp()
+        requirePlain(roomId)
         return Matrix.eventId(
             Http.request("PUT", Matrix.base(homeserver) + Matrix.sendPath(roomId, "prism-" + UUID.randomUUID()), Matrix.edit(eventId, text).toString(), headers()),
         )

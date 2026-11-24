@@ -107,7 +107,7 @@ class AssistantSession(
         } catch (e: Exception) {
             // Never the exception itself: a gateway's error body can echo what it was sent.
             val problem = problem(e)
-            Log.w(TAG, "assistant turn failed (${e.javaClass.simpleName}): $problem")
+            Log.w(TAG, "assistant turn failed (${e.javaClass.simpleName})")
             transcript = transcript.settled().after(Event.Failed(problem))
         } finally {
             running = false
@@ -122,6 +122,13 @@ class AssistantSession(
             val id = transcript.entries.last { it is Entry.Shown && it.card == e.card }.id
             onHandoff(id, e.card)
         }
+        save()
+    }
+
+    /** The start of entry [entryId] was refused: its card says why and it isn't asked again. */
+    fun failedStart(entryId: String, why: String) {
+        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? HandoffCard ?: return
+        transcript = transcript.withCard(entryId, card.copy(failed = why))
         save()
     }
 

@@ -595,7 +595,7 @@ private fun Assist(
     LaunchedEffect(Unit) {
         if (starting != null) return@LaunchedEffect
         val (entry, card) = session.transcript.latestHandoff() ?: (null to null)
-        if (card != null && card.agentId.isEmpty() && card.requestId.isNotEmpty()) {
+        if (card != null && card.agentId.isEmpty() && card.requestId.isNotEmpty() && card.failed.isEmpty()) {
             handoffEntry = entry
             agentId = null
             starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
@@ -630,9 +630,10 @@ private fun Assist(
             } catch (e: PrismError) {
                 // The request's own refusal ends it; anything else (no
                 // replica, the workers busy) is asked again, more slowly.
-                if (e.status in 400..499 && e.status != 408 && e.status != 429) {
+                if (e.code == "failed" || e.status in 400..499 && e.status != 408 && e.status != 429) {
                     starting = null
                     memory.started()
+                    handoffEntry?.let { session.failedStart(it, e.message.orEmpty()) }
                     activity = null
                     sendError = e.message
                     return@LaunchedEffect
@@ -645,6 +646,8 @@ private fun Assist(
 
     /** Leaves the agent followed for a new request (the transcript's new-conversation control calls it). */
     fun newRequest() {
+        if (sending) return
+        previous = null
         session.clear()
         handoffEntry = null
         agentId = null

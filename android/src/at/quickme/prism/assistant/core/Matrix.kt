@@ -56,6 +56,9 @@ object Matrix {
         return "/rooms/${enc(roomId)}/messages?dir=b&limit=$limit&filter=" + enc(filter.toString())
     }
 
+    /** The room's m.room.encryption state: 404 while it isn't encrypted. */
+    fun encryptionPath(roomId: String) = "/rooms/${enc(roomId)}/state/m.room.encryption/"
+
     fun sendPath(roomId: String, txnId: String) = "/rooms/${enc(roomId)}/send/m.room.message/${enc(txnId)}"
 
     fun memberPath(roomId: String, userId: String) = "/rooms/${enc(roomId)}/state/m.room.member/${enc(userId)}"

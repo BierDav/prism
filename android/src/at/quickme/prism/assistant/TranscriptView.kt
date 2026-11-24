@@ -415,6 +415,7 @@ fun ToolCard(card: Card, agent: FollowedAgent? = null, onEdit: suspend (String) 
             Text(
                 when {
                     card.followUp -> "Sent into the thread"
+                    card.failed.isNotEmpty() -> "Didn't start: ${card.failed}"
                     card.agentId.isEmpty() -> "Starting…"
                     else -> "Agent started"
                 },
@@ -537,7 +538,11 @@ private fun MessageView(card: MessageCard, onEdit: suspend (String) -> String?) 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = colors.primary)
                 Text(
-                    if (card.edited) "Sent • edited" else "Sent",
+                    when {
+                        card.unconfirmed -> "Sending not confirmed yet"
+                        card.edited -> "Sent • edited"
+                        else -> "Sent"
+                    },
                     style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
                     modifier = Modifier.padding(start = 6.dp).weight(1f),
                 )

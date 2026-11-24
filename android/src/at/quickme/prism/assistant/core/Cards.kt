@@ -62,6 +62,8 @@ data class MessageCard(
     val eventId: String = "",
     val edited: Boolean = false,
     val at: Long = 0,
+    /** The radio hadn't confirmed it as sent (an SMS that may still go out). */
+    val unconfirmed: Boolean = false,
 ) : Card {
     val editable: Boolean get() = channel == MATRIX && eventId.isNotEmpty()
 
@@ -137,6 +139,8 @@ data class HandoffCard(
     val title: String = "",
     /** A follow-up into an existing thread rather than a new agent. */
     val followUp: Boolean = false,
+    /** Why the start failed; empty while it starts or once it runs. */
+    val failed: String = "",
 ) : Card
 
 /** T3 agents listed. */

@@ -115,6 +115,7 @@ fun main() {
     check(edit["m.new_content"]!!.jsonObject["body"]!!.jsonPrimitive.content == "at 7" && edit["body"]!!.jsonPrimitive.content == "* at 7", "the edit's new text, and the fallback")
     check(Matrix.text("hi") == JsonObject(mapOf("msgtype" to JsonPrimitive("m.text"), "body" to JsonPrimitive("hi"))), "a text message")
     check(Matrix.sendPath("!a:b.c", "t1") == "/rooms/%21a%3Ab.c/send/m.room.message/t1", "the send path is encoded")
+    check(Matrix.encryptionPath("!a:b.c") == "/rooms/%21a%3Ab.c/state/m.room.encryption/", "the encryption state path")
     check(Matrix.base("https://matrix.example.org/") == "https://matrix.example.org/_matrix/client/v3", "the API base")
     val rooms = Matrix.decodeRooms(SYNC, "@me:example.org")
     check(rooms.map { it.name } == listOf("Anna", "Team"), "rooms by activity, a direct chat named by its member: ${rooms.map { it.name }}")

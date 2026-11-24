@@ -143,7 +143,13 @@ impl ApiError {
                 ..Self::not_found()
             }
         } else if lower.contains("try again") || lower.contains("does not answer") {
-            Self::unavailable(error)
+            // The leader ran it and it failed: asking again with the same
+            // request ID reads the same outcome, unlike "unavailable" from
+            // the replica itself, so it carries its own code.
+            Self {
+                code: "failed",
+                ..Self::unavailable(error)
+            }
         } else if lower.contains("already ended")
             || lower.contains("no longer open")
             || lower.contains("can be resolved")
@@ -1465,6 +1471,11 @@ mod tests {
         assert_eq!(
             ApiError::from_outcome("T3 could not stop this agent. Try again later.").status,
             503
+        );
+        // A request the leader ran and that failed is told apart from a busy replica.
+        assert_eq!(
+            ApiError::from_outcome("T3 could not stop this agent. Try again later.").code,
+            "failed"
         );
         assert_eq!(ApiError::from_outcome("#4 has already ended.").status, 409);
         assert_eq!(
