@@ -356,7 +356,8 @@ let
   };
 
   # The platform-independent core and the screens' pure logic on a JVM:
-  # untrusted text, the metrics encoding, the hotspot token (tests/).
+  # untrusted text, the metrics encoding, the hotspot token, the assistant's
+  # attachments (tests/).
   coreSources = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
@@ -585,6 +586,7 @@ in
         run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar "$@"; }
         run CoreTestKt
         run HotspotTestKt
+        run AttachmentTestKt
         run MetricsTestKt remote-write.bin
         python3 tests/remote_write_decode.py remote-write.bin
         touch $out
