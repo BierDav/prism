@@ -106,7 +106,8 @@ object CallBridge {
         host = args.getOrNull(0) ?: usage()
         port = args.getOrNull(1)?.toIntOrNull() ?: CallLink.PORT
         key = System.getenv("PRISM_CALL_KEY")?.let { HotspotToken.parseKey(it) } ?: usage()
-        context = Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
+        Hidden.initMainlineModules()
+        context =Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
         telephony = context.getSystemService(TelephonyManager::class.java)
         telecom = context.getSystemService(TelecomManager::class.java)
         audio = context.getSystemService(AudioManager::class.java)

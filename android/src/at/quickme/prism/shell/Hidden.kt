@@ -225,6 +225,20 @@ internal object Hidden {
         return call(thread, "getSystemContext") as Context
     }
 
+    /**
+     * Sets up the mainline modules' service managers, which an app's process
+     * gets from ActivityThread.main and app_process doesn't: without them
+     * telephony's managers (SubscriptionManager, a TelephonyManager's calls
+     * into the phone service) throw NullPointerException.
+     */
+    fun initMainlineModules() {
+        try {
+            call(Class.forName("android.app.ActivityThread"), "initializeMainlineModules")
+        } catch (e: IllegalStateException) {
+            // Already set up.
+        }
+    }
+
     /** An app's context with its code, in that app's user. */
     fun packageContext(system: Context, pkg: String, uid: Int): Context =
         call(system, "createPackageContextAsUser", pkg, Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY,
