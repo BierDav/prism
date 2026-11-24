@@ -168,6 +168,12 @@ import at.quickme.prism.shared.ProjectCatalog
 import at.quickme.prism.shared.ProjectChoice
 import at.quickme.prism.shared.ProjectIcon
 import at.quickme.prism.shared.ProfileChoice
+import at.quickme.prism.assistant.AUTO
+import at.quickme.prism.assistant.AssistAttachment
+import at.quickme.prism.assistant.AssistantSession
+import at.quickme.prism.assistant.AssistantTranscript
+import at.quickme.prism.assistant.FollowedAgent
+import at.quickme.prism.assistant.core.HandoffCard
 import at.quickme.prism.ui.GeminiIcons
 import at.quickme.prism.ui.HostColor
 import at.quickme.prism.ui.PrismIcons
@@ -369,6 +375,14 @@ private fun Assist(
     DisposableEffect(voice) { onDispose { voice.cancel() } }
     var sendError by remember { mutableStateOf<String?>(null) }
     var previous by remember { mutableStateOf<AssistantRequest?>(null) }
+    // The on-device assistant (assistant/): it answers and acts on the phone,
+    // and hands computer work to a T3 agent, which the overlay then follows.
+    // Without its key, requests start a T3 agent directly, as before.
+    val session = remember { AssistantSession(context) }
+    // What goes with the next request (the composer's attach menu adds to it).
+    val attachments = remember { mutableStateListOf<AssistAttachment>() }
+    // The transcript entry of the hand-off whose agent the overlay follows.
+    var handoffEntry by remember { mutableStateOf(session.transcript.latestHandoff()?.first) }
     val keyboard = LocalSoftwareKeyboardController.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
@@ -401,6 +415,33 @@ private fun Assist(
         activity = AgentActivity(agent)
         agentId = agent.id
         memory.conversation(agent.id)
+        handoffEntry?.let { session.started(it, agent.id, agent.title) }
+    }
+
+    /** The assistant handed a request to T3: follow its agent, or its start until it runs. */
+    fun handedOff(entryId: String, card: HandoffCard) {
+        handoffEntry = entryId
+        pending.clear()
+        agentTitle = card.title.ifEmpty { card.request }
+        if (card.agentId.isNotEmpty()) {
+            if (card.followUp) pending.add(card.request)
+            follow(at.quickme.prism.shared.Agent(id = card.agentId, title = card.title))
+            refresh++
+        } else {
+            agentId = null
+            activity = null
+            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+        }
+    }
+    session.onHandoff = ::handedOff
+    session.followed = { agentId?.let { it to (activity?.agent?.displayTitle ?: agentTitle) } }
+
+    // Reopened while a hand-off was still starting: keep asking for its agent.
+    LaunchedEffect(Unit) {
+        val (_, card) = session.transcript.latestHandoff() ?: return@LaunchedEffect
+        if (card.agentId.isEmpty() && card.requestId.isNotEmpty() && agentId == null && starting == null) {
+            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+        }
     }
 
     // A start still waiting for the leader: ask again until it ran.
@@ -426,6 +467,8 @@ private fun Assist(
     }
 
     fun newRequest() {
+        session.clear()
+        handoffEntry = null
         agentId = null
         starting = null
         activity = null
@@ -497,6 +540,24 @@ private fun Assist(
      */
     fun send(spoken: String? = null) {
         val request = (spoken ?: text).trim()
+        if (session.configured) {
+            if (request.isEmpty() && attachments.isEmpty() || session.running || leave.isRunning || leave.value > 0f) return
+            val files = attachments.toList()
+            sendError = null
+            keyboard?.hide()
+            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            scope.launch {
+                if (!unlock()) {
+                    sendError = "Unlock the phone to send."
+                    return@launch
+                }
+                memory.clearDraft()
+                text = ""
+                attachments.clear()
+                session.send(request, files)
+            }
+            return
+        }
         if (request.isEmpty() || sending || starting != null || leave.isRunning || leave.value > 0f) return
         agentId?.let { return reply(it, request) }
         val model = AssistantProfile.model(context)
@@ -663,9 +724,10 @@ private fun Assist(
         )
         val lift = with(LocalDensity.current) { 20.dp.toPx() }
         val following = agentId != null || starting != null
+        val chatting = session.configured && !session.transcript.isEmpty
         // Gemini's card spans the screen while the keyboard is up or an
         // answer shows, and sits back in its margins otherwise.
-        val wide = WindowInsets.isImeVisible || following
+        val wide = WindowInsets.isImeVisible || following || chatting
         val margin by androidx.compose.animation.core.animateDpAsState(
             if (wide) WideMargin else sideMargin(LocalConfiguration.current.screenWidthDp),
             if (reducedMotion) snap() else tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
@@ -674,19 +736,44 @@ private fun Assist(
         CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { AssistComposer(
             text = text,
             onText = { text = it; sendError = null },
-            canSend = starting == null,
-            sending = sending,
+            canSend = if (session.configured) !session.running else starting == null,
+            sending = sending || session.running,
             onSend = { send() },
             animate = !reducedMotion,
             error = sendError ?: voice.error,
-            placeholder = if (following) "Reply to the agent" else "Ask Prism",
+            placeholder = if (following && !session.configured) "Reply to the agent" else "Ask Prism",
             voice = voice,
             onMic = ::listen,
             onWave = ::listenToEdit,
-            onNew = if (following) ::newRequest else null,
+            onNew = if (following || chatting) ::newRequest else null,
             onCard = { plate = it },
             selectors = {
-                if (!following) return@AssistComposer
+                val followed = (agentId ?: starting?.let { "" })?.let { id ->
+                    FollowedAgent(
+                        agentId = id,
+                        title = agentTitle.ifEmpty { activity?.agent?.title.orEmpty() },
+                        activity = activity,
+                        pending = pending,
+                        error = activityError,
+                        onOpen = if (activity?.agent?.link != null || activity?.agent?.t3 != null) ::openThread else null,
+                        onStop = ::stopAgent,
+                    )
+                }
+                if (chatting) {
+                    AssistantTranscript(
+                        transcript = session.transcript,
+                        running = session.running,
+                        agent = followed,
+                        onNew = ::newRequest,
+                        onEdit = session::edit,
+                        modifier = Modifier.fillMaxWidth().chipEnter(0),
+                    )
+                    return@AssistComposer
+                }
+                if (!following) {
+                    if (!session.configured) NotSetUp(Modifier.chipEnter(0))
+                    return@AssistComposer
+                }
                 AgentConversation(
                     title = agentTitle.ifEmpty { activity?.agent?.title?.takeIf { it.isNotEmpty() } ?: "Agent" },
                     activity = activity,
@@ -720,6 +807,20 @@ private fun Assist(
                 },
         ) }
     }
+}
+
+/** Without assistant_api_key: what the overlay does instead. */
+@Composable
+private fun NotSetUp(modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Text(
+        "The assistant isn't set up on this phone (no assistant_api_key): requests start a T3 agent.",
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.onSurfaceVariant,
+        modifier = modifier
+            .background(colors.surfaceContainerHigh.copy(alpha = 0.92f), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 /** A light indigo veil, heavier at the bottom where the composer sits. */
@@ -808,8 +909,6 @@ internal class AssistMemory(context: Context) {
     }
 }
 
-/** The magic pick, as machine and project: Prism chooses from the request. */
-private const val AUTO = "auto"
 
 /** The card's margin while it spans the screen. */
 private val WideMargin = 8.dp
