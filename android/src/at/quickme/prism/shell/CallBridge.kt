@@ -5,7 +5,14 @@
 //   PRISM_CALL_KEY=<K, 64 hex> app_process -Djava.class.path=<Prism's APK> \
 //     /system/bin at.quickme.prism.shell.CallBridge HOST [PORT]
 //
-// It connects to the Mac (core/CallLink.kt), tells it the call's state,
+// It connects to the Mac (core/CallLink.kt): at HOST (its NetBird name), and
+// at once directly at every device on the phone's own networks (its
+// hotspot from the tethering module's clients, its hotspot and Wi-Fi from the
+// kernel's ARP table), since a cellular call on one
+// SIM stops mobile data on the other and with it NetBird's path, while a Mac
+// on the phone's hotspot is one hop away. The handshake tells the Mac from
+// anything else listening there; the first that passes wins and the others
+// close before theirs. It tells the Mac the call's state,
 // number and contact name, answers, declines and ends the call when the Mac
 // says so, and while the call is on the Mac carries its audio both ways with
 // Android's call audio interception (AudioManager's
@@ -32,6 +39,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.net.TetheringManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -51,12 +59,17 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.File
+import java.lang.reflect.Proxy
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -94,6 +107,9 @@ object CallBridge {
     private val link = AtomicReference<Link?>()
     private val sender = Executors.newSingleThreadExecutor { r -> Thread(r, "call-send") }
     private val modes = Executors.newSingleThreadExecutor { r -> Thread(r, "call-mode") }
+
+    /** The hotspot's clients' IPv4 addresses (their DHCP leases), as the tethering module last said. */
+    @Volatile private var hotspotClients: List<String> = emptyList()
 
     // The audio, while the call is on the Mac.
     @Volatile private var pipe: Pipe? = null
@@ -136,6 +152,7 @@ object CallBridge {
 
         for ((tm, listener) in listeners) tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
         audio.addOnModeChangedListener(modes) { mode -> main.post { modeChanged(mode) } }
+        followHotspot()
         Thread(::connectLoop, "call-link").start()
         Log.i(TAG, "bridging the call to $host:$port")
         Looper.loop()
@@ -186,13 +203,21 @@ object CallBridge {
         if (s != was || !phoneNumber.isNullOrBlank()) sendState()
     }
 
-    /** The contact's name for a number, or null. */
+    /**
+     * The contact's name for a number, or null. Through the shell's own
+     * `content` command, which queries as com.android.shell: this process's
+     * ContentResolver names the system's package, which the contacts
+     * provider refuses for uid 2000.
+     */
     private fun lookup(number: String): String? = try {
         val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
-        context.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use {
-            if (it.moveToFirst()) it.getString(0) else null
-        }
-    } catch (e: RuntimeException) {
+        val p = ProcessBuilder("/system/bin/content", "query", "--uri", uri.toString(),
+            "--projection", ContactsContract.PhoneLookup.DISPLAY_NAME).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText()
+        if (!p.waitFor(5, TimeUnit.SECONDS)) p.destroy()
+        out.lineSequence().firstOrNull { it.startsWith("Row: ") }
+            ?.substringAfter("${ContactsContract.PhoneLookup.DISPLAY_NAME}=", "")?.trim()?.ifEmpty { null }
+    } catch (e: IOException) {
         Log.w(TAG, "contact lookup: $e")
         null
     }
@@ -443,16 +468,9 @@ object CallBridge {
         while (!ended) {
             var l: Link? = null
             try {
-                val socket = Socket()
-                socket.tcpNoDelay = true
-                socket.keepAlive = true
-                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                l = Link(socket)
-                socket.soTimeout = CONNECT_TIMEOUT_MS
-                handshake(l)
-                socket.soTimeout = 0
+                l = connect()
                 link.set(l)
-                Log.i(TAG, "connected to the Mac")
+                Log.i(TAG, "connected to the Mac (${l.socket.inetAddress.hostAddress})")
                 main.post { sendState() }
                 read(l)
             } catch (e: IOException) {
@@ -465,7 +483,134 @@ object CallBridge {
         }
     }
 
-    /** The Mac's hello, our proof, the Mac's proof (docs/calls.md). */
+    /**
+     * Follows the hotspot's clients for the whole call. The tethering module
+     * tells them (TetheredClient, a system API, through onClientsChanged)
+     * only to a caller with NETWORK_SETTINGS, which the shell holds, so the
+     * callback is a proxy that also takes that method.
+     */
+    private fun followHotspot() {
+        val tm = try {
+            HotspotTool.tetheringManager(context)
+        } catch (e: RuntimeException) {
+            null
+        } ?: return
+        val type = TetheringManager.TetheringEventCallback::class.java
+        val callback = Proxy.newProxyInstance(type.classLoader, arrayOf(type)) { proxy, method, args ->
+            when (method.name) {
+                "onClientsChanged" -> {
+                    try {
+                        hotspotClients = (args?.getOrNull(0) as? Collection<*>).orEmpty().filterNotNull().flatMap { client ->
+                            if ((Hidden.call(client, "getTetheringType") as Number?)?.toInt() != HotspotTool.TETHERING_WIFI) {
+                                emptyList()
+                            } else {
+                                (Hidden.call(client, "getAddresses") as List<*>?).orEmpty().filterNotNull().mapNotNull { a ->
+                                    ((Hidden.call(a, "getAddress") as android.net.LinkAddress?)?.address as? Inet4Address)?.hostAddress
+                                }
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "hotspot clients: $e")
+                    }
+                    null
+                }
+                "hashCode" -> System.identityHashCode(proxy)
+                "equals" -> proxy === args?.getOrNull(0)
+                "toString" -> "CallBridge.hotspot"
+                else -> null
+            }
+        } as TetheringManager.TetheringEventCallback
+        try {
+            tm.registerTetheringEventCallback(modes, callback)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "hotspot clients: $e")
+        }
+    }
+
+    /** At most this many devices on the phone's networks are tried. */
+    private const val MAX_NEIGHBOURS = 16
+
+    /**
+     * Where the Mac may be: its NetBird name first, then the hotspot's
+     * clients, then the IPv4 neighbours on the phone's hotspot and Wi-Fi
+     * (complete ARP entries; the shell may read /proc/net/arp).
+     */
+    private fun targets(): List<InetSocketAddress> {
+        val neighbours = try {
+            File("/proc/net/arp").readLines().drop(1).mapNotNull { line ->
+                val f = line.trim().split(Regex("\\s+"))
+                val flags = f.getOrNull(2)?.removePrefix("0x")?.toIntOrNull(16) ?: 0
+                val device = f.getOrNull(5) ?: ""
+                val local = device.startsWith("ap_") || device.startsWith("swlan") || device.startsWith("wlan")
+                if (flags and 0x2 == 0 || !local) null else f[0]
+            }.distinct().take(MAX_NEIGHBOURS)
+        } catch (e: IOException) {
+            emptyList()
+        }
+        return listOf(InetSocketAddress(host, port)) + (hotspotClients + neighbours).distinct().take(MAX_NEIGHBOURS).mapNotNull { ip ->
+            (InetAddress.getByName(ip) as? Inet4Address)?.let { InetSocketAddress(it, port) }
+        }
+    }
+
+    /**
+     * Connects to every target at once and returns the first connection
+     * whose handshake passes; the others close, unauthenticated. Throws
+     * IOException with the NetBird target's error when none does.
+     */
+    private fun connect(): Link {
+        val targets = targets()
+        val results = LinkedBlockingQueue<Pair<InetSocketAddress, Any>>() // a Socket, or an IOException
+        val won = java.util.concurrent.atomic.AtomicBoolean(false)
+        for (t in targets) {
+            Thread({
+                val socket = Socket()
+                try {
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    socket.connect(t, CONNECT_TIMEOUT_MS)
+                    if (won.get()) socket.close() else results.put(t to socket)
+                } catch (e: IOException) {
+                    socket.close()
+                    results.put(t to e)
+                }
+            }, "call-connect").start()
+        }
+        var error: IOException? = null
+        repeat(targets.size) {
+            val (target, result) = results.poll(CONNECT_TIMEOUT_MS + 1_000L, TimeUnit.MILLISECONDS)
+                ?: return@repeat
+            if (result is IOException) {
+                if (target == targets[0] || error == null) error = result
+                return@repeat
+            }
+            val socket = result as Socket
+            if (won.get()) {
+                socket.close()
+                return@repeat
+            }
+            val l = Link(socket)
+            try {
+                socket.soTimeout = CONNECT_TIMEOUT_MS
+                handshake(l)
+                socket.soTimeout = 0
+            } catch (e: IOException) {
+                l.close()
+                if (target == targets[0] || error == null) error = e
+                return@repeat
+            }
+            won.set(true)
+            // Connections that come later close as they come.
+            Thread({
+                while (true) {
+                    val (_, late) = results.poll(CONNECT_TIMEOUT_MS + 1_000L, TimeUnit.MILLISECONDS) ?: break
+                    (late as? Socket)?.close()
+                }
+            }, "call-connect-rest").start()
+            return l
+        }
+        throw error ?: IOException("no answer")
+    }
+
     private fun handshake(l: Link) {
         val k = key
         val hello = CallLink.read(l.input)
