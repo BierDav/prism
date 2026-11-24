@@ -438,8 +438,9 @@ async fn the_phone_reads_and_acts_through_its_replica() {
         Some(json!({"text": "and the casks", "requestId": "msg-1"})),
     )
     .await;
+    // The leader ran it and T3 failed: final, so not "unavailable".
     assert_eq!(status, 503, "{body}");
-    assert_eq!(body["code"], "unavailable");
+    assert_eq!(body["code"], "failed");
 
     let (status, body) = call(
         &on_phone,
