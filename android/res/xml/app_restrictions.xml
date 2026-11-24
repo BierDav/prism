@@ -35,4 +35,16 @@
         android:title="@string/activity_recognition_denied" android:description="@string/activity_recognition_denied_about" />
     <restriction android:key="hotspot_key" android:restrictionType="string"
         android:title="@string/hotspot_key" android:description="@string/hotspot_key_about" />
+    <restriction android:key="assistant_url" android:restrictionType="string"
+        android:title="@string/assistant_url" android:description="@string/assistant_url_about"
+        android:defaultValue="https://ai.quickme.at" />
+    <restriction android:key="assistant_api_key" android:restrictionType="string"
+        android:title="@string/assistant_api_key" android:description="@string/assistant_api_key_about" />
+    <restriction android:key="assistant_model" android:restrictionType="string"
+        android:title="@string/assistant_model" android:description="@string/assistant_model_about"
+        android:defaultValue="agy-pro/gemini-4-neon" />
+    <restriction android:key="matrix_homeserver" android:restrictionType="string"
+        android:title="@string/matrix_homeserver" android:description="@string/matrix_homeserver_about" />
+    <restriction android:key="matrix_access_token" android:restrictionType="string"
+        android:title="@string/matrix_access_token" android:description="@string/matrix_access_token_about" />
 </restrictions>

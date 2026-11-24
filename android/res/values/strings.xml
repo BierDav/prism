@@ -32,4 +32,14 @@
     <string name="netbird_management_url_about">NetBird\'s management service (default https://api.netbird.io:443)</string>
     <string name="hotspot_key">Hotspot key</string>
     <string name="hotspot_key_about">64 hex characters shared with Prism for macOS: the Mac\'s Bluetooth LE request for the hotspot must carry it (docs/hotspot.md); unset, the phone doesn\'t listen</string>
+    <string name="assistant_url">Assistant gateway</string>
+    <string name="assistant_url_about">The assistant\'s model gateway, an OpenAI-compatible chat completions API (default https://ai.quickme.at)</string>
+    <string name="assistant_api_key">Assistant API key</string>
+    <string name="assistant_api_key_about">The gateway\'s API key; unset, the assistant overlay starts T3 agents directly</string>
+    <string name="assistant_model">Assistant model</string>
+    <string name="assistant_model_about">The assistant\'s model on the gateway (default agy-pro/gemini-4-neon)</string>
+    <string name="matrix_homeserver">Matrix homeserver</string>
+    <string name="matrix_homeserver_about">The owner\'s Matrix homeserver (client-server API base URL), for the assistant\'s Matrix tools</string>
+    <string name="matrix_access_token">Matrix access token</string>
+    <string name="matrix_access_token_about">The owner\'s Matrix access token: the assistant reads and sends Matrix messages as the owner</string>
 </resources>
