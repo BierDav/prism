@@ -12,5 +12,5 @@ resources:
 images:
   - name: prism-worker
     newName: ghcr.io/bierdav/prism-worker
-    newTag: 9d2c4fe5f8de643321242e314bc75d84ef354bf9-45357004093
-    digest: sha256:1e1b58b4c42312d9176cf874b4647f86f3b7567215b44c05e1d2f12e60257d25
+    newTag: 92036245ff1788ed5a01ea36cae7feb0078e3c19-45502158880
+    digest: sha256:c070d74c7c46d42ec4ee6167f441db8409b664e7d478815704d6a942bf0c710c
