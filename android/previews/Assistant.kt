@@ -194,7 +194,7 @@ private fun AssistantOverlayPreview() = Themed {
         }
         at.quickme.prism.GeminiColors {
             AssistComposer(
-                text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {}, onNew = {},
+                text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
                 selectors = { AssistantTranscript(t, false, null, onNew = {}, onEdit = { _, _ -> null }, modifier = Modifier.fillMaxWidth()) },
                 modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp).fillMaxWidth(),
             )

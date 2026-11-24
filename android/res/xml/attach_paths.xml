@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What Prism's FileProvider (@APPLICATION_ID@.attach) shares: the cache
+     folder the camera writes the assistant overlay's photo to (CameraShots in
+     AssistActivity.kt). -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

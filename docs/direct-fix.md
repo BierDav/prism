@@ -40,7 +40,9 @@ the devices' public keys), without the workers' T3 URLs and credentials.
 
 `Replica.call` (`rocky-prism-ffi/src/api.rs`) checks the workers' health
 first (`GET https://prism.quickme.at/v1/health`, remembered for 30 s when
-up, 10 s when down):
+up, 10 s when down). A worker answers it at once, without reading its
+replica: `503` only while its replica is incomplete (as `/ready`), `200`
+however busy the database is, since a busy leader still runs the request:
 
 - **Reachable:** the request goes to the workers, as before. Approvals,
   question answers and stops, which T3 takes only once anyway (an approval
@@ -55,7 +57,9 @@ up, 10 s when down):
   the agent and the closed approval sync to them then.
 
 A device with no sessions yet, or none for the target machine, leaves the
-request to the workers and answers `202` with the reason in `detail`.
+request to the workers and answers `202` with the reason in `detail`. So does
+an agent request for the project `auto`: the leader picks it with its text
+generation, which the published config leaves out.
 A Fix, Do… or follow-up sent while the workers answered is never repeated on
 the device: the workers may already have started it.
 

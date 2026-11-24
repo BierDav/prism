@@ -120,7 +120,6 @@
             android:taskAffinity=""
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
-            android:noHistory="true"
             android:showWhenLocked="true"
             android:windowSoftInputMode="adjustResize|stateHidden"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
@@ -207,6 +206,18 @@
         <!-- Shell access (shell/, android/shizuku/README.md): the shell server hands
              its binder here, and so do its user services; only the shell user
              can reach it. -->
+        <!-- The camera writes the photo the assistant overlay attaches here
+             (AssistActivity.kt, CameraShots). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="@APPLICATION_ID@.attach"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/attach_paths" />
+        </provider>
+
         <provider
             android:name=".shell.ShellProvider"
             android:authorities="@APPLICATION_ID@.shell"

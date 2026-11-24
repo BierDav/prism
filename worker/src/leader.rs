@@ -1165,4 +1165,82 @@ mod tests {
         work.tick().await.expect("tick");
         assert_eq!(rig.t3.launches.lock().expect("launches").len(), 2);
     }
+
+    /// The overlay's default is project "auto", which the leader picks with
+    /// its text generation. A device has none (the published config leaves
+    /// it out), so it must not claim such a request: claimed as
+    /// `device:<name>` it ended in an error at best, and at worst stayed the
+    /// device's own and never ran, since no worker takes a device's claim.
+    #[tokio::test]
+    async fn a_device_leaves_a_request_for_an_auto_project_to_the_workers() {
+        use crate::direct::{DeviceSession, Direct, KIND_MCP, session_key};
+        let rig = rig().await;
+        let work = rig.work("prism-worker-0");
+        work.tick().await.expect("tick");
+        let t3_url = rig.cfg.machines["david-server"].t3_url.clone();
+        let session = DeviceSession {
+            origin: t3_url,
+            token: "t3-token".into(),
+            environment_id: "env".into(),
+            expires_at: NOW + 3600,
+        };
+        rig.client
+            .set_setting(
+                &session_key("david-phone", "david-server", KIND_MCP),
+                &serde_json::to_string(&session).expect("json"),
+                NOW,
+            )
+            .await
+            .expect("session");
+        let clock = Arc::clone(&rig.clock);
+        let now: Clock = Arc::new(move || clock.load(Ordering::SeqCst));
+        let direct = Direct::open(Arc::clone(&rig.client), "david-phone", now)
+            .await
+            .expect("open");
+
+        rig.client
+            .request_agent(
+                "a1",
+                "do",
+                "auto",
+                "what is the uptime of david-server",
+                "",
+                "auto",
+                "david-phone",
+                NOW,
+            )
+            .await
+            .expect("request");
+        let why = direct
+            .agent_request("a1")
+            .await
+            .expect_err("left to the workers");
+        assert!(why.contains("waits for them"), "{why}");
+        let waiting = rig
+            .client
+            .request_outcome(rocky_prism::RequestTable::AgentRequests, "a1")
+            .await
+            .expect("get")
+            .expect("a1");
+        assert_eq!(waiting.claimed_by, None, "the device did not claim it");
+        assert_eq!(waiting.done_at, None);
+
+        // The leader takes it on its next pass.
+        work.tick().await.expect("tick");
+        let ran = rig
+            .client
+            .request_outcome(rocky_prism::RequestTable::AgentRequests, "a1")
+            .await
+            .expect("get")
+            .expect("a1");
+        assert_eq!(ran.claimed_by.as_deref(), Some("prism-worker-0"));
+        assert!(ran.done_at.is_some());
+
+        // A request naming its project still runs on the device.
+        rig.client
+            .request_agent("a2", "do", "", "clean up", "", "", "david-phone", NOW)
+            .await
+            .expect("request");
+        assert!(direct.agent_request("a2").await.expect("agent"));
+    }
 }

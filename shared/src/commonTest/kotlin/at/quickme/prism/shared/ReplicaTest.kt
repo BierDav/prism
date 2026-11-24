@@ -16,13 +16,15 @@ import kotlinx.coroutines.withTimeout
 suspend fun replicaTests(directory: String) {
     var replica = PrismReplica.open(directory)
     val seeded = replica.placement()
-    check(seeded.profiles.map { it.id } == listOf("default", "review", "minor")) { "seeded profiles: ${seeded.profiles.map { it.id }}" }
-    check(seeded.effectiveAlertFixProfile == "default") { "alert fix: ${seeded.effectiveAlertFixProfile}" }
+    // Prism builds in no profiles: an empty replica has none, and no alert-fix profile.
+    check(seeded.profiles.isEmpty()) { "seeded profiles: ${seeded.profiles.map { it.id }}" }
+    check(seeded.effectiveAlertFixProfile.isEmpty()) { "alert fix: ${seeded.effectiveAlertFixProfile}" }
 
     val entries = listOf(
         PlacementEntry(instanceId = "claudeAgent", model = "claude-1/claude-opus-5-5", reasoning = "high"),
         PlacementEntry(instanceId = "codex", model = "gpt-5.5", enabled = false, sessionShareOfWeekly = 0.25),
     )
+    replica.savePlacementProfile("default", "Default", entries.take(1))
     val saved = coroutineScope {
         val changed = async { withTimeout(10_000) { replica.changes(listOf("profiles")).first() } }
         // Let the watcher subscribe before the write it waits for.
@@ -38,8 +40,8 @@ suspend fun replicaTests(directory: String) {
     check(night.entries.map { it.enabled } == listOf(true, false)) { "enabled: ${night.entries}" }
     check(night.entries[1].sessionShareOfWeekly == 0.25) { "share: ${night.entries[1]}" }
 
-    val ordered = replica.setPlacementOrder(listOf("night", "default", "review", "minor"))
-    check(ordered.profiles.map { it.id } == listOf("night", "default", "review", "minor")) { "order: ${ordered.profiles.map { it.id }}" }
+    val ordered = replica.setPlacementOrder(listOf("night", "default"))
+    check(ordered.profiles.map { it.id } == listOf("night", "default")) { "order: ${ordered.profiles.map { it.id }}" }
     val policy = replica.setPlacementPolicy(seeded.policy.copy(switchAtPercent = 80.0)).policy
     check(policy.switchAtPercent == 80.0) { "policy: $policy" }
 
@@ -53,7 +55,7 @@ suspend fun replicaTests(directory: String) {
 
     // The Prism API on the replica, through the client the apps use.
     val api = replica.client("david-pixel", waitSeconds = 0)
-    check(api.placement().profiles.map { it.id } == listOf("night", "default", "review", "minor")) { "API placement" }
+    check(api.placement().profiles.map { it.id } == listOf("night", "default")) { "API placement" }
     check(api.alerts("open").isEmpty()) { "alerts on an empty replica" }
     check(api.agents("active").isEmpty()) { "agents on an empty replica" }
     val missing = try {
@@ -87,7 +89,7 @@ suspend fun replicaTests(directory: String) {
     replica = PrismReplica.open(directory)
     try {
         val reopened = replica.placement()
-        check(reopened.profiles.map { it.id } == listOf("night", "default", "review", "minor")) { "reopened: ${reopened.profiles.map { it.id }}" }
+        check(reopened.profiles.map { it.id } == listOf("night", "default")) { "reopened: ${reopened.profiles.map { it.id }}" }
         check(reopened.policy.switchAtPercent == 80.0) { "reopened policy: ${reopened.policy}" }
     } finally {
         replica.close()
