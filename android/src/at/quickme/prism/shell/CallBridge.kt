@@ -107,10 +107,13 @@ object CallBridge {
         port = args.getOrNull(1)?.toIntOrNull() ?: CallLink.PORT
         key = System.getenv("PRISM_CALL_KEY")?.let { HotspotToken.parseKey(it) } ?: usage()
         Hidden.initMainlineModules()
-        context =Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
-        telephony = context.getSystemService(TelephonyManager::class.java)
-        telecom = context.getSystemService(TelecomManager::class.java)
-        audio = context.getSystemService(AudioManager::class.java)
+        context = Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
+        // As com.android.shell: on the system's context, telephony calls as
+        // "android", which TelephonyRegistry refuses for uid 2000.
+        val shell = Hidden.shellContext(context)
+        telephony = Hidden.manager(TelephonyManager::class.java, shell)
+        telecom = Hidden.manager(TelecomManager::class.java, shell)
+        audio = Hidden.manager(AudioManager::class.java, shell)
 
         // One listener per SIM: each reports only its own calls. Made here,
         // after the main looper exists (a PhoneStateListener takes it).

@@ -12,6 +12,7 @@ package at.quickme.prism.shell
 
 import android.content.AttributionSource
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ChangedPackages
 import android.content.pm.PackageInfo
 import android.content.pm.ProviderInfo
@@ -237,6 +238,35 @@ internal object Hidden {
         } catch (e: IllegalStateException) {
             // Already set up.
         }
+    }
+
+    /**
+     * A context that names the shell's package (com.android.shell) as the
+     * caller, and is its own application context. A manager made on the
+     * system context or a package context of it takes the application
+     * context, the system's ("android"), and services that check the
+     * caller's package refuse it for uid 2000 ("Package android does not
+     * belong to 2000"): TelephonyRegistry, Telecom, the tethering module.
+     */
+    fun shellContext(base: Context): Context = object : ContextWrapper(base) {
+        override fun getOpPackageName(): String = SHELL_PACKAGE
+        override fun getPackageName(): String = SHELL_PACKAGE
+        override fun getAttributionTag(): String? = null
+        override fun getApplicationContext(): Context = this
+    }
+
+    const val SHELL_PACKAGE = "com.android.shell"
+
+    /**
+     * A manager built on `c` with its (hidden) constructor taking a Context,
+     * so it calls as `c` names; the system's own if there's no such
+     * constructor.
+     */
+    fun <T> manager(cls: Class<T>, c: Context): T = try {
+        cls.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }.newInstance(c)
+    } catch (e: ReflectiveOperationException) {
+        Log.w(TAG, "${cls.simpleName}(Context): $e; using the system's")
+        c.getSystemService(cls)
     }
 
     /** An app's context with its code, in that app's user. */
