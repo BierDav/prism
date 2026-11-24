@@ -2,6 +2,7 @@ package at.quickme.prism
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,7 +19,12 @@ private const val INVOCATION_TYPE_CORNER_SWIPE = 1
 class PrismAssistantService : VoiceInteractionService() {
     override fun onReady() {
         super.onReady()
-        setDisabledShowContext(VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT)
+        // No view structure of the app on the screen; its screenshot, though,
+        // which Android sends only with Settings › Apps › Default apps ›
+        // Digital assistant › Use screenshot on (it then also flashes the
+        // screen's edges: Prism is no preinstalled assistant). The overlay's
+        // "Screen" attaches it (assistant/PhoneScreenCapture.kt).
+        setDisabledShowContext(VoiceInteractionSession.SHOW_WITH_ASSIST)
         enableInvocationEffect()
     }
 
@@ -80,8 +86,18 @@ internal class PrismAssistantSession(private val context: Context) : VoiceIntera
 
     private var overlay: AssistActivity? = null
 
+    /** The screen as it was when this invocation began, without the overlay, if Android sent it. */
+    @Volatile var screenshot: Bitmap? = null
+        private set
+
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         setUiEnabled(false) // The activity draws the overlay in the assistant layer.
+        // A new invocation: the last one's screen is stale; this one's comes after onShow.
+        screenshot = null
+    }
+
+    override fun onHandleScreenshot(screenshot: Bitmap?) {
+        this.screenshot = screenshot
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
@@ -125,6 +141,7 @@ internal class PrismAssistantSession(private val context: Context) : VoiceIntera
     }
 
     private fun dismiss() {
+        screenshot = null
         if (current === this) current = null
         val activity = overlay
         overlay = null
