@@ -1,11 +1,12 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
 use rocky_prism::{
-    PlacementAccountLimit, PlacementActiveHours, PlacementEntryInput, PlacementHostModel,
-    PlacementLoad, PlacementMoveAck, PlacementPolicy, PlacementSample, PlacementSelection,
-    PlacementSyncModel, PlacementSyncReasoning, PlacementSyncRequest, PlacementSyncThread,
-    PlacementWindow, PrismClient, PrismError, PutPlacementEntryInput, PutPlacementProfileRequest,
-    SetPlacementActionsRequest, compute_burn_rate, decide_entry, model_key, placement_drain_target,
+    PlacementAccountLimit, PlacementActiveHours, PlacementEntryInput, PlacementEntryRow,
+    PlacementHostModel, PlacementLoad, PlacementMoveAck, PlacementPolicy, PlacementProfileRow,
+    PlacementSample, PlacementSelection, PlacementSyncModel, PlacementSyncReasoning,
+    PlacementSyncRequest, PlacementSyncThread, PlacementWindow, PrismClient, PrismError,
+    PutPlacementEntryInput, PutPlacementProfileRequest, SetPlacementActionsRequest,
+    compute_burn_rate, decide_entry, expand_profile_references, model_key, placement_drain_target,
     placement_move_target, placement_waits_for_reset, rank_placement_profile, same_placement_entry,
     usable_hours,
 };
@@ -884,6 +885,219 @@ async fn test_account_limits_are_stored_apart_from_the_policy() {
         .await
         .expect("view");
     assert!(view.policy.account_limits.is_empty());
+    client.close().await.expect("close");
+}
+
+fn row(profile: &str, entries: &[(&str, &str, bool)]) -> PlacementProfileRow {
+    PlacementProfileRow {
+        id: profile.into(),
+        label: profile.into(),
+        position: 0,
+        entries: entries
+            .iter()
+            .enumerate()
+            .map(|(i, (instance_id, model, enabled))| PlacementEntryRow {
+                profile_id: profile.into(),
+                position: i as i32,
+                instance_id: (*instance_id).into(),
+                model: (*model).into(),
+                reasoning: String::new(),
+                enabled: *enabled,
+                session_share_of_weekly: None,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn test_profile_entries_expand_in_place() {
+    let profiles = [
+        row(
+            "default",
+            &[
+                ("placement", "anthropic", true),
+                ("codex", "codex-2/gpt-6.2-sol", true),
+                ("placement", "openai", false),
+            ],
+        ),
+        row(
+            "anthropic",
+            &[
+                ("claudeAgent", "claude-alex/claude-opus-5-5", true),
+                ("claudeAgent", "claude-1/claude-opus-5-5", false),
+                ("codex", "codex-2/gpt-6.2-sol", true),
+            ],
+        ),
+        row("openai", &[("codex", "codex-david/gpt-6.2-sol", true)]),
+        // A cycle saving refuses; expanding it still ends.
+        row("a", &[("placement", "b", true), ("codex", "x/m", true)]),
+        row("b", &[("placement", "a", true), ("codex", "y/m", true)]),
+    ];
+    let expanded = expand_profile_references(&profiles);
+    let models = |i: usize| {
+        expanded[i]
+            .entries
+            .iter()
+            .map(|e| (e.model.as_str(), e.enabled, e.position))
+            .collect::<Vec<_>>()
+    };
+    // anthropic's enabled models at the reference's place, codex-2 once, the
+    // disabled reference adds nothing.
+    assert_eq!(
+        models(0),
+        [
+            ("claude-alex/claude-opus-5-5", true, 0),
+            ("codex-2/gpt-6.2-sol", true, 1)
+        ]
+    );
+    // A profile without references keeps its disabled entries for display.
+    assert_eq!(models(1).len(), 3);
+    assert_eq!(models(3), [("y/m", true, 0), ("x/m", true, 1)]);
+    assert!(
+        expanded
+            .iter()
+            .all(|p| p.entries.iter().all(|e| e.profile_id == p.id))
+    );
+}
+
+#[tokio::test]
+async fn test_profile_entries_save_rank_and_block_deletion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+        .await
+        .expect("open_or_create");
+    let now = utc_dt(2026, 11, 25, 12, 0, 0).timestamp();
+    let entry = |instance_id: &str, model: &str, enabled: bool| PutPlacementEntryInput {
+        instance_id: instance_id.into(),
+        model: model.into(),
+        reasoning: String::new(),
+        enabled,
+        session_share_of_weekly: None,
+    };
+    let put = |id: &'static str, entries: Vec<PutPlacementEntryInput>| {
+        let client = &client;
+        async move {
+            client
+                .put_placement_profile(
+                    id.into(),
+                    PutPlacementProfileRequest {
+                        label: id.to_uppercase(),
+                        entries,
+                    },
+                    now,
+                )
+                .await
+        }
+    };
+    const ALEX: &str = "claude-alex/claude-opus-5-5";
+    put("anthropic", vec![entry("claudeAgent", ALEX, true)])
+        .await
+        .expect("anthropic");
+    put("openai", vec![entry("codex", "codex-2/gpt-6.2-sol", true)])
+        .await
+        .expect("openai");
+    // A disabled reference at the end is kept, not dropped as padding.
+    put(
+        "default",
+        vec![
+            entry("placement", "anthropic", true),
+            entry("placement", "openai", false),
+        ],
+    )
+    .await
+    .expect("default");
+    // Itself, a cycle, or a missing profile: refused.
+    for (id, entries) in [
+        ("default", vec![entry("placement", "default", true)]),
+        ("anthropic", vec![entry("placement", "default", true)]),
+        ("default", vec![entry("placement", "nope", true)]),
+    ] {
+        assert!(
+            matches!(put(id, entries).await, Err(PrismError::InvalidInput(_))),
+            "{id}"
+        );
+    }
+    // Deleting a profile another one names: refused.
+    assert!(matches!(
+        client.delete_placement_profile("anthropic".into()).await,
+        Err(PrismError::Conflict(msg)) if msg.contains("DEFAULT")
+    ));
+
+    // T3 sees anthropic's model in default, never the reference.
+    let window = PlacementWindow {
+        used_percent: 10.0,
+        resets_at: (utc_dt(2026, 11, 25, 14, 0, 0))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    let model = |instance_id: &str, model: &str| PlacementSyncModel {
+        instance_id: instance_id.into(),
+        model: model.into(),
+        label: model.into(),
+        driver: String::new(),
+        hidden: false,
+        provider: String::new(),
+        reasoning: None,
+        blocked: None,
+        session: Some(window.clone()),
+        weekly: None,
+    };
+    let resp = client
+        .sync_placement(
+            "host".into(),
+            PlacementSyncRequest {
+                v: 1,
+                environment_id: "env".into(),
+                models: vec![
+                    model("claudeAgent", ALEX),
+                    model("codex", "codex-2/gpt-6.2-sol"),
+                ],
+                threads: Vec::new(),
+                moves: Vec::new(),
+            },
+            now,
+        )
+        .await
+        .expect("sync");
+    let default = resp
+        .profiles
+        .iter()
+        .find(|p| p.id == "default")
+        .expect("default");
+    let models: Vec<&str> = default
+        .entries
+        .iter()
+        .map(|e| e.selection.model.as_str())
+        .collect();
+    assert_eq!(models, [ALEX]);
+    assert_eq!(default.next.as_ref().map(|s| s.model.as_str()), Some(ALEX));
+
+    // The apps see the reference, named and summarised.
+    let view = client
+        .placement_view("host".into(), now)
+        .await
+        .expect("view");
+    let default = view
+        .profiles
+        .iter()
+        .find(|p| p.id == "default")
+        .expect("default");
+    assert_eq!(default.configured_entry_count, 2);
+    let reference = &default.entries[0];
+    assert_eq!(
+        (
+            reference.instance_id.as_str(),
+            reference.label.as_str(),
+            reference.driver.as_str()
+        ),
+        ("placement", "ANTHROPIC", "placement")
+    );
+    assert_eq!(reference.state, "ok", "{}", reference.reason);
+    assert!(
+        reference.reason.starts_with("Best of ANTHROPIC: "),
+        "{}",
+        reference.reason
+    );
+    assert!(!default.entries[1].enabled);
     client.close().await.expect("close");
 }
 
