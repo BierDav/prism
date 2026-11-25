@@ -63,7 +63,10 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -177,6 +180,7 @@ import at.quickme.prism.shared.ProjectChoice
 import at.quickme.prism.shared.ProjectIcon
 import at.quickme.prism.shared.ProfileChoice
 import at.quickme.prism.assistant.AssistAttachment
+import at.quickme.prism.assistant.AssistHistory
 import at.quickme.prism.assistant.AssistantSession
 import at.quickme.prism.assistant.AssistantTranscript
 import at.quickme.prism.assistant.FollowedAgent
@@ -245,6 +249,7 @@ class AssistActivity : ComponentActivity(), OverlayWindow {
                     unlock = ::unlock,
                     capture = capture,
                     onExternal = { awaitingResult = it },
+                    onExpand = { AssistHistory.open(this@AssistActivity) },
                 )
                 }
             }
@@ -386,8 +391,8 @@ internal fun Modifier.chipEnter(order: Int): Modifier {
     }
 }
 
-/** The input card's corners: a pill at one row; taller, it keeps these. */
-private val CardRadius = 32.dp
+/** The input card's corners: a pill at one row (80 dp, as Gemini's); taller, it keeps these. */
+private val CardRadius = 40.dp
 
 /** The halo's rounding round the card. */
 private val PlateRadius = 28.dp
@@ -408,6 +413,8 @@ private fun Assist(
     /** Before a picker or the camera opens over the overlay. */
     /** A picker or the camera is about to cover the overlay (true), or couldn't (false). */
     onExternal: (Boolean) -> Unit,
+    /** The card dragged up: the full-screen chat history. */
+    onExpand: () -> Unit,
 ) {
     // Milliseconds since the overlay appeared, to the glow's end.
     val clock = remember { Animatable(if (reducedMotion) GLOW_MS else 0f) }
@@ -859,7 +866,9 @@ private fun Assist(
     BackHandler(enabled = menuOpen) { menuOpen = false }
 
     val corners = rememberScreenCorners()
-    val primary = MaterialTheme.colorScheme.primary
+    // The glow in Gemini's energy colour: on a near-grey palette the primary
+    // alone turned its rim and waves into a grey vignette round the screen.
+    val primary = energyColor(MaterialTheme.colorScheme.primary)
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     // Where the input card is, for the halo round it.
     var plate by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
@@ -947,6 +956,7 @@ private fun Assist(
             menuOpen = menuOpen,
             onMenu = { menuOpen = it },
             onCard = { plate = it },
+            onExpand = onExpand,
             selectors = {
                 val followed = (agentId ?: starting?.let { "" })?.let { id ->
                     FollowedAgent(
@@ -996,6 +1006,11 @@ private fun Assist(
                 .widthIn(max = 696.dp)
                 .fillMaxWidth()
                 .graphicsLayer {
+                    // Faded per drawing, not through an offscreen layer: a
+                    // layer is clipped to the composer's bounds, and the
+                    // card's shader draws 48 dp round it (its soft edge and
+                    // dots), which Back or the swipe cut into a dotted box.
+                    compositingStrategy = CompositingStrategy.ModulateAlpha
                     // Sinks back out, and draws back with the gesture; the
                     // card and chips bring their own entrance (Gemini's).
                     val l = leave.value
@@ -1181,6 +1196,8 @@ internal fun AssistComposer(
     menuOpen: Boolean = false,
     onMenu: (Boolean) -> Unit = {},
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit = {},
+    /** The card dragged up past [ExpandDrag] (or flung up). */
+    onExpand: () -> Unit = {},
     selectors: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1228,10 +1245,24 @@ internal fun AssistComposer(
             onPlus = attach?.let { { onMenu(!menuOpen) } },
             menuOpen = menuOpen,
             onCard = onCard,
+            onExpand = onExpand,
             modifier = Modifier.fillMaxWidth(),
         )
     }
 }
+
+/** How far the card must be dragged up to expand. */
+private val ExpandDrag = 72.dp
+
+/** Or how fast it must be flung up (dp/s), from at least [FlingMinDrag]. */
+private const val ExpandFlingDpPerS = 1200f
+private val FlingMinDrag = 16.dp
+
+/** How far the card follows the finger at most: it lags behind, then stops. */
+private val DragLift = 32.dp
+
+/** The card's lift for [pull] px of finger travel up: a rubber band to [max] px. */
+private fun dragLift(pull: Float, max: Float) = if (max <= 0f) 0f else max * (1f - kotlin.math.exp(-pull / max))
 
 /**
  * Gemini's input card: one row (+, text, mic, send) while idle; once the
@@ -1262,6 +1293,7 @@ private fun Composer(
     onPlus: (() -> Unit)?,
     menuOpen: Boolean,
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit,
+    onExpand: () -> Unit,
     modifier: Modifier,
 ) {
     // Listening, Gemini first only pulses its mic; once speech begins, the bars.
@@ -1293,21 +1325,56 @@ private fun Composer(
     val processing by animateFloatAsState(if (sending) 1f else 0f, tween(300), label = "processing")
     val textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 20.sp, lineHeight = 28.sp)
     val age = { (now - opened).toFloat() }
+    // Dragged up, the card follows the finger a little and expands past a
+    // threshold (or on a fling up); below it, it springs back.
+    val density = LocalDensity.current
+    val view = LocalView.current
+    var pull by remember { mutableFloatStateOf(0f) }
+    var settling by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val drag = rememberDraggableState { dy ->
+        val before = pull
+        pull = (pull - dy).coerceAtLeast(0f)
+        val threshold = with(density) { ExpandDrag.toPx() }
+        if (before < threshold && pull >= threshold) {
+            view.performHapticFeedback(
+                if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+                else HapticFeedbackConstants.CONTEXT_CLICK,
+            )
+        }
+    }
     Box(
         modifier
+            .graphicsLayer { translationY = -dragLift(pull, DragLift.toPx()) }
             .onGloballyPositioned { onCard(it.boundsInRoot()) }
-            // Gemini's handle, 6 dp above the card.
+            .draggable(
+                drag,
+                Orientation.Vertical,
+                onDragStarted = { settling?.cancel() },
+                onDragStopped = { velocity ->
+                    settling = coroutineContext[kotlinx.coroutines.Job]
+                    val (threshold, fling, least) = with(density) {
+                        Triple(ExpandDrag.toPx(), ExpandFlingDpPerS.dp.toPx(), FlingMinDrag.toPx())
+                    }
+                    if (pull >= threshold || (velocity <= -fling && pull >= least)) onExpand()
+                    androidx.compose.animation.core.animate(
+                        pull, 0f,
+                        animationSpec = if (animate) spring(Spring.DampingRatioLowBouncy, Spring.StiffnessMediumLow) else snap(),
+                    ) { value, _ -> pull = value }
+                },
+            )
+            .geminiPlate(plateColors, CardRadius, ageMs = age, processing = { processing })
+            // Gemini's handle: inside the card, 6 dp below its top edge, over
+            // the plate and under what is in it.
             .drawBehind {
                 val w = 32.dp.toPx()
                 val h = 2.dp.toPx()
                 drawRoundRect(
                     colors.outlineVariant.copy(alpha = colors.outlineVariant.alpha * PlateAppear.contentAlpha(age())),
-                    topLeft = androidx.compose.ui.geometry.Offset((size.width - w) / 2, -6.dp.toPx() - h),
+                    topLeft = androidx.compose.ui.geometry.Offset((size.width - w) / 2, 6.dp.toPx()),
                     size = androidx.compose.ui.geometry.Size(w, h),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(h),
                 )
             }
-            .geminiPlate(plateColors, CardRadius, ageMs = age, processing = { processing })
             // Taps on the card focus the field.
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -1418,8 +1485,9 @@ private fun Composer(
             val gap = 4.dp.roundToPx()
             // In two rows the text keeps clear of the card's rounded corners.
             val textInset = 24.dp.roundToPx()
-            // Gemini's card is 72 dp tall at one row: 48 dp buttons with 12 dp round them.
-            val minHeight = 72.dp.roundToPx()
+            // Gemini's card is 80 dp tall at one row (measured on the owner's
+            // Pixel): 48 dp buttons with 16 dp round them, room for the handle.
+            val minHeight = 80.dp.roundToPx()
             val plus = plusM.measure(Constraints())
             val trailing = trailingM.measure(Constraints(maxWidth = width))
             // What is attached goes above everything else, across the card.
