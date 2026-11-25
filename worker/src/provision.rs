@@ -135,10 +135,14 @@ async fn open_from(
         }
         return Ok(PrismClient::open_or_create(data_dir, Some(network)).await?);
     };
-    let client =
-        PrismClient::open_provisioned_with(data_dir, provisioning, Some(network), coordination)
-            .await?;
-    let added = client.add_peers(peers).await?;
+    let (client, added) = PrismClient::open_provisioned_with_peers(
+        data_dir,
+        provisioning,
+        Some(network),
+        coordination,
+        peers,
+    )
+    .await?;
     eprintln!(
         "prism-worker: enrolled as node {}, {added} peer(s)",
         client.node().await?

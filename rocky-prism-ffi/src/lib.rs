@@ -204,9 +204,14 @@ pub async fn open_provisioned_replica(
         let attachment = device_attachment().await?;
         let network = rocky_sdk::Network::Borrowed(attachment.transport());
         let opened = async {
-            let client =
-                PrismClient::open_provisioned(directory, provisioning, Some(network)).await?;
-            client.add_peers(peers).await?;
+            let (client, _) = PrismClient::open_provisioned_with_peers(
+                directory,
+                provisioning,
+                Some(network),
+                None,
+                peers,
+            )
+            .await?;
             Ok::<_, PrismError>(client)
         }
         .await;
