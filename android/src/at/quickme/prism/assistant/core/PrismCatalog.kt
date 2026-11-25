@@ -287,7 +287,10 @@ object PrismCatalog {
     private fun range(c: JsonObject): String? {
         val min = (c["min"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: if ("min" in c) return null else 0.0
         val max = (c["max"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
-        return if (min < max) null else "min ($min) must be below max ($max)"
+        if (min >= max) return "min ($min) must be below max ($max)"
+        // A written value must lie in the range (a bound one is shown at the nearest end).
+        val value = (c["value"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
+        return if (value in min..max) null else "value ($value) must be from min ($min) to max ($max)"
     }
 
     private fun isNull(v: JsonElement) = v is kotlinx.serialization.json.JsonNull

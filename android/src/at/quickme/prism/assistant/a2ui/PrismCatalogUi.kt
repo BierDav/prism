@@ -101,7 +101,6 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.getValue
@@ -645,9 +644,8 @@ private object SliderUi : A2uiBasicCatalogV1.Slider {
         accessibility: AccessibilityAttributes?, checks: List<CheckRule>, modifier: Modifier,
     ) {
         val drawable = min.isFinite() && max.isFinite() && min < max
-        // A value outside the range (as written, or from a binding) is the nearest end, in the data model too.
+        // A bound value outside the range is shown at the nearest end (validation refuses a written one).
         val shown = if (!drawable) value else if (value.isFinite()) value.coerceIn(min, max) else min
-        if (drawable && shown != value) LaunchedEffect(value, min, max) { onValueChange(shown) }
         Column(modifier.fillMaxWidth().a11y(accessibility)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 label?.let { Text(it, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f)) }

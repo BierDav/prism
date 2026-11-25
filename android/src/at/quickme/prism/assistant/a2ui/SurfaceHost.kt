@@ -54,11 +54,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The renderer of one conversation. [onAction] handles what the owner did on
- * a surface (the entry showing it, the action) and says why it couldn't, or
- * null; without it the surfaces only show. The screen showing it sets it.
+ * The renderer of one conversation. The handler of the screen shown last
+ * ([register]) gets what the owner did on a surface (the entry showing it,
+ * the action) and says why it couldn't, or null; without one the surfaces
+ * only show.
  */
-class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: String, action: UiAction) -> String?)? = null) {
+class SurfaceHost(context: Context) {
+    /** The screens' handlers, the latest shown last; each screen removes its own when it goes. */
+    private val handlers = java.util.concurrent.CopyOnWriteArrayList<suspend (String, UiAction) -> String?>()
+    internal fun register(h: suspend (String, UiAction) -> String?) = handlers.add(h)
+    internal fun unregister(h: suspend (String, UiAction) -> String?) = handlers.remove(h)
+
     private val catalog = prismCatalog(context.applicationContext)
     private val processor = A2uiMessageProcessor(listOf(catalog))
     private val parser = A2uiMessageParser()
@@ -108,7 +114,7 @@ class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: S
     }
 
     private suspend fun handle(m: A2uiClientEventMessage) {
-        val act = onAction ?: return
+        val act = handlers.lastOrNull() ?: return
         val entry = synchronized(this) { entryOf[m.surfaceId] } ?: return
         val data = m.clientDataModel?.surfaces?.get(m.surfaceId)
         val action = UiAction.fromRenderer(m.type, m.surfaceId, m.componentId, m.timestamp, m.context, data)
@@ -121,7 +127,10 @@ class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: S
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 e.message ?: "That didn't work."
             }
-            status[m.surfaceId] = SurfaceStatus(busy = null, error = why, done = before.done + if (why == null) 1 else 0)
+            // Not onto another entry's card that took the ID meanwhile (sync cleared its status).
+            if (synchronized(this@SurfaceHost) { entryOf[m.surfaceId] } == entry) {
+                status[m.surfaceId] = SurfaceStatus(busy = null, error = why, done = before.done + if (why == null) 1 else 0)
+            }
         }
     }
 
@@ -144,9 +153,13 @@ fun rememberSurfaceHost(entries: List<Entry>, onAction: (suspend (String, UiActi
     remember(host) { host.sync(entries) }
     // Only while this screen shows: the handler holds its Activity, and a shared host outlives it.
     DisposableEffect(host) {
-        val mine: suspend (String, UiAction) -> String? = { id, a -> handler.value?.invoke(id, a) ?: "This chat can't act from here." }
-        host.onAction = mine
-        onDispose { if (host.onAction === mine) host.onAction = null }
+        val mine: suspend (String, UiAction) -> String? = { id, a ->
+            // null from the handler is success; only a missing handler is "can't act".
+            val h = handler.value
+            if (h == null) "This chat can't act from here." else h(id, a)
+        }
+        host.register(mine)
+        onDispose { host.unregister(mine) }
     }
     LaunchedEffect(host, entries) { host.sync(entries) }
     return host

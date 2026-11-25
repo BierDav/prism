@@ -290,6 +290,9 @@ fun main() {
     check(uiError { ShowUi.plan(obj(slider(""""max":-3""")), { null }) }?.contains("must be below max") == true, "the default min (0) counts")
     check(uiError { ShowUi.plan(obj(slider(""""min":0,"max":1e999""")), { null }) } != null, "and a range that isn't finite")
     check(uiError { ShowUi.plan(obj(slider(""""min":0,"max":10""")), { null }) } == null, "a plain one is fine")
+    fun literal(v: String) = """{"messages":[{"createSurface":{"surfaceId":"sl","components":[{"id":"root","component":"Slider","min":0,"max":10,"value":$v}]}}]}"""
+    check(uiError { ShowUi.plan(obj(literal("42")), { null }) }?.contains("must be from min") == true, "a written value outside the range is refused")
+    check(uiError { ShowUi.plan(obj(literal("10")), { null }) } == null, "one at an end is fine")
 
     // --- B-S8: another surface under a drawn one's ID is drawn anew ---
     val plain = Surface("x", components = listOf(obj("""{"id":"root","component":"Text","text":"a"}""")))
