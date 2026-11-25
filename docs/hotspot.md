@@ -66,19 +66,35 @@ Save does); each start carries its own configuration
   path (`NWPathMonitor` unsatisfied for 5 s), and for 3 minutes after "Ask the
   phone for its hotspot" in the menu. It stops as soon as a path is there
   again, which is the case once it has joined the hotspot.
-- **Leaving** for a better Wi-Fi is the Mac too, for proven networks only.
-  Prism for macOS remembers each Wi-Fi network (by name) on which it saw
-  working internet (`http://captive.apple.com/hotspot-detect.html` answers
-  "Success"), never the phone's hotspot (its DHCP lease carries Android's
-  vendor option `ANDROID_METERED`). While on the hotspot it scans every 60 s
+- **Joining** is the Mac too. While it asks (also with Bluetooth off: a
+  normal-mode hotspot is on anyway), it scans for the hotspot's names every
+  5 s (every 30 s after 3 minutes) and joins the strongest itself (CoreWLAN),
+  as the known network macOS keeps, else with a password saved in Prism's
+  Wi-Fi tab (login keychain). macOS's own auto-join scans slowly while
+  offline and never leaves a network it is on, even a broken one, so asking
+  from the menu used to start the hotspot without the Mac moving to it. The
+  names are the popout's **Wi-Fi tab** ("The phone's hotspot"); a network
+  whose DHCP lease carries Android's vendor option 43 `ANDROID_METERED` is
+  added there on its own. macOS's configd keeps only the DHCP options it
+  asked for, never 43, so Prism reads the lease with `ipconfig getpacket`.
+- **Leaving** for a better Wi-Fi is the Mac too, for reliable networks only:
+  the Wi-Fi tab's "Reliable networks", which the user adds and removes. With
+  "Add networks with working internet automatically" on, Prism adds each
+  Wi-Fi network on which it saw working internet
+  (`http://captive.apple.com/hotspot-detect.html` answers "Success"), never a
+  hotspot and never one the user removed. On a hotspot (the phone's, or a
+  Wi-Fi macOS marks expensive, such as another phone's) it scans every 60 s
   (CoreWLAN, without leaving the hotspot; network names need Location
-  permission for Prism, one prompt). When a proven network shows up at
-  -70 dBm or better, it advertises a release for 30 s; the phone switches its
-  instant hotspot off at once (not after 120 s), and macOS auto-joins the best
-  known network. If the Mac has no working internet 20 s later, it asks for
-  the hotspot again and skips that network for 30 minutes. A Mac has one
-  Wi-Fi radio, so it can't test a network without leaving the one it's on;
-  "proven" keeps such tries rare. A normal-mode hotspot is never released.
+  permission for Prism, one prompt). When a reliable network shows up at
+  -70 dBm or better, the Mac joins it and probes it 15 s later: with working
+  internet it advertises a release for 30 s, and the phone switches its
+  instant hotspot off at once (not after 120 s); without, it skips that
+  network for 30 minutes and asks for the hotspot again (and joins it). If
+  macOS refuses to join the network, the release alone does it: the phone
+  switches its hotspot off and macOS auto-joins the best known network. Two
+  failed probes in a row (30 s apart) on a reliable network or another
+  hotspot also ask the phone and join its hotspot. A normal-mode hotspot is
+  never released.
 
 ## The advertisement (v1)
 

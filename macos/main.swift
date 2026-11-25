@@ -14,7 +14,8 @@
 //                           UUID (Hotspot.swift), by default for the test vector
 //   wifi-status             what WiFiSwitch.swift sees: the Wi-Fi interface,
 //                           whether it is on the phone's hotspot, its network,
-//                           the captive probe and the proven networks
+//                           the captive probe, the phone's hotspot and the
+//                           reliable networks
 
 import CryptoKit
 import Foundation
@@ -38,7 +39,7 @@ func usage() -> Never {
                prism sign -n NAMESPACE [FILE|-]
                prism hotspot-uuid [--release] [KEYHEX WINDOW]
                prism wifi-status
-               prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles] [--expand N] [--live --config FILE] [--snapshot PNG]
+               prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N] [--live --config FILE] [--snapshot PNG]
 
         """.utf8))
     exit(2)
@@ -56,7 +57,8 @@ case "self-test":
     let signatures = SelfTest.run()
     let shared = SharedSelfTest.run()
     let hotspot = Hotspot.selfTest()
-    exit(signatures && shared && hotspot ? 0 : 1)
+    let wifi = WiFiPolicy.selfTest()
+    exit(signatures && shared && hotspot && wifi ? 0 : 1)
 
 case "hotspot-uuid":
     var rest = Array(arguments.dropFirst())

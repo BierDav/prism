@@ -1,4 +1,4 @@
-// `prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles] [--expand N]
+// `prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N]
 // [--live --config FILE] [--snapshot PNG]`: the popout in an ordinary window,
 // for screenshots (`screencapture -l <id>`; it prints the window id).
 // --approvals opens it on the Approvals tab, --approval shows the approval
@@ -29,7 +29,9 @@ enum Preview {
                 config: loaded.rocky, device: loaded.host, relayURL: loaded.relayUrl, relayTokenFile: loaded.relayTokenFile)
             store.start(push: false)
         }
-        if options.contains("--approvals") {
+        if options.contains("--wifi") {
+            UserDefaults.standard.set(PopoutView.Tab.wifi.rawValue, forKey: "popoutTab")
+        } else if options.contains("--approvals") {
             UserDefaults.standard.set(PopoutView.Tab.approvals.rawValue, forKey: "popoutTab")
         } else if options.contains("--profiles") {
             UserDefaults.standard.set(PopoutView.Tab.profiles.rawValue, forKey: "popoutTab")
@@ -56,7 +58,7 @@ enum Preview {
         let background = snapshot == nil ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
         let view = options.contains("--approval")
             ? AnyView(DialogView(approver: approver).background(background))
-            : AnyView(PopoutView(approver: approver, store: store, hotspot: Hotspot(keyFile: nil)).background(background))
+            : AnyView(PopoutView(approver: approver, store: store, hotspot: sampleHotspot()).background(background))
         let host = NSHostingController(rootView: view)
         host.sizingOptions = [.preferredContentSize]
         host.safeAreaRegions = []
@@ -91,5 +93,22 @@ enum Preview {
         }
         app.run()
         exit(0)
+    }
+
+    /// The Wi-Fi tab's sample: made-up networks in a throwaway defaults
+    /// domain, so the preview neither shows nor changes the app's lists.
+    private static func sampleHotspot() -> Hotspot {
+        let suite = "prism-preview-wifi"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        let now = Date().timeIntervalSince1970
+        defaults.set(["Home": now - 3600, "Office": now - 86400 * 2, "Library": 0.0], forKey: WiFiNetworks.reliableKey)
+        defaults.set(["Library"], forKey: WiFiNetworks.addedKey)
+        defaults.set(["Phone hotspot"], forKey: WiFiNetworks.hotspotsKey)
+        let hotspot = Hotspot(keyFile: "/dev/null", networks: WiFiNetworks(defaults: defaults))
+        hotspot.wifi.preview(
+            current: WiFiSwitch.Current(ssid: "Phone hotspot", onWiFi: true, phoneHotspot: true, hotspot: true),
+            nearby: ["Home": -58, "Phone hotspot": -35, "Cafe": -67])
+        return hotspot
     }
 }
