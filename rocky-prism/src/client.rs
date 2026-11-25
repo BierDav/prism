@@ -62,10 +62,10 @@ const POLICY_WEEKLY_ACTIVATION: &str = "weekly_activation:";
 const POLICY_ACCOUNT_LIMIT: &str = "account_limit:";
 
 /// How much synced history a replica keeps before it refuses writes and
-/// incoming frames ("storage queue is full"). Rocky prunes history only after
-/// a coordinator seals it, and Prism runs no coordinator yet, so history only
-/// grows: Rocky's default of 64 MiB filled within about a day. 512 MiB buys
-/// about a week; the real fix is a coordinator. Rocky keeps this limit in
+/// incoming frames ("storage queue is full"). Rocky prunes history only
+/// behind a final seal, which needs trusted workers and a coordinator
+/// (`crate::seal`); until a database has both, history only grows: Rocky's
+/// default of 64 MiB filled within about a day. Rocky keeps this limit in
 /// memory, so every open sets it again.
 const RETAINED_HISTORY_BYTES: usize = 512 * 1024 * 1024;
 
@@ -91,7 +91,7 @@ impl PrismClient {
         directory: String,
         network: Option<Network>,
     ) -> Result<Self, PrismError> {
-        Self::open_with(&directory, network, First::Create).await
+        Self::open_with(&directory, network, None, First::Create).await
     }
 
     /// Opens the enrolled device at `directory`. The first open (an absent or
@@ -107,9 +107,27 @@ impl PrismClient {
         provisioning: String,
         network: Option<Network>,
     ) -> Result<Self, PrismError> {
+        Self::open_provisioned_with(directory, provisioning, network, None).await
+    }
+
+    /// [`PrismClient::open_provisioned`], composing `coordination`: how a
+    /// trusted device reaches the coordinator that makes its seals final
+    /// (`crate::seal`). Devices that are not trusted need none.
+    pub async fn open_provisioned_with(
+        directory: String,
+        provisioning: String,
+        network: Option<Network>,
+        coordination: Option<rocky_sdk::CoordinatorSlot>,
+    ) -> Result<Self, PrismError> {
         let networked = network.is_some();
         let provisioning = decode_provisioning(&provisioning)?;
-        let client = Self::open_with(&directory, network, First::Join(&provisioning)).await?;
+        let client = Self::open_with(
+            &directory,
+            network,
+            coordination,
+            First::Join(&provisioning),
+        )
+        .await?;
         if networked {
             let session = client.db.session();
             let enabled = session.set_automatic_sync(true).await;
@@ -122,6 +140,7 @@ impl PrismClient {
     async fn open_with(
         directory: &str,
         network: Option<Network>,
+        coordination: Option<rocky_sdk::CoordinatorSlot>,
         first: First<'_>,
     ) -> Result<Self, PrismError> {
         let schema = prism_schema()?;
@@ -129,6 +148,13 @@ impl PrismClient {
         if let Some(net) = network {
             config = config.network(net);
         }
+        config = match coordination {
+            Some(rocky_sdk::CoordinatorSlot::Client(client)) => config.coordination(client),
+            Some(rocky_sdk::CoordinatorSlot::Connector(connector)) => {
+                config.coordinator_connector(connector)
+            }
+            None => config,
+        };
         let is_empty = !Path::new(directory).exists()
             || std::fs::read_dir(directory)
                 .map(|mut d| d.next().is_none())
@@ -148,6 +174,7 @@ impl PrismClient {
             .await;
         session.close().await;
         raised.map_err(storage_err)?;
+        crate::seal::spawn_compaction(&opened.database);
         Ok(Self {
             db: opened.database,
             alerts_lock: tokio::sync::Mutex::new(()),

@@ -48,6 +48,9 @@ pub struct AppState {
     pub placement_log: Option<Arc<crate::placement_log::PlacementLog>>,
     /// Where placement reads the accounts' usage, when configured.
     pub usage: Option<Arc<crate::usage::UsageSource>>,
+    /// The coordinator this worker's seals go to (`coordination.rs`).
+    #[cfg(feature = "coordinator")]
+    pub coordinator: Option<Arc<rocky_prism::coordinator::CoordinatorLink>>,
 }
 
 pub type PeerHttp = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -68,7 +71,18 @@ impl AppState {
             eligible: watch::channel(Eligibility::Ready).1,
             placement_log: None,
             usage: None,
+            #[cfg(feature = "coordinator")]
+            coordinator: None,
         }
+    }
+
+    #[cfg(feature = "coordinator")]
+    pub fn with_coordinator(
+        mut self,
+        link: Option<Arc<rocky_prism::coordinator::CoordinatorLink>>,
+    ) -> Self {
+        self.coordinator = link;
+        self
     }
 
     pub fn with_eligibility(mut self, eligible: watch::Receiver<Eligibility>) -> Self {
@@ -117,7 +131,16 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let routes = Router::new();
+    #[cfg(feature = "coordinator")]
+    let routes = routes
+        .route("/v1/rocky/seal", get(crate::coordination::get_seal))
+        .route("/v1/rocky/trust", post(crate::coordination::post_trust))
+        .route(
+            "/v1/rocky/coordinate",
+            post(crate::coordination::post_coordinate),
+        );
+    routes
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/v1/health", get(v1_health))

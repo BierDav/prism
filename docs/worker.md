@@ -301,6 +301,7 @@ request row.
 | --- | --- |
 | `prism run`, `report`, `ping`, `token`, `register-t3`, `register-t3-devices`, the Mac app's subcommands | `prism` (`cli/`), packages.<system>.prism |
 | `prism pair`, `machines`, `device-token`, `device-revoke`, `account-limit` | `prism` in a worker pod, over the admin routes above |
+| The sealing rollout (`coordinate`) | `prism-worker coordinate`, the one-shot Job in `deploy/jobs/` |
 | The server | `prism-worker` (`worker/`), the image's entrypoint |
 
 ## ntfy
@@ -432,6 +433,64 @@ pod and adding its contact to the lists.
   attachment (`Options::dialer()`) is refused as a node's network, so the
   apps need a listening or external attachment.
 
+## Sealing
+
+Rocky prunes synced history only behind a *final seal*. Until this was set
+up no Prism device ever sealed, so every replica kept every operation since
+the database was created. Each Rocky transaction locks the whole replica, so
+transactions got slower as history grew, until they timed out. A replica
+refuses writes once it holds `RETAINED_HISTORY_BYTES` (512 MiB,
+`rocky-prism/src/client.rs`). Three things make seals happen:
+
+1. **Trusted workers.** Only devices whose identity the root trusts seal.
+   Provisioned devices are issuers, not trusted, and Rocky skips them without
+   an alert. The workers are trusted; the Mac and the phone are not.
+2. **A coordinator.** In a database whose owner-signed settings name a
+   coordinator, a seal is final once that coordinator acknowledged it.
+   Without one, trusted devices refuse to seal (`coordinator_required`).
+   Prism uses the public Rocky coordination service at rocky.quickme.at
+   (three voters in the cluster's `rocky-coordinator` namespace, reached over
+   iroh through `rocky-relay.quickme.at`). The database is its *domain*,
+   registered with a coordination grant the root signs. The domain's control
+   lists the trusted workers' identities and expires after at most 366 days.
+3. **Routine seals and compaction.** A trusted, coordinated worker seals
+   the followed tip every 128 replayed transactions (checked every 30 s).
+   Every replica, the Mac and the phone included, receives the seal and its
+   finality by sync. Rocky compacts on its own only up to the first final
+   seal, so `rocky-prism` compacts every replica behind its latest final
+   seal once a minute (`PrismClient::compact_history`). The apps need no
+   coordinator. They need a build with this `rocky-prism` to compact
+   their own replica.
+
+The coordinator only orders metadata (which seal ended which tip). Rows,
+schemas and keys never leave the devices.
+
+The workers reach the coordinator with `PRISM_ROCKY_COORDINATOR_BUNDLE_FILE`
+(the trust bundle, pinned in `deploy/rocky-coordinator-bundle.json` and
+mounted from the `prism-rocky-coordinator` ConfigMap). The rollout Job
+(`deploy/jobs/rocky-coordinate.yaml`, `prism-worker coordinate`) does the
+steps that need the root, which no worker keeps:
+
+| Route (admin token, refused through the Ingress) | Does |
+| --- | --- |
+| `POST /v1/rocky/trust` `{root}` (the 24-word root phrase) | Records the worker in its registry (renewing its credentials if the registry doesn't list it yet) and trusts its identity. |
+| `POST /v1/rocky/coordinate` `{root, trusted, revision}` | Registers (revision 1) or renews (2, 3, ...) the domain, trusting `trusted`, and names the coordinator in the database's settings. |
+| `GET /v1/rocky/seal` | This replica's `SealStatus`: `trusted`, `coordination`, `operationsSinceSeal`, `finalized`, `compacted`, `retainedBytes`, `sealSkipped`. |
+
+The domain's tenant key is derived from the root and the database's scope,
+so a renewal needs only the root. Run the Job with the next revision before
+the control expires (the Job's log prints `expires`), and after adding or
+replacing a worker (the control lists every trusted identity).
+
+A database names its coordinator for good: Rocky never lets it change or
+drop it. That coordinator is the public service's current certified genesis.
+If the service is re-certified (a new genesis, as on 2026-11-21 and
+2026-11-23) or upgraded past the Rocky release that removed coordinated
+finality (upstream `27dfd00ce`), seals stop becoming final again. Prism's
+database then needs to be recreated. A voter store reset that keeps the
+genesis only drops the registration: run the Job again with revision 1.
+See `docs/rocky-sealing-rollout.md`.
+
 ## Network
 
 Every device reaches the workers through `prism.quickme.at` over WebSockets
@@ -482,6 +541,9 @@ Beyond the network settings above:
 | `PRISM_METRICS_PASSWORD(_FILE)` | Password of `metrics_user` (ClickHouse's `telemetry_reader`), for host metrics (PromQL, `metrics_url`) and the accounts' usage (`usage_url`, which needs `SELECT` on `ai_usage.account_limits`). |
 | `PRISM_TEXT_GENERATION_KEY(_FILE)` | API key for OpenAI-compatible text generation (magic picks). |
 | `PRISM_TELEMETRY_PASSWORD(_FILE)` | The phone's telemetry password (`telemetry_user`, default `prism_phone`): what `POST /v1/telemetry/write` checks and sends on to `telemetry_url`, and what the workers write their placement decisions with (`placement_log_url`, `docs/placement.md`). |
+| `PRISM_ROCKY_COORDINATOR_BUNDLE(_FILE)` | The trust bundle of the coordinator that makes this worker's seals final ("Sealing"). Unset: no coordinator, and the worker never seals. |
+| `PRISM_ROCKY_COORDINATOR_ROOT` | The key the bundle must be signed by (default: the public service's, `bd3c36e8...6bf0`). |
+| `PRISM_ROCKY_COORDINATOR_RELAY` | The iroh relay the coordinator's voters are reached through (default `https://rocky-relay.quickme.at`). |
 | `PRISM_LEADER_LEASE` | The Lease's name (default `prism-worker-leader`). |
 | `PRISM_LEADER_NAMESPACE` | Its namespace (default: the pod's own). |
 | `KUBERNETES_SERVICE_HOST`, `KUBERNETES_SERVICE_PORT` | Set by Kubernetes; with the service-account token they make the worker campaign. |

@@ -11,6 +11,10 @@
 //!   (a phone or a Mac): workers sync with it only over the links it opens,
 //!   but they must know it as a peer to sync at all.
 //!
+//! - `prism-worker coordinate [--revision N] WORKER_URL...` is the rollout
+//!   Job that makes the workers seal, and `prism-worker seal WORKER_URL...`
+//!   prints where each stands (`coordination.rs`).
+//!
 //! At startup the worker opens from `PRISM_WORKER_PROVISIONING(_FILE)` and adds
 //! the contacts in `PRISM_WORKER_PEERS(_FILE)`. Without a provisioning it
 //! creates a database of its own, as before.
@@ -22,7 +26,8 @@ use std::io::{Read, Write};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const USAGE: &str = "usage: prism-worker [init [FILE] | provision DEVICE | peer ADDRESS|-]";
+const USAGE: &str = "usage: prism-worker [init [FILE] | provision DEVICE | peer ADDRESS|- \
+                     | coordinate [--revision N] WORKER_URL... | seal WORKER_URL...]";
 
 /// Runs the subcommand in `args` (as from `std::env::args`), if there is one.
 pub async fn command(args: &[String]) -> Option<Result<(), Failure>> {
@@ -35,6 +40,14 @@ pub async fn command(args: &[String]) -> Option<Result<(), Failure>> {
             .await
             .and_then(print),
         ["peer", address] => peer(address, std::io::stdin()).await.and_then(print),
+        #[cfg(feature = "coordinator")]
+        ["coordinate", rest @ ..] => {
+            crate::coordination::command(rest, |key| std::env::var(key).ok()).await
+        }
+        #[cfg(feature = "coordinator")]
+        ["seal", urls @ ..] => {
+            crate::coordination::seal_command(urls, |key| std::env::var(key).ok()).await
+        }
         ["help" | "-h" | "--help"] => print(USAGE.into()),
         _ => Err(USAGE.into()),
     };
@@ -95,14 +108,20 @@ async fn peer(address: &str, mut input: impl Read) -> Result<String, Failure> {
 }
 
 /// Opens the worker's database at `data_dir`: from its provisioning on the
-/// first start, reusing the directory afterwards.
-pub async fn open(data_dir: String, network: Network) -> Result<PrismClient, Failure> {
-    open_from(data_dir, network, auth::secret).await
+/// first start, reusing the directory afterwards. `coordination` is how its
+/// seals reach the coordinator, when it has one (`coordination.rs`).
+pub async fn open(
+    data_dir: String,
+    network: Network,
+    coordination: Option<rocky_sdk::CoordinatorSlot>,
+) -> Result<PrismClient, Failure> {
+    open_from(data_dir, network, coordination, auth::secret).await
 }
 
 async fn open_from(
     data_dir: String,
     network: Network,
+    coordination: Option<rocky_sdk::CoordinatorSlot>,
     secret: impl Fn(&str) -> Option<String>,
 ) -> Result<PrismClient, Failure> {
     let peers: Vec<String> = secret("PRISM_WORKER_PEERS")
@@ -116,7 +135,9 @@ async fn open_from(
         }
         return Ok(PrismClient::open_or_create(data_dir, Some(network)).await?);
     };
-    let client = PrismClient::open_provisioned(data_dir, provisioning, Some(network)).await?;
+    let client =
+        PrismClient::open_provisioned_with(data_dir, provisioning, Some(network), coordination)
+            .await?;
     let added = client.add_peers(peers).await?;
     eprintln!(
         "prism-worker: enrolled as node {}, {added} peer(s)",
@@ -186,7 +207,7 @@ mod tests {
                 ("PRISM_WORKER_PROVISIONING", provisioning.clone()),
                 ("PRISM_WORKER_PEERS", contact.clone()),
             ]);
-            async move { open_from(data, loopback().await, env(vars)).await }
+            async move { open_from(data, loopback().await, None, env(vars)).await }
         };
         let first = start(data.clone()).await.expect("first start");
         let node = first.node().await.expect("node");
@@ -198,6 +219,10 @@ mod tests {
         // Peers without a provisioning are a mistake, not a silent no-op.
         let vars = BTreeMap::from([("PRISM_WORKER_PEERS", contact.clone())]);
         let lone = dir.path().join("lone").display().to_string();
-        assert!(open_from(lone, loopback().await, env(vars)).await.is_err());
+        assert!(
+            open_from(lone, loopback().await, None, env(vars))
+                .await
+                .is_err()
+        );
     }
 }
