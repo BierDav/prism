@@ -1,9 +1,29 @@
 # Proposal: Forks — Prism babysits the custom forks production runs
 
-Status: proposal, revised after review (2026-11-24). Nothing here is implemented.
-If `fork-kit.md` (one layout and workflow for every fork) is adopted, the
+Status: proposal, revised after review (2026-11-24). The Prism side (registry,
+scanner, alerts, repair agents, Forks section) is not implemented.
+
+**What changed since (2026-11-25).** `fork-kit.md` was adopted, so the
 per-strategy parts below collapse into one: see its section "What it means for
-Prism's Forks proposal".
+Prism's Forks proposal". Section 1 describes the forks *before* that; today:
+
+- All five forks use [fork-kit](https://github.com/BierDav/fork-kit) v0.4.0:
+  one sync PR from `fork-kit/sync` into the fork branch (`patched`, `docker`,
+  `placement-profiles`), merged by auto-merge when its checks pass. The sync
+  runs every two hours from `BierDav/fork-kit`'s `sync-forks.yml` with the one
+  App key; each fork keeps only the guard workflow and holds no key.
+- **seaweedfs-backup** moved out of selfhosted-platform into the GitHub fork
+  `BierDav/seaweedfs` (`patched`, following SeaweedFS releases); it publishes
+  `ghcr.io/bierdav/seaweedfs-backup`.
+- **CLIProxyAPI** deploys itself: its release dispatches selfhosted-platform's
+  `pin-cliproxy-image.yaml`, which pins the new digest after checking it was
+  built from `patched`. The side-branch build is gone.
+- **t3code** keeps `placement-profiles` merged with the nightlies through the
+  sync PR; `Fork nightly` builds that branch as it is and runs again.
+- **Holds exist now**: the label `fork-kit:hold` fails the required check
+  `fork-kit/hold`, so that PR cannot merge; for CLIProxy, the file
+  `manifests/cliproxy/image-hold` in selfhosted-platform stops new pins. Open
+  point 3 is therefore answered: holds are recorded, not incidents.
 
 ## 1. What production runs from a fork
 
