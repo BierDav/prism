@@ -128,7 +128,15 @@ struct CallView: View {
             .controlSize(.large)
             .disabled(!calls.connected)
         case .active:
+            // Hang up where Decline was: a second click on Answer lands on
+            // the audio buttons, not on the end of the call.
             HStack {
+                Button(role: .destructive) { calls.hangUp() } label: {
+                    Label("Hang up", systemImage: "phone.down.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                Spacer(minLength: 0)
                 if call.audioOnMac {
                     Button { calls.muted.toggle() } label: {
                         Label(calls.muted ? "Unmute" : "Mute", systemImage: calls.muted ? "mic.slash.fill" : "mic.fill")
@@ -141,12 +149,6 @@ struct CallView: View {
                         Label("Take on Mac", systemImage: "laptopcomputer")
                     }
                 }
-                Spacer(minLength: 0)
-                Button(role: .destructive) { calls.hangUp() } label: {
-                    Label("Hang up", systemImage: "phone.down.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
             }
             .controlSize(.regular)
             .disabled(!calls.connected)
