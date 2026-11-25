@@ -16,9 +16,10 @@ priority = 50
 
 # The coordinated sealing test (rocky-prism/tests/coordinated.rs) runs three
 # voters and three replicas through several seals: about six minutes in a
-# debug build, not seconds. A retry would double that, so it gets none.
+# debug build here, up to about 15 on the shared runners, not seconds. A
+# retry would double that, so it gets none, and 30 minutes before it's killed.
 [[profile.ci.overrides]]
 filter = "binary_id(rocky-prism::coordinated)"
 priority = 60
 retries = 0
-slow-timeout = { period = "60s", terminate-after = 15 }
+slow-timeout = { period = "60s", terminate-after = 30 }
