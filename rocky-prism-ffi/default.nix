@@ -33,6 +33,7 @@ let
       ../rocky-prism-ffi
       ../uniffi-bindgen
       ../worker
+      ../deploy/rocky-coordinator-bundle.json
     ];
   };
   cargoDeps = rust.importCargoLock {

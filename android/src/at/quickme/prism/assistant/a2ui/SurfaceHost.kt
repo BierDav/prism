@@ -119,6 +119,8 @@ class SurfaceHost(context: Context) {
         val data = m.clientDataModel?.surfaces?.get(m.surfaceId)
         val action = UiAction.fromRenderer(m.type, m.surfaceId, m.componentId, m.timestamp, m.context, data)
         withContext(Dispatchers.Main) {
+            // A card that another entry took while this waited for Main isn't this action's.
+            if (synchronized(this@SurfaceHost) { entryOf[m.surfaceId] } != entry) return@withContext
             val before = status[m.surfaceId] ?: SurfaceStatus()
             status[m.surfaceId] = before.copy(busy = action.name, error = null)
             val why = try {

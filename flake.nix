@@ -34,6 +34,8 @@
           ./rocky-prism-ffi
           ./uniffi-bindgen
           ./worker
+          # rocky-prism and the worker include the coordinator bundle (include_str!).
+          ./deploy/rocky-coordinator-bundle.json
         ];
       };
       cargoLock = {
