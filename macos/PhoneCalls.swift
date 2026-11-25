@@ -1244,15 +1244,21 @@ final class CallAudio: @unchecked Sendable {
     }
 
     func start() throws {
+        // The output and the mixer must exist before voice processing goes
+        // on: made after, the output fails to initialize (-10875).
+        _ = engine.outputNode
+        _ = engine.mainMixerNode
         let input = engine.inputNode
         try input.setVoiceProcessingEnabled(true)
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+        // With voice processing the input has one channel per microphone (9
+        // on a MacBook Pro); the processed voice is the first.
         let micFormat = input.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: micFormat, to: wire) else {
             throw NSError(domain: "PrismCalls", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter from \(micFormat)"])
         }
-        converter.downmix = true
+        converter.channelMap = [0]
         self.converter = converter
         input.installTap(onBus: 0, bufferSize: 960, format: micFormat) { [weak self] buffer, _ in
             self?.captured(buffer)
