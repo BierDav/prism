@@ -270,7 +270,8 @@ object ConversationStore {
     /**
      * The outbox in [f]; null when there is none. A read that fails throws
      * (it is tried again later), and a file that doesn't decode is set aside
-     * as `.unreadable`, never deleted: it may be the only copy of a chat.
+     * as `.unreadable-<ms>`, never deleted: it may be the only copy of a chat
+     * (a move that fails throws too).
      */
     private fun read(f: File): Outbox<ConversationSnapshot>? {
         if (!f.exists()) return null
@@ -278,8 +279,11 @@ object ConversationStore {
         return try {
             json.decodeFromString(record, text)
         } catch (e: IllegalArgumentException) { // SerializationException too
-            Log.w(TAG, "an unreadable conversation was set aside: ${f.name}")
-            f.renameTo(File(f.parentFile, f.name + ".unreadable"))
+            // A name of its own, so one set aside earlier isn't replaced; if it can't
+            // be moved, the save stops here rather than write over it.
+            val aside = File(f.parentFile, f.name + ".unreadable-" + System.currentTimeMillis())
+            if (!f.renameTo(aside)) throw IOException("an unreadable conversation could not be set aside: ${f.name}")
+            Log.w(TAG, "an unreadable conversation was set aside: ${aside.name}")
             null
         }
     }

@@ -227,6 +227,8 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
     }
     // The photo is decoded, turned upright and written off the main thread.
     val saver = remember { Executors.newSingleThreadExecutor() }
+    // Off once the camera has left: a photo still being taken then is dropped, not attached.
+    val alive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
     BackHandler(onBack = onClose)
 
     LaunchedEffect(front) {
@@ -253,6 +255,7 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
     }
     DisposableEffect(Unit) {
         onDispose {
+            alive.set(false)
             runCatching { provider?.unbind(preview, capture) }
             saver.shutdown()
         }
@@ -271,8 +274,10 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
                 saver,
                 object : ImageCapture.OnImageCapturedCallback() {
                     override fun onCaptureSuccess(image: ImageProxy) {
+                        if (!alive.get()) return image.close()
                         val uri = runCatching { image.use { CameraShots.save(context, it) } }.getOrNull()
                         main.execute {
+                            if (!alive.get()) return@execute
                             busy = false
                             if (uri != null) onPhoto(uri) else error = CAPTURE_FAILED
                         }
@@ -280,6 +285,7 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
 
                     override fun onError(exception: ImageCaptureException) {
                         main.execute {
+                            if (!alive.get()) return@execute
                             busy = false
                             error = CAPTURE_FAILED
                         }
