@@ -57,6 +57,8 @@ pub struct PrismClient {
     pub(crate) alerts_lock: tokio::sync::Mutex<()>,
     /// Serialises this process's machine event reports (`record_host_event`).
     pub(crate) events_lock: tokio::sync::Mutex<()>,
+    /// Serialises this process's writes of assistant conversations.
+    pub(crate) assistant_lock: tokio::sync::Mutex<()>,
 }
 
 impl PrismClient {
@@ -130,6 +132,7 @@ impl PrismClient {
             db: opened.database,
             alerts_lock: tokio::sync::Mutex::new(()),
             events_lock: tokio::sync::Mutex::new(()),
+            assistant_lock: tokio::sync::Mutex::new(()),
         })
     }
 

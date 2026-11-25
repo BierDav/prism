@@ -118,7 +118,11 @@ overlay asks again with the same request ID until the agent exists), and the
 overlay stays: it follows the agent live,
 its words and steps, from its T3 thread (`AssistConversation.kt`,
 `GET /v1/agents/{id}/activity`), and what you send next goes to the same
-thread (`POST /v1/agents/{id}/messages`); + starts a new request. The Phone tab's Profiles page configures placement
+thread (`POST /v1/agents/{id}/messages`); + starts a new request. The
+assistant's conversations are kept in Prism's replica (`assistant_*`
+tables, so on every device and across reinstalls); "New chat" starts another
+and keeps the last, and the Chats screen (`assistant/AssistHistory.kt`) lists
+them newest first, opens one, continues it and deletes it. The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in

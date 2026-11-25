@@ -722,6 +722,34 @@ The phone applies them when `app.settings` names it, when its replica's
   the worker's credential or can't be reached, `504` after 10 s, and `503`
   while the worker has no `telemetry_url` or password.
 
+## The assistant's conversations
+
+The phone's assistant keeps every conversation in the replica, so it outlives
+the app and reaches the other devices (the history screen,
+`android/src/.../assistant/AssistHistory.kt`). These routes are only on the
+device (`Replica.call`); the workers serve none of them. Times are Unix
+seconds. A conversation is `{"id", "device", "title", "createdAt", "updatedAt"}`;
+`device` is the one it was started on.
+
+- `GET /v1/assistant/conversations?limit=N` returns
+  `{"conversations": [...]}`, every device's, the most recently updated first
+  (`limit` 1 to 500, default 500).
+- `GET /v1/assistant/conversations/{id}` returns `{"conversation", "entries":
+  [{"id", "body"}], "history": ["…"]}`, or `404`. `entries` are the
+  transcript's entries in order and `history` the model's messages in order,
+  each the app's own JSON as a string.
+- `PUT /v1/assistant/conversations/{id}` stores the conversation as it is
+  now: `{"title", "createdAt", "updatedAt", "entries", "history"}` in those
+  shapes. It writes only the rows that changed (an entry by its ID; the
+  history where it continues the stored one, dropping what it no longer
+  has), so the same `PUT` again after a failure is safe, and returns
+  `{"conversation"}`. The calling device started it if it is new. An ID is 1
+  to 100 letters, digits or `-_.:`; each entry's and message's JSON is at
+  most 16 KiB (`400` otherwise): the app cuts long texts and never stores
+  image or file bytes, only their names.
+- `DELETE /v1/assistant/conversations/{id}` deletes it with its rows and
+  returns `{"ok": true}`.
+
 ## Health
 
 `GET /v1/health` returns `200 {"ok": true}` from the device's replica.

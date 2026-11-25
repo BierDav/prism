@@ -306,6 +306,48 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
             Placement.serializer(),
         )
 
+    // --- The assistant's conversations ---
+
+    /** Every device's assistant conversations, the newest first. */
+    @Throws(Exception::class)
+    suspend fun assistantConversations(): List<AssistantConversation> =
+        decode(send("GET", "/v1/assistant/conversations"), ConversationList.serializer()).conversations
+
+    /** Conversation [id] with its entries and history; 404 when there is none. */
+    @Throws(Exception::class)
+    suspend fun assistantConversation(id: String): StoredConversation =
+        decode(send("GET", "/v1/assistant/conversations/${T3Links.encode(id)}"), StoredConversation.serializer())
+
+    /**
+     * Stores conversation [id] as it is now; only what changed is written, so
+     * the same call again after a failure is safe. Each entry's and message's
+     * JSON is at most 16 KiB.
+     */
+    @Throws(Exception::class)
+    suspend fun saveAssistantConversation(
+        id: String,
+        title: String,
+        createdAt: Long,
+        updatedAt: Long,
+        entries: List<StoredEntry>,
+        history: List<String>,
+    ): AssistantConversation {
+        val body = buildJsonObject {
+            put("title", title)
+            put("createdAt", createdAt)
+            put("updatedAt", updatedAt)
+            put("entries", JsonArray(entries.map { e -> buildJsonObject { put("id", e.id); put("body", e.body) } }))
+            put("history", JsonArray(history.map { JsonPrimitive(it) }))
+        }
+        return decode(send("PUT", "/v1/assistant/conversations/${T3Links.encode(id)}", body), ConversationAnswer.serializer()).conversation
+    }
+
+    /** Deletes conversation [id] everywhere. */
+    @Throws(Exception::class)
+    suspend fun deleteAssistantConversation(id: String) {
+        send("DELETE", "/v1/assistant/conversations/${T3Links.encode(id)}")
+    }
+
     // --- The exchange ---
 
     private suspend fun send(method: String, path: String, body: JsonElement? = null, authorized: Boolean = true): String {
@@ -395,6 +437,12 @@ private class AgentAnswer(val agent: Agent)
 
 @Serializable
 private class QuestionList(val questions: List<Question> = emptyList())
+
+@Serializable
+private class ConversationList(val conversations: List<AssistantConversation> = emptyList())
+
+@Serializable
+private class ConversationAnswer(val conversation: AssistantConversation)
 
 @Serializable
 private class ApprovalList(val approvals: List<Approval> = emptyList())
