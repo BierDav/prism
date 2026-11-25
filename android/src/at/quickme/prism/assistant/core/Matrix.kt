@@ -26,7 +26,9 @@ object Matrix {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
-    fun base(homeserver: String): String = homeserver.trim().trimEnd('/') + "/_matrix/client/v3"
+    fun base(homeserver: String): String = root(homeserver) + "/_matrix/client/v3"
+
+    fun root(homeserver: String): String = homeserver.trim().trimEnd('/')
 
     fun whoamiPath() = "/account/whoami"
 
@@ -49,6 +51,43 @@ object Matrix {
             putJsonObject("presence") { put("not_types", JsonArray(listOf(JsonPrimitive("*")))) }
         }
         return "/sync?timeout=0&filter=" + enc(filter.toString())
+    }
+
+    /**
+     * Simplified sliding sync (MSC4186), as Element X uses it: the [limit]
+     * most recently active rooms with the names the server computes, whether
+     * each is a direct chat, and its m.room.encryption. One request of a few
+     * seconds, where a first /sync of hundreds of bridged rooms takes over a
+     * minute (measured: 570 rooms, 84 s).
+     */
+    fun slidingSyncPath() = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync?timeout=0"
+
+    fun slidingSyncBody(limit: Int): JsonObject = buildJsonObject {
+        putJsonObject("lists") {
+            putJsonObject("rooms") {
+                put("ranges", JsonArray(listOf(JsonArray(listOf(JsonPrimitive(0), JsonPrimitive(limit - 1))))))
+                put("timeline_limit", 0)
+                put("required_state", JsonArray(listOf(JsonArray(listOf(JsonPrimitive("m.room.encryption"), JsonPrimitive(""))))))
+            }
+        }
+    }
+
+    /** The rooms of a sliding sync answer (slidingSyncBody), in its order: most recently active first. */
+    fun decodeSlidingRooms(body: String): List<Room> {
+        val root = Json.parseToJsonElement(body).jsonObject
+        val rooms = root.obj("rooms") ?: JsonObject(emptyMap())
+        val order = root.obj("lists")?.obj("rooms")?.arr("ops").orEmpty()
+            .mapNotNull { it as? JsonObject }
+            .flatMap { op -> op.arr("room_ids").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }
+            .ifEmpty { rooms.keys.toList() }
+            .distinct()
+        return order.mapIndexed { i, id ->
+            val room = rooms.obj(id)
+            val encrypted = room?.arr("required_state").orEmpty().any { (it as? JsonObject)?.str("type") == "m.room.encryption" }
+            val name = room?.str("name")?.takeIf { it.isNotBlank() } ?: id
+            // The list's order is its recency; a rank keeps it when sorted.
+            Room(id, name, direct = room?.get("is_dm") == JsonPrimitive(true), lastActive = (order.size - i).toLong(), encrypted = encrypted)
+        }
     }
 
     fun messagesPath(roomId: String, limit: Int): String {
