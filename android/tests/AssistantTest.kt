@@ -50,9 +50,10 @@ private const val FORECAST = """{"latitude":48.19,"longitude":16.36,"timezone":"
  "daily":{"time":["2026-11-24","2026-11-25","2026-11-26"],"weather_code":[3,51,73],
    "temperature_2m_max":[4.1,2.6,0.4],"temperature_2m_min":[-0.5,-1.9,-0.4],"precipitation_probability_max":[0,5,99]}}"""
 
-private const val SLIDING = """{"pos":"1","lists":{"rooms":{"count":3,"ops":[{"op":"SYNC","range":[0,2],"room_ids":["!team:example.org","!dm:example.org","!new:example.org"]}]}},
+private const val SLIDING = """{"pos":"1","lists":{"rooms":{"count":3,"ops":[{"op":"SYNC","range":[0,2],"room_ids":["!team:example.org","!dm:example.org","!bob:example.org","!new:example.org"]}]}},
 "rooms":{"!dm:example.org":{"name":"Anna","is_dm":true},
 "!team:example.org":{"name":"Team","is_dm":false,"required_state":[{"type":"m.room.encryption","state_key":"","content":{"algorithm":"m.megolm.v1.aes-sha2"}}]},
+"!bob:example.org":{"is_dm":true,"heroes":[{"user_id":"@bob:example.org","displayname":"Bob"}]},
 "!new:example.org":{}}}"""
 
 private const val SYNC = """{"next_batch":"s1",
@@ -130,9 +131,9 @@ fun main() {
     check(Matrix.find(rooms, "!dm:example.org").single().name == "Anna", "a room by ID")
     check(Matrix.find(rooms, "nobody").isEmpty(), "no room")
     val sliding = Matrix.decodeSlidingRooms(SLIDING)
-    check(sliding.map { it.name } == listOf("Team", "Anna", "!new:example.org"), "sliding sync rooms in the list's order, unnamed by ID: ${sliding.map { it.name }}")
+    check(sliding.map { it.name } == listOf("Team", "Anna", "Bob", "!new:example.org"), "sliding sync rooms in the list's order, an unnamed one by its heroes, else by ID: ${sliding.map { it.name }}")
     check(sliding[0].encrypted && !sliding[1].encrypted && sliding[1].direct && !sliding[0].direct, "encryption from required_state, direct from is_dm")
-    check(Matrix.find(sliding.sortedByDescending { it.lastActive }, "a").first().name == "Team", "recency survives a sort")
+    check(sliding.all { it.lastActive == 0L }, "no made-up activity times")
     check(Matrix.slidingSyncBody(300).toString().contains("[[0,299]]"), "the range covers the limit: ${Matrix.slidingSyncBody(300)}")
     val names = Matrix.decodeNames(MESSAGES)
     val msgs = Matrix.decodeMessages(MESSAGES, names)

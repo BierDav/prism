@@ -81,12 +81,15 @@ object Matrix {
             .flatMap { op -> op.arr("room_ids").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }
             .ifEmpty { rooms.keys.toList() }
             .distinct()
-        return order.mapIndexed { i, id ->
+        return order.map { id ->
             val room = rooms.obj(id)
             val encrypted = room?.arr("required_state").orEmpty().any { (it as? JsonObject)?.str("type") == "m.room.encryption" }
-            val name = room?.str("name")?.takeIf { it.isNotBlank() } ?: id
-            // The list's order is its recency; a rank keeps it when sorted.
-            Room(id, name, direct = room?.get("is_dm") == JsonPrimitive(true), lastActive = (order.size - i).toLong(), encrypted = encrypted)
+            // A room without a name (most direct chats) is named by its heroes, as clients show it.
+            val heroes = room?.arr("heroes").orEmpty().mapNotNull { it as? JsonObject }
+                .mapNotNull { h -> h.str("displayname")?.takeIf(String::isNotBlank) ?: h.str("user_id")?.let(::localpart) }
+            val name = room?.str("name")?.takeIf { it.isNotBlank() } ?: heroes.joinToString(", ").takeIf { it.isNotBlank() } ?: id
+            // The list's order is its recency; it has no event times.
+            Room(id, name, direct = room?.get("is_dm") == JsonPrimitive(true), encrypted = encrypted)
         }
     }
 
