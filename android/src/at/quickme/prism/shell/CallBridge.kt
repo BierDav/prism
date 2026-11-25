@@ -105,6 +105,9 @@ object CallBridge {
     /** A call on the Mac waits this long for another link before its audio goes back to the phone. */
     private const val LINK_GRACE_MS = 5_000L
 
+    /** AudioManager.CALL_REDIRECT_PSTN (hidden). */
+    private const val CALL_REDIRECT_PSTN = 1
+
     /** The longest call it serves (the wake lock's limit). */
     private const val MAX_CALL_MS = 6 * 3600_000L
 
@@ -392,12 +395,22 @@ object CallBridge {
         if (pipe != null || ended) return
         try {
             audio.mode = AudioManager.MODE_CALL_REDIRECT
-            val record = Hidden.call(
-                audio, "getCallDownlinkExtractionAudioRecord",
-                format(AudioFormat.CHANNEL_IN_MONO),
-            ) as AudioRecord
+            // What AudioManager's getCallDownlinkExtractionAudioRecord and
+            // getCallUplinkInjectionAudioTrack build, but on the shell's
+            // context: without one the record names the system's package
+            // ("android"), which AudioFlinger refuses for uid 2000.
+            val recordBuilder = AudioRecord.Builder().setContext(shell).setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
+            Hidden.call(recordBuilder, "setCallRedirectionMode", CALL_REDIRECT_PSTN)
+            val record = recordBuilder.build()
             val track = try {
-                Hidden.call(audio, "getCallUplinkInjectionAudioTrack", format(AudioFormat.CHANNEL_OUT_MONO)) as AudioTrack
+                val trackBuilder = AudioTrack.Builder().setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+                try {
+                    Hidden.call(trackBuilder, "setContext", shell) // API 34
+                } catch (e: NoSuchMethodException) {
+                    // Older: the track takes the process's identity.
+                }
+                Hidden.call(trackBuilder, "setCallRedirectionMode", CALL_REDIRECT_PSTN)
+                trackBuilder.build()
             } catch (e: Throwable) {
                 record.release()
                 throw e
