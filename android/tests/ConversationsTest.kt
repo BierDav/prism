@@ -63,10 +63,10 @@ fun main() {
     val threadRows = Conversations.entryRows(
         Transcript().after(Event.ToolStarted("c1", Tools.MATRIX_READ, "Reading")).after(Event.ToolFinished("c1", Tools.MATRIX_READ, "read", card = thread)),
     )
-    check(bytes(threadRows.single().second) <= Conversations.ROW_BYTES, "a thread of 3000 messages fits its row")
-    val shown = Conversations.transcript(threadRows).entries.single() as Entry.Shown
-    val kept = (shown.card as ThreadCard).messages
-    check(kept.isNotEmpty() && kept.first().text == "Message number 1 with some words", "the thread keeps its first messages (${kept.size})")
+    check(threadRows.size > 1 && threadRows.all { bytes(it.second) <= Conversations.ROW_BYTES }, "a thread of 3000 messages is split into rows that fit (${threadRows.size})")
+    val shown = Conversations.transcript(threadRows).entries.single() as Entry.Ui
+    val kept = (at.quickme.prism.assistant.core.CardSurfaces.card(shown.surface) as ThreadCard).messages
+    check(kept == thread.messages, "and comes back whole, all ${kept.size} messages")
     check(Conversations.fit(Json.parseToJsonElement(Conversations.fit(Json.parseToJsonElement(body)))) == body, "fitting a fitted row changes nothing")
 
     // --- The model's history (Koog's JSON, as Harness.encodeEach writes it) ---

@@ -30,7 +30,7 @@ object Weather {
     fun forecastUrl(latitude: Double, longitude: Double): String =
         "https://api.open-meteo.com/v1/forecast?latitude=$latitude&longitude=$longitude" +
             "&current=temperature_2m,apparent_temperature,weather_code,is_day,wind_speed_10m,precipitation_probability" +
-            "&hourly=temperature_2m,weather_code,is_day" +
+            "&hourly=temperature_2m,weather_code,is_day,precipitation_probability,wind_speed_10m" +
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
             "&timezone=auto&forecast_days=5"
 
@@ -56,9 +56,11 @@ object Weather {
         val temps = hourly.doubles("temperature_2m")
         val codes = hourly.ints("weather_code")
         val isDay = hourly.ints("is_day")
+        val hourRain = hourly.ints("precipitation_probability")
+        val hourWind = hourly.doubles("wind_speed_10m")
         val next = (start + 1 until minOf(times.size, start + 1 + hours)).mapNotNull { i ->
             val t = temps.getOrNull(i) ?: return@mapNotNull null
-            HourForecast(times[i].substringAfter('T'), t, codes.getOrNull(i) ?: 0, isDay.getOrNull(i) != 0)
+            HourForecast(times[i].substringAfter('T'), t, codes.getOrNull(i) ?: 0, isDay.getOrNull(i) != 0, hourRain.getOrNull(i), hourWind.getOrNull(i))
         }
         val daily = root["daily"] as? JsonObject
         val dayTimes = daily.strings("time")

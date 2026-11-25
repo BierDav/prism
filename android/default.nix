@@ -604,6 +604,7 @@ in
         run CoreTestKt
         run AssistantTestKt
         run ConversationsTestKt
+        run A2uiTestKt
         run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
