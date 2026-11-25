@@ -244,6 +244,19 @@ object Renderer {
         if (changed.isNotEmpty()) add(components(new.surfaceId, changed))
     }
 
+    /**
+     * What brings the renderer from [old] (drawn for entry [oldEntry]) to
+     * [new] of entry [entry]: an update, or, when it is another surface under
+     * the same ID (another entry, catalog or sendDataModel), its deletion and
+     * creation, so nothing of the old one carries over.
+     */
+    fun sync(old: Surface?, oldEntry: String?, new: Surface, entry: String): List<String> = when {
+        old == null -> create(new)
+        oldEntry != entry || old.catalogId != new.catalogId || old.sendDataModel != new.sendDataModel -> listOf(delete(old.surfaceId)) + create(new)
+        old != new -> update(old, new)
+        else -> emptyList()
+    }
+
     fun delete(surfaceId: String): String = message("deleteSurface", mapOf("surfaceId" to JsonPrimitive(surfaceId)))
 
     private fun dataModel(id: String, path: String, value: JsonElement) =

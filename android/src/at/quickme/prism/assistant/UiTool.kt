@@ -18,8 +18,11 @@ import at.quickme.prism.assistant.core.ToolArgumentException
 import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.UiError
 
-/** show_ui; [shown] is the surface the transcript shows with that surfaceId, if any. */
-internal fun uiTools(shown: (String) -> Surface?): List<AssistantTool> = listOf(
+/**
+ * show_ui; [shown] is the model's own surface with that surfaceId, if any,
+ * and [taken] says whether a tool's card has it (show_ui can't touch those).
+ */
+internal fun uiTools(shown: (String) -> Surface?, taken: (String) -> Boolean): List<AssistantTool> = listOf(
     object : AssistantTool(
         Tools.SHOW_UI,
         "Show the owner an interactive surface in the chat (A2UI v1.0, catalog ${PrismCatalog.ID}) when tapping beats typing: " +
@@ -28,7 +31,8 @@ internal fun uiTools(shown: (String) -> Surface?): List<AssistantTool> = listOf(
             "sendDataModel: true for inputs}; later updateComponents, updateDataModel {surfaceId, path, value} or deleteSurface on the same surfaceId. " +
             "Components: {\"id\", \"component\", …properties}; children and child name ids. Bind with {\"@path\": \"/x\"}; inputs write the data model. " +
             "A Button's action {\"event\": {\"name\", \"context\": {…values or bindings}, \"userMessage\": \"Picked: Anna (mobile)\"}} " +
-            "comes back as the owner's next message, with the data model when sendDataModel. Keep it small. Catalog: " + PrismCatalog.describe(),
+            "comes back as the owner's next message, with the data model when sendDataModel; nothing on a surface acts by itself " +
+            "(for a link, send an event and then call open_url). Keep it small. Catalog: " + PrismCatalog.describe(),
         required = listOf(
             ToolParameterDescriptor(
                 "messages",
@@ -39,7 +43,7 @@ internal fun uiTools(shown: (String) -> Surface?): List<AssistantTool> = listOf(
     ) {
         override suspend fun run(args: Args): ToolOutput {
             val change = try {
-                ShowUi.plan(args.json, shown)
+                ShowUi.plan(args.json, shown, taken = taken)
             } catch (e: UiError) {
                 throw ToolArgumentException(e.message ?: "The surface wasn't shown.")
             }

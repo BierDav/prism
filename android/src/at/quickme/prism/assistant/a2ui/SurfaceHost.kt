@@ -1,5 +1,7 @@
-// One A2UI renderer per screen showing a conversation (the overlay's panel,
-// the full-screen chat, a chat from the history): Google's message processor
+// One A2UI renderer per conversation (AssistantSession.surfaces), shared by
+// the screens that show it (the overlay's panel and its full-screen chat, a
+// chat from the history), so what the owner filled in but hasn't sent stays
+// when the chat expands or collapses: Google's message processor
 // with Prism's catalog, kept in step with the transcript's surfaces (each
 // drawn once, then sent only what changed: core/A2ui.kt's Renderer), and
 // their actions handed to the session (AssistantSession.act), which keeps
@@ -33,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -52,11 +55,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The renderer of one screen. [onAction] handles what the owner did on a
- * surface (the entry showing it, the action) and says why it couldn't, or
- * null; without it the surfaces only show.
+ * The renderer of one conversation. [onAction] handles what the owner did on
+ * a surface (the entry showing it, the action) and says why it couldn't, or
+ * null; without it the surfaces only show. The screen showing it sets it.
  */
-class SurfaceHost(context: Context, private val onAction: (suspend (entryId: String, action: UiAction) -> String?)?) {
+class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: String, action: UiAction) -> String?)? = null) {
     private val catalog = prismCatalog(context.applicationContext)
     private val processor = A2uiMessageProcessor(listOf(catalog))
     private val parser = A2uiMessageParser()
@@ -90,10 +93,8 @@ class SurfaceHost(context: Context, private val onAction: (suspend (entryId: Str
         val now = entries.filterIsInstance<Entry.Ui>()
         for (e in now) {
             val s = e.surface
+            Renderer.sync(drawn[s.surfaceId], entryOf[s.surfaceId], s, e.id).forEach { processor.processInput(parser, it) }
             entryOf[s.surfaceId] = e.id
-            val old = drawn[s.surfaceId]
-            val messages = if (old == null) Renderer.create(s) else if (old != s) Renderer.update(old, s) else emptyList()
-            messages.forEach { processor.processInput(parser, it) }
             drawn[s.surfaceId] = s
         }
         val ids = now.map { it.surface.surfaceId }.toSet()
@@ -129,15 +130,17 @@ class SurfaceHost(context: Context, private val onAction: (suspend (entryId: Str
     }
 }
 
-/** A renderer for this screen, kept while it shows, in step with [entries]. */
+/**
+ * The renderer for this screen, in step with [entries]: [shared] (the
+ * conversation's, which outlives the screen), or one kept while it shows.
+ */
 @Composable
-fun rememberSurfaceHost(entries: List<Entry>, onAction: (suspend (String, UiAction) -> String?)?): SurfaceHost {
+fun rememberSurfaceHost(entries: List<Entry>, onAction: (suspend (String, UiAction) -> String?)?, shared: SurfaceHost? = null): SurfaceHost {
     val context = LocalContext.current
     val handler = rememberUpdatedState(onAction)
-    val host = remember {
-        SurfaceHost(context) { id, a -> handler.value?.invoke(id, a) ?: "This chat can't act from here." }.also { it.sync(entries) }
-    }
-    DisposableEffect(host) { onDispose { host.close() } }
+    val host = shared ?: remember { SurfaceHost(context) }.also { own -> DisposableEffect(own) { onDispose { own.close() } } }
+    remember(host) { host.sync(entries) }
+    SideEffect { host.onAction = { id, a -> handler.value?.invoke(id, a) ?: "This chat can't act from here." } }
     LaunchedEffect(host, entries) { host.sync(entries) }
     return host
 }

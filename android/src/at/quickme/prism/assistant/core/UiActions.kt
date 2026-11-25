@@ -1,10 +1,13 @@
 // What the owner does on the transcript's surfaces, and what the model sends
 // with show_ui. A component's action (A2UI's event) either stays on the phone
-// — the cards' own buttons: call back, snooze, stop the timer, a switch, … —
-// and the model hears of it in its next turn as a note (HandNotes), or it is
-// the next turn itself: the owner picked a contact on a surface the model
+// — the buttons of a card a tool made: call back, a switch, open the event,
+// … — and the model hears of it in its next turn as a note (HandNotes), or it
+// is the next turn itself: the owner picked a contact on a surface the model
 // composed, and the model gets the action as A2UI JSON while the transcript
-// shows what the owner did ("Picked: Anna (mobile)"). No Android here (tested
+// shows what the owner did ("Picked: Anna (mobile)"). Nothing the model
+// composes makes the phone act: an action on its surface is only ever a turn,
+// after which the model has to call a real tool; show_ui can't change a
+// tool's card. No Android here (tested
 // on a plain JVM: android/tests/A2uiTest.kt).
 
 package at.quickme.prism.assistant.core
@@ -20,10 +23,9 @@ object UiActions {
     const val CALL = "call"
     const val MESSAGE = "message"
     const val REPLY = "reply"
-    const val SNOOZE = "snooze_alarm"
-    const val DISMISS = "dismiss_alarm"
-    const val STOP_TIMER = "stop_timer"
-    const val ADD_MINUTE = "add_minute"
+    /** The alarms or timers in the Clock app: no app API names one alarm or timer and says it changed. */
+    const val OPEN_ALARMS = "open_alarms"
+    const val OPEN_TIMERS = "open_timers"
     const val TOGGLE = "toggle"
     const val EDIT = "edit_message"
     const val OPEN_EVENT = "open_event"
@@ -33,7 +35,7 @@ object UiActions {
     const val OPEN_THREAD = "open_thread"
 
     /** The events the phone handles itself, when a card's component sends them. */
-    val LOCAL = setOf(CALL, MESSAGE, REPLY, SNOOZE, DISMISS, STOP_TIMER, ADD_MINUTE, TOGGLE, EDIT, OPEN_EVENT, OPEN_T3)
+    val LOCAL = setOf(CALL, MESSAGE, REPLY, OPEN_ALARMS, OPEN_TIMERS, TOGGLE, EDIT, OPEN_EVENT, OPEN_T3)
 
     sealed interface Route {
         /** On the phone: [name] with its [context], for the card it came from ([card], when it is the surface's). */
@@ -44,13 +46,14 @@ object UiActions {
     }
 
     /**
-     * Where [a] goes: a card's own event stays on the phone; anything else,
-     * from a surface the model made or a card's open_thread, is a turn.
+     * Where [a] goes: an event of a card's own component on a [trusted]
+     * surface (a tool made it) stays on the phone; anything else, every
+     * action on a surface the model made and a card's open_thread, is a turn.
      */
-    fun route(s: Surface, a: UiAction): Route {
+    fun route(s: Surface, a: UiAction, trusted: Boolean): Route {
         val type = s.type(a.sourceComponentId)
         val fromCard = type != null && PrismCatalog.all[type]?.card != null
-        if (fromCard && a.name in LOCAL) {
+        if (trusted && fromCard && a.name in LOCAL) {
             val card = if (a.sourceComponentId == Surface.ROOT) CardSurfaces.card(s) else null
             return Route.Local(a.name, a.context, card)
         }
@@ -92,10 +95,8 @@ object UiActions {
             CALL -> "called $whom from a card"
             MESSAGE -> "opened a new text to $whom from a card"
             REPLY -> "opened a reply to $whom from the conversation's card"
-            SNOOZE -> "snoozed the alarm${alarm(r.card)}"
-            DISMISS -> "dismissed the alarm${alarm(r.card)}"
-            STOP_TIMER -> "stopped the timer${(r.card as? TimerCard)?.label?.takeIf { it.isNotEmpty() }?.let { " \"$it\"" } ?: ""}"
-            ADD_MINUTE -> "added a minute to the timer"
+            OPEN_ALARMS -> "opened the Clock app's alarms from the card of the alarm${alarm(r.card)} (what they changed there, if anything, the phone can't tell)"
+            OPEN_TIMERS -> "opened the Clock app's timers from the card of the timer${(r.card as? TimerCard)?.label?.takeIf { it.isNotEmpty() }?.let { " \"$it\"" } ?: ""} (what they changed there, if anything, the phone can't tell)"
             OPEN_EVENT -> "opened the calendar event${c.text("title")?.let { " \"$it\"" } ?: ""}"
             OPEN_T3 -> "opened the T3 agent${c.text("agentId")?.let { " $it" } ?: ""} in T3"
             else -> words(r.name).lowercase() + " on a card"
@@ -129,10 +130,17 @@ object ShowUi {
 
     /**
      * The change [args] ask for (`messages`: A2UI v1.0 messages) given the
-     * surfaces already shown ([existing], by surfaceId). Throws [UiError]
-     * with everything that is wrong, for the model to fix.
+     * surfaces the model already shows ([existing], by surfaceId); [taken]
+     * says which IDs a tool's cards have, which it may neither create nor
+     * change. Throws [UiError] with everything that is wrong, for the model
+     * to fix.
      */
-    fun plan(args: JsonObject, existing: (String) -> Surface?, newId: () -> String = { "s" + System.currentTimeMillis().toString(36) }): UiChange {
+    fun plan(
+        args: JsonObject,
+        existing: (String) -> Surface?,
+        newId: () -> String = { "s" + System.currentTimeMillis().toString(36) },
+        taken: (String) -> Boolean = { false },
+    ): UiChange {
         val list: List<JsonElement> = when (val m = args["messages"]) {
             is JsonArray -> m
             is JsonObject -> listOf(m)
@@ -152,6 +160,7 @@ object ShowUi {
             }
             val id = m.surfaceId
             when {
+                taken(id) || id.startsWith(Transcript.TOOL_SURFACE) -> errors += "messages[$i]: \"$id\" is a tool's card; show_ui can't create, change or delete it (use a surfaceId of your own)"
                 m is UiMessage.Create -> when {
                     created != null -> errors += "messages[$i]: one createSurface per call"
                     existing(id) != null && id !in deleted -> errors += "messages[$i]: surface \"$id\" is already shown; change it with updateComponents or updateDataModel"

@@ -132,10 +132,11 @@ Compose renderer (androidx.a2ui) with Prism's catalog
 (`https://prism.quickme.at/a2ui/catalog/v1`: A2UI's basic components and the
 cards, `assistant/a2ui/`, `assistant/core/PrismCatalog.kt`): a tool's card is
 a surface with its component at the root, and the model composes its own with
-`show_ui` (a picker, a small form), checked against the catalog. A card's
-buttons act on the phone (call back, snooze, stop a timer, a switch, …) and
-the model hears of it in its next turn; a tap on the model's own surface is
-the next turn. The surfaces are what a conversation stores (old typed cards
+`show_ui` (a picker, a small form), checked against the catalog. Only the
+buttons of a card a tool made act on the phone (call back, a switch, open the
+alarms in Clock, …), and the model hears of it in its next turn; anything on
+a surface the model composed is only ever the next turn, and `show_ui` can't
+change a tool's card. The surfaces are what a conversation stores (old typed cards
 open as surfaces). The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).

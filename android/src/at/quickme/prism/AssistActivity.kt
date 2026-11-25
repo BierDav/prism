@@ -505,6 +505,21 @@ private fun Assist(
     // The camera in the + menu (AssistCamera.kt), open while the menu is.
     var cameraOpen by remember { mutableStateOf(false) }
     LaunchedEffect(menuOpen) { if (!menuOpen) cameraOpen = false }
+
+    /**
+     * Into or out of the full-screen chat. Each layout has its own card, so
+     * the camera and the + menu close first: only one camera is ever bound.
+     */
+    fun showFull(on: Boolean) {
+        cameraOpen = false
+        menuOpen = false
+        full = on
+    }
+
+    /** A button on a card or a surface: like sending, only once the phone is unlocked. */
+    val act: suspend (String, at.quickme.prism.assistant.core.UiAction) -> String? = { id, action ->
+        if (!unlock()) "Unlock the phone first." else session.act(id, action)
+    }
     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) cameraOpen = true else sendError = "Prism may not use the camera."
     }
@@ -900,7 +915,7 @@ private fun Assist(
         }
     }
     // Full screen, Back takes the chat back into the card.
-    BackHandler(enabled = full) { full = false }
+    BackHandler(enabled = full) { showFull(false) }
     // With the + menu open, Back closes the menu first.
     BackHandler(enabled = menuOpen) { menuOpen = false }
 
@@ -1032,8 +1047,9 @@ private fun Assist(
                     running = session.running,
                     agent = followed,
                     onNew = ::newRequest,
-                    onAction = session::act,
-                    onOpen = { full = true },
+                    onAction = act,
+                    onOpen = { showFull(true) },
+                    host = session.surfaces,
                     modifier = Modifier.fillMaxWidth().chipEnter(0).onGloballyPositioned { panel = it.boundsInRoot() },
                 )
             } else if (!following) {
@@ -1073,7 +1089,7 @@ private fun Assist(
                 if (!fullScreen) Box(Modifier.fillMaxSize()) {
                     InputCard(
                         cardModifier = chat,
-                        expand = { full = true },
+                        expand = { showFull(true) },
                         selectors = selectors,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -1112,10 +1128,10 @@ private fun Assist(
                     text = text,
                     onText = { text = it; sendError = null },
                     onSend = { send() },
-                    onAction = session::act,
+                    onAction = act,
                     onNew = ::newRequest,
                     onDelete = if (session.transcript.isEmpty || session.running) null else ::deleteChat,
-                    onBack = { full = false },
+                    onBack = { showFull(false) },
                     onChats = ::openChats,
                     agent = followed,
                     handoff = handoffEntry,
@@ -1123,6 +1139,7 @@ private fun Assist(
                         InputCard(Modifier, null, {}, Modifier.fillMaxWidth().widthIn(max = 696.dp))
                     },
                     modifier = chat,
+                    host = session.surfaces,
                 )
             }
         } }

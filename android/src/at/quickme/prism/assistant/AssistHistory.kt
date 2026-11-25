@@ -254,6 +254,7 @@ private fun HistoryScreen(onClose: () -> Unit) {
                 }
             },
             onAction = { entry, action -> shown?.act(entry, action) },
+            host = shown?.surfaces,
             onNew = { openConversation(null) },
             onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
                 delete(shown.conversationId)
@@ -410,14 +411,14 @@ internal fun HistoryChat(
     /** In place of the plain field: the overlay's card. */
     composer: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
-    /** The renderer, when the caller made it (previews settle it first). */
+    /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
     var confirm by remember { mutableStateOf(false) }
     val entries = transcript.entries
-    val surfaces = host ?: rememberSurfaceHost(entries, onAction)
+    val surfaces = rememberSurfaceHost(entries, onAction, host)
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
     }

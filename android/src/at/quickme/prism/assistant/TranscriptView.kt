@@ -176,7 +176,7 @@ fun AssistantTranscript(
     now: (() -> Long)? = null,
     /** The conversation full screen; no button without it. */
     onOpen: (() -> Unit)? = null,
-    /** The renderer, when the caller made it (previews settle it first). */
+    /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -184,7 +184,7 @@ fun AssistantTranscript(
     val list = rememberLazyListState()
     val entries = transcript.entries
     val handoff = transcript.latestHandoff()?.first
-    val surfaces = host ?: rememberSurfaceHost(entries, onAction)
+    val surfaces = rememberSurfaceHost(entries, onAction, host)
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isEmpty()) return@LaunchedEffect
         // To the end of the last item, also once the panel has grown to fit

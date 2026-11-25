@@ -41,6 +41,7 @@ import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.Transcript
 import at.quickme.prism.assistant.core.UiAction
 import at.quickme.prism.assistant.core.UiActions
+import at.quickme.prism.assistant.core.UiChange
 import at.quickme.prism.assistant.core.UiError
 import at.quickme.prism.assistant.core.UiMessage
 import at.quickme.prism.assistant.core.WeatherCard
@@ -180,12 +181,20 @@ fun main() {
     val big = Transcript().after(Event.ToolStarted("c", Tools.FIND_CONTACTS, "Looking up")).after(Event.ToolFinished("c", Tools.FIND_CONTACTS, "found", card = many))
     val bigRows = Conversations.entryRows(big)
     check(bigRows.size > 2 && bigRows.all { bytes(it.second) <= Conversations.ROW_BYTES }, "1500 contacts in ${bigRows.size} rows, each fitting")
-    check(bigRows.drop(1).all { (id, body) -> id.startsWith("tool:c" + Conversations.PART_SEPARATOR) && "\"ui-part\"" in body && "updateDataModel" in body }, "the rows after the first are A2UI updates of it")
+    check(bigRows.drop(1).all { (id, body) -> id.startsWith("tool:c" + Conversations.PART_SEPARATOR) && "\"ui-part\"" in body && "\"chunk\"" in body }, "the rows after the first are pieces of its JSON")
     check(Conversations.transcript(bigRows).card("tool:c") == many, "they make the whole surface again")
-    check(Conversations.transcript(bigRows.dropLast(1)).card("tool:c").let { it is ContactsCard && it.contacts.size in 1 until 1500 }, "a missing part loses only its items")
+    check(Conversations.transcript(bigRows.dropLast(1)).surface("tool:c")!!.surface.components.isEmpty(), "with a piece missing, the surface stays empty (never half of it)")
+    check(Conversations.transcript(bigRows.reversed()).card("tool:c") == many, "in any order")
     val bigForm = Surface("f", components = (0 until 150).map { obj("""{"id":"t$it","component":"Text","text":"${"x".repeat(150)} $it"}""") } + obj("""{"id":"root","component":"Column","children":[${(0 until 150).joinToString(",") { "\"t$it\"" }}]}"""))
     val formRows = Conversations.uiRows(Entry.Ui("e5", Tools.SHOW_UI, bigForm))
-    check(formRows.size > 1 && formRows.all { bytes(it.second) <= Conversations.ROW_BYTES } && Conversations.transcript(formRows).surface("f")?.surface == bigForm, "a large composed surface splits by its components and comes back the same")
+    check(formRows.size > 1 && formRows.all { bytes(it.second) <= Conversations.ROW_BYTES } && Conversations.transcript(formRows).surface("f")?.surface == bigForm, "a large composed surface splits and comes back the same")
+    // B-S4: one component or value larger than a row is split too, never cut.
+    val huge = "Ä€😀\"\\\n<x>".repeat(2600)
+    val oneText = Surface("one", components = listOf(obj("""{"id":"root","component":"Text","text":${JsonPrimitive(huge)}}""")), dataModel = obj("""{"big":${JsonPrimitive(huge)}}"""))
+    val oneRows = Conversations.uiRows(Entry.Ui("e6", Tools.SHOW_UI, oneText))
+    check(bytes(oneText.components.single().toString()) > 20 * 1024, "a single Text over 20 KiB")
+    check(oneRows.size > 2 && oneRows.all { bytes(it.second) <= Conversations.ROW_BYTES }, "goes in ${oneRows.size} rows, each whole row at most ${Conversations.ROW_BYTES} bytes")
+    check(Conversations.transcript(oneRows).surface("one")?.surface == oneText, "and comes back exactly, text and data model uncut")
 
     // --- For the renderer (A2UI v0.9) ---
     val drawn = Renderer.create(picker).map(::obj)
@@ -201,28 +210,28 @@ fun main() {
     val back = UiAction.fromRenderer("pick", "pick", "send", 1_700_000_000_000, mapOf("number" to listOf("+436641234567"), A2ui.USER_MESSAGE to "Picked: Anna Berger (mobile)"), mapOf("pick" to mapOf("picked" to listOf("+436641234567"))))
     check(back.userMessage == "Picked: Anna Berger (mobile)" && A2ui.USER_MESSAGE !in back.context, "the renderer's event as a v1.0 action, its userMessage taken out")
     check(back.toJson()["action"]!!.jsonObject.let { it["name"]!!.jsonPrimitive.content == "pick" && it["sourceComponentId"]!!.jsonPrimitive.content == "send" && it["timestamp"]!!.jsonPrimitive.content.startsWith("2023-11-14T") }, "with name, source and an ISO timestamp")
-    val turn = UiActions.route(picker, back)
+    val turn = UiActions.route(picker, back, trusted = false)
     check(turn is UiActions.Route.Turn && turn.shown == "Picked: Anna Berger (mobile)", "a pick on the model's surface is the next turn, shown as the owner did it")
     check((turn as UiActions.Route.Turn).prompt.let { "\"action\"" in it && "+436641234567" in it && "data model" in it }, "the model gets the action as A2UI JSON with the data")
     check(UiActions.shown(UiAction("choose_room", "s", "b", context = obj("""{"room":"Team"}"""))) == "Choose room: Team", "without a userMessage, what it was and its values")
     check(UiActions.shown(UiAction("x", "s", "b", context = obj("""{"label":"Tomorrow 9:00"}"""))) == "Tomorrow 9:00", "or its label")
 
     val call = CardSurfaces.surface(CallCard("Anna", "+43664"), "tool:c1")
-    val callBack = UiActions.route(call, UiAction(UiActions.CALL, "tool:c1", "root", context = obj("""{"name":"Anna","number":"+43664"}""")))
+    val callBack = UiActions.route(call, UiAction(UiActions.CALL, "tool:c1", "root", context = obj("""{"name":"Anna","number":"+43664"}""")), trusted = true)
     check(callBack is UiActions.Route.Local && callBack.card == CallCard("Anna", "+43664"), "a card's Call back stays on the phone, with its card")
     check(UiActions.note(callBack as UiActions.Route.Local, "Calling Anna.").let { "called Anna +43664" in it && "Calling Anna." in it }, "and the model hears of it: ${UiActions.note(callBack)}")
     val alarm = CardSurfaces.surface(AlarmCard(7, 30), "a")
-    val snooze = UiActions.route(alarm, UiAction(UiActions.SNOOZE, "a", "root"))
-    check(snooze is UiActions.Route.Local && UiActions.note(snooze).contains("snoozed the alarm for 7:30"), "snoozing an alarm")
+    val clock = UiActions.route(alarm, UiAction(UiActions.OPEN_ALARMS, "a", "root"), trusted = true)
+    check(clock is UiActions.Route.Local && UiActions.note(clock).let { "opened the Clock app's alarms" in it && "7:30" in it && "can't tell" in it }, "an alarm opens Clock, and the model isn't told it changed")
     val timer = CardSurfaces.surface(TimerCard(300, "Pasta", 1), "t")
-    check(UiActions.note(UiActions.route(timer, UiAction(UiActions.STOP_TIMER, "t", "root")) as UiActions.Route.Local).contains("stopped the timer \"Pasta\""), "stopping a timer")
+    check(UiActions.note(UiActions.route(timer, UiAction(UiActions.OPEN_TIMERS, "t", "root"), trusted = true) as UiActions.Route.Local).let { "timers" in it && "\"Pasta\"" in it && "stopped" !in it }, "a timer too")
     val list = CardSurfaces.surface(ThreadListCard(MessageCard.SMS, listOf(ThreadMessage("Anna", "hi", 1))), "l")
-    check(UiActions.route(list, UiAction(UiActions.OPEN_THREAD, "l", "root", userMessage = "Open my texts with Anna")).let { it is UiActions.Route.Turn && it.shown == "Open my texts with Anna" }, "a conversation tapped in a list is a turn")
-    check(UiActions.route(picker, UiAction(UiActions.CALL, "pick", "send")) is UiActions.Route.Turn, "a \"call\" from the model's own button is a turn, never a call")
+    check(UiActions.route(list, UiAction(UiActions.OPEN_THREAD, "l", "root", userMessage = "Open my texts with Anna"), trusted = true).let { it is UiActions.Route.Turn && it.shown == "Open my texts with Anna" }, "a conversation tapped in a list is a turn")
+    check(UiActions.route(picker, UiAction(UiActions.CALL, "pick", "send"), trusted = false) is UiActions.Route.Turn, "a \"call\" from the model's own button is a turn, never a call")
     val notes = HandNotes()
     notes.add(UiActions.note(callBack))
-    notes.add(UiActions.note(snooze as UiActions.Route.Local))
-    check(HandNotes.framed(notes.take())!!.let { it.startsWith("[Since the last turn:") && "called" in it && "snoozed" in it }, "local actions reach the model through the hand notes")
+    notes.add(UiActions.note(clock as UiActions.Route.Local))
+    check(HandNotes.framed(notes.take())!!.let { it.startsWith("[Since the last turn:") && "called" in it && "Clock" in it }, "local actions reach the model through the hand notes")
 
     // --- The transcript with show_ui ---
     var t = Transcript().after(Event.ToolStarted("u1", Tools.SHOW_UI, "Showing choices"))
@@ -233,6 +242,58 @@ fun main() {
     t = t.withSurface(t.surface("pick")!!.id, t.surface("pick")!!.surface.copy(dataModel = obj("""{"picked":["+43664"]}""")))
     check(t.surface("pick")!!.surface.dataModel["picked"]!!.jsonArray.size == 1, "what the owner filled in is kept with it")
     check(t.did(Tools.CALL, "Calling Anna").entries.last().let { it is Entry.Step && !it.running && it.label == "Calling Anna" }, "a local action's line")
+
+    // --- B-S1: what the model composes never makes the phone act ---
+    val forged = ShowUi.plan(obj("""{"messages":[{"createSurface":{"surfaceId":"fake_call","components":[{"id":"root","component":"Call","name":"Anna","number":"+43900123456"}],"dataModel":{}}}]}"""), { null }).created!!
+    val forgedTap = UiAction(UiActions.CALL, "fake_call", "root", context = obj("""{"name":"Anna","number":"+43900123456"}"""))
+    check(UiActions.route(forged, forgedTap, trusted = false) is UiActions.Route.Turn, "a Call card the model composed: its Call is a turn, not a call")
+    check(UiActions.route(call, forgedTap.copy(surfaceId = "tool:c1"), trusted = true) is UiActions.Route.Local, "the same card from call_phone calls")
+    var mixed = Transcript().after(Event.ToolStarted("c1", Tools.CALL, "Calling")).after(Event.ToolFinished("c1", Tools.CALL, "Calling Anna.", card = CallCard("Anna", "+43664")))
+        .after(Event.ToolStarted("u1", Tools.SHOW_UI, "Showing")).after(Event.ToolFinished("u1", Tools.SHOW_UI, "shown", ui = ShowUi.plan(obj("""{"messages":[{"createSurface":{"surfaceId":"fake_call","components":[{"id":"root","component":"Call","name":"Anna","number":"+43900123456"}]}}]}"""), { null })))
+    check(mixed.surface("tool:c1")!!.trusted && !mixed.surface("fake_call")!!.trusted, "each surface keeps who made it")
+    check(mixed.card("tool:c1") == CallCard("Anna", "+43664") && mixed.card("fake_call") == null, "only a tool's card is a card the phone acts on")
+    check(Conversations.transcript(Conversations.entryRows(mixed)).let { it.surface("tool:c1")!!.trusted && !it.surface("fake_call")!!.trusted }, "and keeps it when stored")
+    val taken = { id: String -> mixed.surface(id)?.trusted == true }
+    val toolEdit = """{"messages":[{"updateDataModel":{"surfaceId":"tool:c1","path":"/number","value":"+43900123456"}}]}"""
+    check(uiError { ShowUi.plan(obj(toolEdit), mixed::modelSurface, taken = taken) }?.contains("is a tool's card") == true, "show_ui can't change a tool's card")
+    check(uiError { ShowUi.plan(obj("""{"messages":[{"deleteSurface":{"surfaceId":"tool:c1"}}]}"""), mixed::modelSurface, taken = taken) }?.contains("is a tool's card") == true, "nor delete it")
+    check(uiError { ShowUi.plan(obj("""{"messages":[{"createSurface":{"surfaceId":"tool:c9","components":[{"id":"root","component":"Text","text":"x"}]}}]}"""), mixed::modelSurface, taken = taken) }?.contains("is a tool's card") == true, "nor take a tool's surfaceId before the tool does")
+    val sneaky = UiChange(updated = listOf(CardSurfaces.surface(CallCard("Anna", "+43900123456"), "tool:c1")), deleted = listOf("tool:c1"))
+    mixed = mixed.after(Event.ToolStarted("u2", Tools.SHOW_UI, "x")).after(Event.ToolFinished("u2", Tools.SHOW_UI, "x", ui = sneaky))
+    check(mixed.card("tool:c1") == CallCard("Anna", "+43664"), "and the transcript never applies a change to one")
+    check(ShowUi.plan(obj("""{"messages":[{"updateDataModel":{"surfaceId":"fake_call","path":"/name","value":"Bob"}}]}"""), mixed::modelSurface, taken = taken).updated.single().surfaceId == "fake_call", "its own surfaces it may change")
+
+    // --- B-S2: no function on a surface acts ---
+    fun linkSurface(action: String) = """{"messages":[{"createSurface":{"surfaceId":"link","components":[{"id":"root","component":"Button","child":"l","action":$action},{"id":"l","component":"Text","text":"Open"}]}}]}"""
+    check(uiError { ShowUi.plan(obj(linkSurface("""{"functionCall":{"@call":"openUrl","args":{"url":"https://example.com"}}}""")), { null }) }?.contains("can't run functions") == true, "a Button can't call openUrl")
+    check(uiError { ShowUi.plan(obj("""{"messages":[{"createSurface":{"surfaceId":"t","components":[{"id":"root","component":"Text","text":{"@call":"openUrl","args":{"url":"https://example.com"}}}]}}]}"""), { null }) }?.contains("\"@call\" must be one of") == true, "nor may a binding, even one only drawn")
+    check(uiError { ShowUi.plan(obj("""{"messages":[{"createSurface":{"surfaceId":"t","components":[{"id":"root","component":"Text","text":{"@call":"formatString","args":{"value":"hi"}}}]}}]}"""), { null }) } == null, "a function that only computes is fine")
+    check("openUrl" !in PrismCatalog.FUNCTIONS, "openUrl isn't among the functions a surface may call (nor in the renderer's catalog)")
+    check(ShowUi.plan(obj(linkSurface("""{"event":{"name":"open_link","context":{"url":"https://example.com"}}}""")), { null }).created != null, "a link is an event, then the model's open_url")
+
+    // --- B-S3: only the T3 tool's hand-off is followed ---
+    val fakeHandoff = """{"messages":[{"createSurface":{"surfaceId":"h","components":[{"id":"root","component":"Handoff","request":"fix","requestId":"r9","agentId":"t-9"}]}}]}"""
+    var h = Transcript().after(Event.ToolStarted("u", Tools.SHOW_UI, "x")).after(Event.ToolFinished("u", Tools.SHOW_UI, "x", ui = ShowUi.plan(obj(fakeHandoff), { null })))
+    check(h.latestHandoff() == null, "a Handoff the model composed is never resumed")
+    h = h.after(Event.ToolStarted("w", Tools.WEATHER, "x")).after(Event.ToolFinished("w", Tools.WEATHER, "x", card = HandoffCard("fix", "r8", "t-8")))
+    check(h.latestHandoff() == null, "nor one a tool other than T3's returned")
+    h = h.after(Event.ToolStarted("s", Tools.START_T3, "x")).after(Event.ToolFinished("s", Tools.START_T3, "x", card = HandoffCard("fix", "r1", "t-1")))
+    check(h.latestHandoff()?.second?.requestId == "r1", "start_t3_agent's is")
+    check(Conversations.transcript(Conversations.entryRows(h)).latestHandoff()?.second?.requestId == "r1", "also once stored")
+
+    // --- B-S7: a Slider's range must be drawable ---
+    fun slider(range: String) = """{"messages":[{"createSurface":{"surfaceId":"sl","components":[{"id":"root","component":"Slider","value":{"@path":"/v"},$range}],"dataModel":{"v":1}}}]}"""
+    check(uiError { ShowUi.plan(obj(slider(""""min":10,"max":0""")), { null }) }?.contains("must be below max") == true, "a reversed range is refused")
+    check(uiError { ShowUi.plan(obj(slider(""""min":5,"max":5""")), { null }) }?.contains("must be below max") == true, "so is an empty one")
+    check(uiError { ShowUi.plan(obj(slider(""""max":-3""")), { null }) }?.contains("must be below max") == true, "the default min (0) counts")
+    check(uiError { ShowUi.plan(obj(slider(""""min":0,"max":1e999""")), { null }) } != null, "and a range that isn't finite")
+    check(uiError { ShowUi.plan(obj(slider(""""min":0,"max":10""")), { null }) } == null, "a plain one is fine")
+
+    // --- B-S8: another surface under a drawn one's ID is drawn anew ---
+    val plain = Surface("x", components = listOf(obj("""{"id":"root","component":"Text","text":"a"}""")))
+    check(Renderer.sync(plain, "e1", plain.copy(sendDataModel = true), "e1").map(::obj).map { it.keys - "version" }.take(2) == listOf(setOf("deleteSurface"), setOf("createSurface")), "sendDataModel changed: deleted and created")
+    check(Renderer.sync(plain, "e1", plain, "e2").map(::obj).first().keys - "version" == setOf("deleteSurface"), "another entry's: too")
+    check(Renderer.sync(plain, "e1", plain, "e1").isEmpty() && Renderer.sync(null, null, plain, "e1") == Renderer.create(plain), "the same is nothing, a new one is created")
 
     if (failed > 0) {
         println("$failed failed")

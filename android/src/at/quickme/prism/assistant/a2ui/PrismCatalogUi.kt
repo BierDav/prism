@@ -9,9 +9,7 @@
 package at.quickme.prism.assistant.a2ui
 
 import android.content.Context
-import android.content.Intent
 import android.graphics.BitmapFactory
-import android.net.Uri
 import androidx.a2ui.compose.runtime.A2uiComponentReference
 import androidx.a2ui.compose.runtime.A2uiComponentScope
 import androidx.a2ui.compose.runtime.A2uiComponentState
@@ -120,7 +118,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -128,6 +125,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import at.quickme.prism.assistant.MarkdownText
+import at.quickme.prism.assistant.core.A2ui
 import at.quickme.prism.assistant.core.Card
 import at.quickme.prism.assistant.core.PrismCatalog
 import at.quickme.prism.assistant.core.UiAction
@@ -148,8 +146,9 @@ import androidx.a2ui.compose.ui.catalog.A2uiBasicCatalogV1.List as ListSpec
 import androidx.a2ui.compose.ui.catalog.A2uiBasicCatalogV1.Row as RowSpec
 import androidx.a2ui.compose.ui.catalog.A2uiBasicCatalogV1.Text as TextSpec
 import androidx.a2ui.compose.ui.catalog.A2uiBasicCatalogV1.TextField as TextFieldSpec
+import androidx.a2ui.model.catalog.A2uiFunctionCollection
 
-/** Prism's catalog for the renderer: the basic components and the cards; URLs open from [context]. */
+/** Prism's catalog for the renderer: the basic components and the cards ([context] formats dates and numbers). */
 fun prismCatalog(context: Context): A2uiCatalog {
     val basic = A2uiBasicCatalogV1(
         text = TextUi, image = ImageUi, icon = IconUi, video = VideoUi, audioPlayer = AudioUi,
@@ -161,7 +160,8 @@ fun prismCatalog(context: Context): A2uiCatalog {
     return A2uiCatalog(
         catalogId = PrismCatalog.ID,
         components = basic.components + PrismCatalog.cards.map(::CardComponent),
-        functions = basic.toA2uiCatalog().functions,
+        // Only functions that compute: openUrl would make the phone act from a surface the model wrote.
+        functions = A2uiFunctionCollection(basic.toA2uiCatalog().functions.filter { it.definition.name in PrismCatalog.FUNCTIONS }),
     )
 }
 
@@ -482,13 +482,18 @@ private fun builtIn(name: String): ImageVector = when (name) {
     else -> Icons.Rounded.Info
 }
 
-/** Media plays in the app that opens it: the renderer has no player of its own here. */
+/**
+ * Media the renderer has no player for: tapping it asks the model to open it
+ * (an event, so a turn; the model then calls open_url), never opens it here.
+ */
 @Composable
-private fun MediaLink(url: String, label: String, accessibility: AccessibilityAttributes?, modifier: Modifier) {
-    val context = LocalContext.current
+private fun A2uiComponentScope.MediaLink(url: String, label: String, accessibility: AccessibilityAttributes?, modifier: Modifier) {
+    val enabled = LocalCardsAct.current && LocalSurfaceStatus.current.busy == null
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .clickable { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } }
+            .clickable(enabled = enabled) {
+                dispatchAction(mapOf("event" to mapOf("name" to OPEN_MEDIA, "context" to mapOf("url" to url, A2ui.USER_MESSAGE to "$label: $url"))))
+            }
             .padding(12.dp).a11y(accessibility),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -643,9 +648,13 @@ private object SliderUi : A2uiBasicCatalogV1.Slider {
                 label?.let { Text(it, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f)) }
                 Text(if (value % 1f == 0f) value.toInt().toString() else "%.1f".format(value), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             }
+            // Validation rejects a range that can't be drawn (PrismCatalog); one stored from before is shown, not drawn.
+            if (!min.isFinite() || !max.isFinite() || min >= max) Text("This slider's range ($min to $max) can't be shown.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             // material3 1.5 deprecates the value-based Slider; the renderer hands a value and a callback.
-            @Suppress("DEPRECATION")
-            Slider(value = value.coerceIn(min, max), onValueChange = onValueChange, valueRange = min..maxOf(min, max), enabled = enabled && LocalCardsAct.current)
+            else {
+                @Suppress("DEPRECATION")
+                Slider(value = if (value.isFinite()) value.coerceIn(min, max) else min, onValueChange = onValueChange, valueRange = min..max, enabled = enabled && LocalCardsAct.current)
+            }
             checks.failed()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
     }
@@ -723,3 +732,6 @@ private fun Modifier.a11y(a: AccessibilityAttributes?): Modifier {
     val label = listOfNotNull(a?.label, a?.description).joinToString(". ").takeIf { it.isNotEmpty() } ?: return this
     return semantics { contentDescription = label }
 }
+
+/** What a tap on a video or a sound sends: a turn asking the model to open [url]. */
+const val OPEN_MEDIA = "open_media"

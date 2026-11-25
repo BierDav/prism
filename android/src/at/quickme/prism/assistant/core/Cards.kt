@@ -102,30 +102,12 @@ data class ThreadListCard(val channel: String, val threads: List<ThreadMessage>)
 /** An alarm set in the clock app; [days] are 1 (Sunday) … 7 (Saturday), empty for once. */
 @Serializable
 @SerialName("alarm")
-data class AlarmCard(
-    val hour: Int,
-    val minute: Int,
-    val label: String = "",
-    val days: List<Int> = emptyList(),
-    /** What the owner did to it on its card: [SNOOZED], [DISMISSED], or nothing. */
-    val state: String = "",
-) : Card {
-    companion object {
-        const val SNOOZED = "snoozed"
-        const val DISMISSED = "dismissed"
-    }
-}
+data class AlarmCard(val hour: Int, val minute: Int, val label: String = "", val days: List<Int> = emptyList()) : Card
 
 /** A timer of [seconds] started at [startedAt] (epoch ms). */
 @Serializable
 @SerialName("timer")
-data class TimerCard(
-    val seconds: Int,
-    val label: String = "",
-    val startedAt: Long = 0,
-    /** Stopped on its card (epoch ms), 0 while it runs. */
-    val stoppedAt: Long = 0,
-) : Card
+data class TimerCard(val seconds: Int, val label: String = "", val startedAt: Long = 0) : Card
 
 /**
  * A device setting or action, as Gemini's "Settings • Flashlight" card: what

@@ -110,7 +110,7 @@ object PrismCatalog {
             p("options", Kind.OPTIONS, true), p("value", Kind.DYN_STRINGS, true),
             p("displayStyle", Kind.ENUM, false, "checkbox", "chips"), p("filterable", Kind.BOOLEAN), CHECKS,
         )),
-        Spec("Slider", "A number in a range.", listOf(p("label", Kind.DYN_STRING), p("min", Kind.NUMBER), p("max", Kind.NUMBER, true), p("value", Kind.DYN_NUMBER, true), CHECKS)),
+        Spec("Slider", "A number in a range (min below max).", listOf(p("label", Kind.DYN_STRING), p("min", Kind.NUMBER), p("max", Kind.NUMBER, true), p("value", Kind.DYN_NUMBER, true), CHECKS)),
         Spec("DateTimeInput", "A date and/or time (ISO 8601 string).", listOf(
             p("value", Kind.DYN_STRING, true), p("enableDate", Kind.BOOLEAN), p("enableTime", Kind.BOOLEAN),
             p("min", Kind.DYN_ANY), p("max", Kind.DYN_ANY), p("label", Kind.DYN_STRING), CHECKS,
@@ -124,8 +124,8 @@ object PrismCatalog {
         card("Message", "A message sent; a Matrix one can be edited.", MessageCard.serializer()),
         card("Thread", "Messages of a conversation; Reply.", ThreadCard.serializer()),
         card("ThreadList", "Recent conversations; tapping one opens it.", ThreadListCard.serializer()),
-        card("Alarm", "An alarm; Snooze and Dismiss.", AlarmCard.serializer()),
-        card("Timer", "A running timer; Stop and +1 min.", TimerCard.serializer()),
+        card("Alarm", "An alarm; opens the Clock app's alarms.", AlarmCard.serializer()),
+        card("Timer", "A running timer; opens the Clock app's timers.", TimerCard.serializer()),
         card("Setting", "A setting with its switch.", SettingCard.serializer()),
         card("Contacts", "Contacts; each can be called or texted.", ContactsCard.serializer()),
         card("Events", "Calendar events; tapping one opens it.", EventsCard.serializer()),
@@ -226,6 +226,7 @@ object PrismCatalog {
             }
             edges[id] = refs
             if (spec.card != null) cardError(s, c, spec)?.let { errors += "\"$id\" ($type): $it" }
+            if (type == "Slider") range(c)?.let { errors += "\"$id\" (Slider): $it" }
         }
         cycle(edges)?.let { errors += "components refer to each other in a circle: ${it.joinToString(" → ")}" }
         return errors.distinct()
@@ -241,7 +242,7 @@ object PrismCatalog {
             Kind.DYN_STRINGS -> if (!(v is JsonArray && v.all { it is JsonPrimitive && it.isString }) && !binding(v, at, errors)) bad("a list of strings or a binding")
             Kind.DYN_ANY -> if (v is JsonObject) binding(v, at, errors)
             Kind.STRING -> if (prim == null || !prim.isString) bad("a string")
-            Kind.NUMBER -> if (prim == null || prim.isString || prim.content.toDoubleOrNull() == null) bad("a number")
+            Kind.NUMBER -> if (prim == null || prim.isString || prim.content.toDoubleOrNull()?.isFinite() != true) bad("a finite number")
             Kind.BOOLEAN -> if (prim == null || prim.isString || prim.content !in setOf("true", "false")) bad("true or false")
             Kind.ENUM -> if (prim == null || !prim.isString || prim.content !in prop.values) bad("one of ${prop.values.joinToString(", ")}")
             Kind.ICON -> if (prim != null && prim.isString) {
@@ -272,6 +273,23 @@ object PrismCatalog {
         }
     }
 
+    /**
+     * The functions a binding may call: the basic catalog's, which only
+     * compute. openUrl, which acts, isn't one (nor is it in the renderer's
+     * catalog): a surface never makes the phone act, even while drawn.
+     */
+    val FUNCTIONS = listOf(
+        "required", "regex", "length", "numeric", "email", "formatString", "formatNumber",
+        "formatCurrency", "formatDate", "pluralize", "and", "or", "not",
+    )
+
+    /** Why a Slider's range can't be drawn (reversed, or empty), or null. */
+    private fun range(c: JsonObject): String? {
+        val min = (c["min"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: if ("min" in c) return null else 0.0
+        val max = (c["max"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
+        return if (min < max) null else "min ($min) must be below max ($max)"
+    }
+
     private fun isNull(v: JsonElement) = v is kotlinx.serialization.json.JsonNull
 
     /** Whether [v] is a binding; a v0.9 one ({"path"}) is an error with a hint. */
@@ -282,7 +300,8 @@ object PrismCatalog {
             return true
         }
         if ("@call" in o) {
-            if ((o["@call"] as? JsonPrimitive)?.isString != true) errors += "$at: \"@call\" must be a function's name"
+            val name = (o["@call"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            if (name !in FUNCTIONS) errors += "$at: \"@call\" must be one of ${FUNCTIONS.joinToString(", ")} (got ${o["@call"]})"
             return true
         }
         if (o.keys == setOf("path") || "call" in o) {
@@ -309,8 +328,8 @@ object PrismCatalog {
                 event["context"]?.let { if (it !is JsonObject) errors += "$at.event.context must be an object" }
                 event["userMessage"]?.let { if (it !is JsonPrimitive && !binding(it, "$at.event.userMessage", errors)) errors += "$at.event.userMessage must be a string" }
             }
-            call != null -> if (call.str("@call") != "openUrl") errors += "$at.functionCall: the phone runs only {\"@call\": \"openUrl\", \"args\": {\"url\": …}}"
-            else -> errors += "$at must be {\"event\": {\"name\": …, \"context\": {…}}} or {\"functionCall\": {\"@call\": \"openUrl\", …}}"
+            call != null -> errors += "$at.functionCall: a surface can't run functions on the phone; send an event, and act on it with your tools (open_url for a link)"
+            else -> errors += "$at must be {\"event\": {\"name\": …, \"context\": {…}}}"
         }
     }
 

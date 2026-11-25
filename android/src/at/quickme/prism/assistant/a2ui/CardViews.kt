@@ -27,11 +27,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Email
@@ -195,15 +193,13 @@ fun CardView(card: Card, act: CardAct) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(ClockTime.format(card.hour, card.minute), style = MaterialTheme.typography.displaySmall)
-                    val line = listOf(card.label, when (card.state) { AlarmCard.SNOOZED -> "Snoozed"; AlarmCard.DISMISSED -> "Dismissed"; else -> "" }).filter { it.isNotEmpty() }.joinToString(" • ")
-                    if (line.isNotEmpty()) Text(line, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    if (card.label.isNotEmpty()) Text(card.label, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                 }
                 Busy()
-                Switch(checked = card.state != AlarmCard.DISMISSED, onCheckedChange = null)
+                Switch(checked = true, onCheckedChange = null)
             }
-            if (card.state != AlarmCard.DISMISSED) Buttons {
-                CardButton(PrismIcons.Clock, "Snooze") { act(UiActions.SNOOZE, mapOf("hour" to card.hour, "minute" to card.minute)) }
-                CardButton(Icons.Rounded.Close, "Dismiss") { act(UiActions.DISMISS, mapOf("hour" to card.hour, "minute" to card.minute)) }
+            Buttons {
+                CardButton(PrismIcons.Clock, "Open in Clock") { act(UiActions.OPEN_ALARMS, mapOf("hour" to card.hour, "minute" to card.minute)) }
             }
         }
         is TimerCard -> TimerView(card, act)
@@ -496,19 +492,17 @@ private fun TimerView(card: TimerCard, act: CardAct) {
     if (now == null) LaunchedEffect(card) {
         while (true) {
             clock = System.currentTimeMillis()
-            if (card.stoppedAt > 0 || clock - card.startedAt > card.seconds * 1000L) break
+            if (clock - card.startedAt > card.seconds * 1000L) break
             delay(1000)
         }
     }
-    val at = if (card.stoppedAt > 0) card.stoppedAt else clock
-    val left = (card.seconds - ((at - card.startedAt) / 1000).toInt()).coerceIn(0, card.seconds)
+    val left = (card.seconds - ((clock - card.startedAt) / 1000).toInt()).coerceIn(0, card.seconds)
     ActionCard(PrismIcons.Clock, "Timer", card.label.ifEmpty { null }) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(clockText(left), style = MaterialTheme.typography.displaySmall)
                 Text(
                     when {
-                        card.stoppedAt > 0 -> "Stopped"
                         left == 0 -> "Done"
                         else -> "of ${clockText(card.seconds)}"
                     },
@@ -526,9 +520,8 @@ private fun TimerView(card: TimerCard, act: CardAct) {
                 drawArc(fill, -90f, 360f * progress, false, Offset(inset, inset), Size(size.width - stroke, size.height - stroke), style = Stroke(stroke, cap = StrokeCap.Round))
             }
         }
-        if (card.stoppedAt == 0L && left > 0) Buttons {
-            CardButton(Icons.Rounded.Add, "1 min") { act(UiActions.ADD_MINUTE, mapOf("left" to left, "label" to card.label)) }
-            CardButton(Icons.Rounded.Close, "Stop") { act(UiActions.STOP_TIMER, mapOf("label" to card.label)) }
+        Buttons {
+            CardButton(PrismIcons.Clock, "Open in Clock") { act(UiActions.OPEN_TIMERS, mapOf("label" to card.label)) }
         }
     }
 }

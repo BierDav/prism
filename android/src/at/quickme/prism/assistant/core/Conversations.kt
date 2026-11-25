@@ -4,9 +4,9 @@
 // here: an entry names what was attached, and the harness replaces them in
 // the history by their names (Harness.encodeEach). Too long a text is cut,
 // longest first, until its row fits. A card or a surface the model composed
-// is its A2UI createSurface (Entry.Ui); one larger than a row goes as that
-// row and rows after it of A2UI messages that complete it (updateComponents,
-// updateDataModel), as a renderer would get them. Conversations stored with
+// is its A2UI createSurface (Entry.Ui); one larger than a row goes as the
+// entry with an empty surface and rows after it with the surface's JSON in
+// pieces, none cut (Conversations.uiRows). Conversations stored with
 // the typed cards from before open as surfaces (Transcript.migrated). No
 // Android here (android/tests).
 
@@ -44,66 +44,41 @@ object Conversations {
     const val PART_SEPARATOR = "~"
 
     /**
-     * Surface entry [e] as rows: one if it fits; otherwise its createSurface
-     * with the components that fit and an empty data model, then rows of
-     * messages that add the rest: the remaining components, and the data
-     * model a top-level key at a time (a long list an item at a time, a
-     * single item too large cut as [fit] cuts).
+     * Surface entry [e] as rows: one if it fits; otherwise the entry with an
+     * empty surface that says how many rows follow (Entry.Ui.parts), then
+     * the surface's JSON in pieces, each row measured whole. Nothing is cut:
+     * the pieces joined are the surface again.
      */
     fun uiRows(e: Entry.Ui): List<Pair<String, String>> {
-        val whole = json.encodeToJsonElement(Entry.serializer(), e)
-        if (whole.toString().encodeToByteArray().size <= ROW_BYTES) return listOf(e.id to whole.toString())
-        val s = e.surface
-        val messages = ArrayList<UiMessage>()
-        // The components: as many as fit in the first row, in order.
-        var kept = s.components
-        while (kept.isNotEmpty() && size(e.copy(surface = s.copy(components = kept, dataModel = JsonObject(emptyMap())))) > ROW_BYTES - 64) kept = kept.dropLast(1)
-        s.components.drop(kept.size).chunkedBy(ROW_BYTES / 2) { size(JsonArray(listOf(it))) }.forEach { messages += UiMessage.UpdateComponents(s.surfaceId, it) }
-        for ((key, value) in s.dataModel) {
-            val path = "/" + key.replace("~", "~0").replace("/", "~1")
-            val one = UiMessage.UpdateDataModel(s.surfaceId, path, value)
-            if (size(UiMessage.encode(one)) <= PART_BYTES) { messages += one; continue }
-            if (value is JsonArray) {
-                messages += UiMessage.UpdateDataModel(s.surfaceId, path, JsonArray(emptyList()))
-                for (item in value) messages += UiMessage.UpdateDataModel(s.surfaceId, "$path/-", fitted(item, PART_BYTES - 200))
-            } else messages += UiMessage.UpdateDataModel(s.surfaceId, path, fitted(value, PART_BYTES - 200))
+        val whole = json.encodeToJsonElement(Entry.serializer(), e).toString()
+        if (whole.encodeToByteArray().size <= ROW_BYTES) return listOf(e.id to whole)
+        val text = json.encodeToString(Surface.serializer(), e.surface)
+        fun part(i: Int, chunk: String): String {
+            val id = e.id + PART_SEPARATOR + i
+            return JsonObject(mapOf("type" to JsonPrimitive(PART), "id" to JsonPrimitive(id), "of" to JsonPrimitive(e.id), "chunk" to JsonPrimitive(chunk))).toString()
         }
-        val first = e.id to json.encodeToJsonElement(Entry.serializer(), e.copy(surface = s.copy(components = kept, dataModel = JsonObject(emptyMap())))).toString()
-        val parts = messages.chunkedBy(PART_BYTES) { size(UiMessage.encode(it)) + 1 }.mapIndexed { i, chunk ->
-            val id = e.id + PART_SEPARATOR + (i + 1)
-            id to JsonObject(
-                mapOf(
-                    "type" to JsonPrimitive(PART),
-                    "id" to JsonPrimitive(id),
-                    "of" to JsonPrimitive(e.id),
-                    "messages" to JsonArray(chunk.map { UiMessage.encode(it) }),
-                ),
-            ).toString()
+        val chunks = ArrayList<String>()
+        var at = 0
+        while (at < text.length) {
+            // The frame with an empty chunk, then whole code points while the row stays in [ROW_BYTES].
+            var room = ROW_BYTES - part(chunks.size + 1, "").encodeToByteArray().size
+            var end = at
+            while (end < text.length) {
+                val next = end + Character.charCount(text.codePointAt(end))
+                val cost = JsonPrimitive(text.substring(end, next)).toString().encodeToByteArray().size - 2
+                if (cost > room) break
+                room -= cost
+                end = next
+            }
+            check(end > at) { "a surface's row has no room" }
+            chunks += text.substring(at, end)
+            at = end
         }
-        return listOf(first) + parts
-    }
-
-    /** What a part row's messages may take, leaving room for its frame. */
-    private const val PART_BYTES = ROW_BYTES - 256
-
-    private fun size(e: Entry.Ui) = json.encodeToJsonElement(Entry.serializer(), e).toString().encodeToByteArray().size
-    private fun size(e: JsonElement) = e.toString().encodeToByteArray().size
-
-    private fun fitted(e: JsonElement, max: Int): JsonElement = Json.parseToJsonElement(fit(e, max))
-
-    /** Consecutive runs of at most [max] by [size] (one item more than that alone in its run). */
-    private fun <T> List<T>.chunkedBy(max: Int, size: (T) -> Int): List<List<T>> {
-        val out = ArrayList<List<T>>()
-        var run = ArrayList<T>()
-        var total = 0
-        for (x in this) {
-            val n = size(x)
-            if (run.isNotEmpty() && total + n > max) { out += run; run = ArrayList(); total = 0 }
-            run += x
-            total += n
-        }
-        if (run.isNotEmpty()) out += run
-        return out
+        val stub = e.copy(surface = Surface(e.surface.surfaceId, e.surface.catalogId, emptyList(), JsonObject(emptyMap()), e.surface.sendDataModel), parts = chunks.size)
+        val rows = listOf(e.id to json.encodeToJsonElement(Entry.serializer(), stub).toString()) +
+            chunks.mapIndexed { i, c -> (e.id + PART_SEPARATOR + (i + 1)) to part(i + 1, c) }
+        check(rows.all { it.second.encodeToByteArray().size <= ROW_BYTES }) { "a surface's row is too large" }
+        return rows
     }
 
     /**
@@ -113,20 +88,22 @@ object Conversations {
      * and new entries get IDs no stored one has.
      */
     fun transcript(rows: List<Pair<String, String>>): Transcript {
-        val parts = LinkedHashMap<String, MutableList<UiMessage>>()
+        val parts = HashMap<String, MutableMap<Int, String>>()
         val entries = rows.mapNotNull { (_, body) ->
             val o = runCatching { Json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return@mapNotNull null
             if (o.str("type") == PART) {
                 val of = o.str("of") ?: return@mapNotNull null
-                (o["messages"] as? JsonArray).orEmpty().forEach { m ->
-                    runCatching { UiMessage.parse(m) }.getOrNull()?.let { parts.getOrPut(of) { ArrayList() } += it }
-                }
+                val i = o.str("id")?.substringAfterLast(PART_SEPARATOR)?.toIntOrNull() ?: return@mapNotNull null
+                o.str("chunk")?.let { parts.getOrPut(of) { HashMap() }[i] = it }
                 null
             } else runCatching { json.decodeFromJsonElement(Entry.serializer(), o) }.getOrNull()
         }
+        // A split surface is whole again when all its pieces are there; otherwise it stays empty.
         val whole = entries.map { e ->
-            val more = parts[e.id]
-            if (e is Entry.Ui && more != null) e.copy(surface = more.fold(e.surface) { s, m -> runCatching { s.after(m) }.getOrDefault(s) }) else e
+            if (e !is Entry.Ui || e.parts == 0) return@map e
+            val pieces = parts[e.id]?.takeIf { p -> (1..e.parts).all { it in p } } ?: return@map e
+            val text = (1..e.parts).joinToString("") { pieces.getValue(it) }
+            runCatching { json.decodeFromString(Surface.serializer(), text) }.getOrNull()?.let { e.copy(surface = it, parts = 0) } ?: e
         }
         return Transcript(whole, next = rows.size).migrated().settled()
     }

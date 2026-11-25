@@ -28,8 +28,7 @@ import android.provider.CalendarContract
 import at.quickme.prism.PrismApi
 import at.quickme.prism.Settings
 import at.quickme.prism.T3Activity
-import at.quickme.prism.assistant.core.AlarmCard
-import at.quickme.prism.assistant.core.TimerCard
+import at.quickme.prism.assistant.a2ui.SurfaceHost
 import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.UiAction
 import at.quickme.prism.assistant.core.UiActions
@@ -74,6 +73,9 @@ class AssistantSession(
     resume: Boolean = true,
 ) {
     private val app = context.applicationContext
+
+    /** The renderer of this conversation's surfaces, shared by the screens showing it (a form's unsent values stay). */
+    val surfaces by lazy { SurfaceHost(app) }
     private val memory = AssistantMemory(app)
     /** The screen the phone's tools act from, and how they see the screen ([attach]). */
     private var context: Context = context
@@ -120,7 +122,7 @@ class AssistantSession(
         val m = matrix.also { matrixClient = it }
         return Harness(
             Gateway(Settings.assistantUrl(app), Settings.assistantApiKey(app), Settings.assistantModel(app), Settings.deviceName(app)),
-            tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app) + uiTools { id -> transcript.surface(id)?.surface },
+            tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app) + uiTools({ id -> transcript.modelSurface(id) }, { id -> transcript.surface(id)?.trusted == true }),
             systemPrompt = {
                 SystemPrompt.build(
                     SystemPrompt.Context(
@@ -267,7 +269,7 @@ class AssistantSession(
             transcript = transcript.withSurface(entryId, entry.surface.copy(dataModel = data))
             save()
         }
-        return when (val r = UiActions.route(entry.surface, action)) {
+        return when (val r = UiActions.route(entry.surface, action, entry.trusted)) {
             is UiActions.Route.Turn -> {
                 if (running) return "Prism is still answering; try again in a moment."
                 if (!configured) return "The assistant isn't set up on this phone."
@@ -312,38 +314,15 @@ class AssistantSession(
                     }
                     null
                 }
-                UiActions.SNOOZE, UiActions.DISMISS -> {
-                    val card = transcript.card(entryId) as? AlarmCard ?: return "That alarm is gone."
-                    val intent = if (r.name == UiActions.SNOOZE) Intent(AlarmClock.ACTION_SNOOZE_ALARM)
-                    else Intent(AlarmClock.ACTION_DISMISS_ALARM)
-                        .putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_TIME)
-                        .putExtra(AlarmClock.EXTRA_HOUR, card.hour)
-                        .putExtra(AlarmClock.EXTRA_MINUTES, card.minute)
-                    context.launch(intent)
+                // No app API names one alarm or timer and confirms the change
+                // (ACTION_DISMISS_TIMER and the like act on whichever rings),
+                // so the card opens Clock and records nothing as done.
+                UiActions.OPEN_ALARMS, UiActions.OPEN_TIMERS -> {
+                    val alarms = r.name == UiActions.OPEN_ALARMS
+                    context.launch(Intent(if (alarms) AlarmClock.ACTION_SHOW_ALARMS else AlarmClock.ACTION_SHOW_TIMERS))
                     if (conversationId == mine) {
-                        transcript = transcript.withCard(entryId, card.copy(state = if (r.name == UiActions.SNOOZE) AlarmCard.SNOOZED else AlarmCard.DISMISSED))
-                        notes.add(UiActions.note(r.copy(card = card)))
-                        save()
-                    }
-                    null
-                }
-                UiActions.STOP_TIMER, UiActions.ADD_MINUTE -> {
-                    val card = transcript.card(entryId) as? TimerCard ?: return "That timer is gone."
-                    val now = System.currentTimeMillis()
-                    val left = (card.seconds - ((now - card.startedAt) / 1000).toInt()).coerceAtLeast(0)
-                    context.launch(Intent(AlarmClock.ACTION_DISMISS_TIMER))
-                    val next = if (r.name == UiActions.STOP_TIMER) card.copy(stoppedAt = now) else {
-                        val seconds = left + 60
-                        val set = Intent(AlarmClock.ACTION_SET_TIMER)
-                            .putExtra(AlarmClock.EXTRA_LENGTH, seconds)
-                            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-                        if (card.label.isNotEmpty()) set.putExtra(AlarmClock.EXTRA_MESSAGE, card.label)
-                        context.launch(set)
-                        card.copy(seconds = seconds, startedAt = now)
-                    }
-                    if (conversationId == mine) {
-                        transcript = transcript.withCard(entryId, next)
-                        notes.add(UiActions.note(r.copy(card = card)))
+                        transcript = transcript.did(if (alarms) Tools.ALARM else Tools.TIMER, if (alarms) "Opened the alarms in Clock" else "Opened the timers in Clock")
+                        notes.add(UiActions.note(r.copy(card = r.card ?: transcript.card(entryId))))
                         save()
                     }
                     null
