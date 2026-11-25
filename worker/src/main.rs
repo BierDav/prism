@@ -1,7 +1,7 @@
 use prism_worker::http::{self, AppState, router};
 use prism_worker::rocky_route::{RockyRoute, valid_node};
 use prism_worker::{auth, config, leader, lease, provision, t3};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -77,6 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     // Phase 2 & 3: alerts, approvals, questions, agents, machines. The leader
     // (a Kubernetes Lease, or always outside a cluster) runs once-only work.
+    tokio::spawn(prism_worker::rocky_status::watch(
+        Arc::clone(&client),
+        PathBuf::from(&data_dir),
+    ));
     let cfg = Arc::new(config::Config::load_from_env()?);
     let leader = start_leader(&client, Arc::clone(&cfg), &route.node)?;
     let app = router(

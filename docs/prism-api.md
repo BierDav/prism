@@ -588,7 +588,11 @@ the T3 host sync endpoint (`POST /v1/placement/sync` on the machine event API).
 - `PUT /v1/placement/order` `{"ids": […]}` orders the profiles.
 - `PUT /v1/placement/alert-fix-profile` `{"profile": "coding"}` sets the
   profile alert fixes start on.
-- `PUT /v1/placement/policy` updates the placement policy.
+- `PUT /v1/placement/policy` updates the placement policy (not its
+  `accountLimits`).
+- `PUT /v1/placement/account-limits/{account}` `{"sessionPercent": 70,
+  "weeklyPercent": 90, "until": "2026-11-28T08:00:00Z"}` sets an account's
+  temporary limit (`docs/placement.md`); `DELETE` removes it.
 
 Each mutation returns the same object as `GET /v1/placement` and publishes
 `placement.changed`.

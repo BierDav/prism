@@ -166,6 +166,22 @@ pending` otherwise. Stopping an agent is an `agent_messages` row of `kind`
 `approval:<sha256(device:approval:message:signature)>`, so the same signed
 answer is one request.
 
+## Rocky's own status
+
+Every worker logs Rocky's status for its replica once a minute when it
+changed, and at least hourly (`worker/src/rocky_status.rs`): Rocky's alerts
+(a due seal it skipped and why, an unreachable coordinator, a stalled
+finality pass), what blocks reads, the coordination mode, and the size of
+the replica's files:
+
+```
+prism-worker: rocky status: alerts [...], blockers [...], coordination "not_configured"; replica 912 MiB
+```
+
+Rocky reports these only through its status, and a replica that never
+sealed went unnoticed until its history passed a gigabyte and transactions
+timed out.
+
 ## Workers scaling out
 
 Placement ranking is a pure function of the replicated rows, so any worker
@@ -272,6 +288,9 @@ HMAC-SHA256(event key, "prism-admin-v1")>`, which `prism` derives from
   revoked}`: a `prism_` device token, of which only the SHA-256 is kept
   (`settings` row `device.token.<device>`). Tokens the Go server minted are
   in PostgreSQL and don't carry over: mint new ones.
+- `PUT|DELETE /v1/placement/account-limits/{account}` → `{account, limit}`:
+  an account's temporary placement limit (`prism account-limit`,
+  `docs/placement.md`).
 
 Every other `/v1/*` route the phone and Mac use today becomes a read or a
 request row.
@@ -281,7 +300,7 @@ request row.
 | | Rust |
 | --- | --- |
 | `prism run`, `report`, `ping`, `token`, `register-t3`, `register-t3-devices`, the Mac app's subcommands | `prism` (`cli/`), packages.<system>.prism |
-| `prism pair`, `machines`, `device-token`, `device-revoke` | `prism` in a worker pod, over the admin routes above |
+| `prism pair`, `machines`, `device-token`, `device-revoke`, `account-limit` | `prism` in a worker pod, over the admin routes above |
 | The server | `prism-worker` (`worker/`), the image's entrypoint |
 
 ## ntfy
@@ -455,12 +474,12 @@ Beyond the network settings above:
 
 | Variable | Use |
 | --- | --- |
-| `PRISM_CONFIG` | The config file (default `/config/config.json`; without it and without the file, defaults). The worker reads `push`, `cluster_machine`, `machines`, `ssh_runners`, `ssh_user`, `t3_url`, `t3_workspace`, `machine_instructions`, `alertmanager_url`, `reconcile_grace_seconds`, `reconcile_uptime_seconds`, `netbird_domain`, `t3_web_port`, `metrics_url`, `metrics_user`, `telemetry_url`, `telemetry_user`, `placement_log_url`, `text_generation`, `android_publishers` and `devices`. |
+| `PRISM_CONFIG` | The config file (default `/config/config.json`; without it and without the file, defaults). The worker reads `push`, `cluster_machine`, `machines`, `ssh_runners`, `ssh_user`, `t3_url`, `t3_workspace`, `machine_instructions`, `alertmanager_url`, `reconcile_grace_seconds`, `reconcile_uptime_seconds`, `netbird_domain`, `t3_web_port`, `metrics_url`, `metrics_user`, `telemetry_url`, `telemetry_user`, `placement_log_url`, `usage_url`, `text_generation`, `android_publishers` and `devices`. |
 | `PRISM_EVENT_KEY(_FILE)` | The key machine tokens and the admin token derive from. `prism` in the pod reads it too. |
 | `T3_ACCESS_TOKEN(_FILE)` | Prism's session with the cluster machine's T3 (or the secret its `t3_token` names). |
 | `PRISM_PUSH_TOKEN(_FILE)` | ntfy's publish token. |
 | `PRISM_ALERTS_TOKEN(_FILE)` | Optional: the bearer token Alertmanager's webhook must carry. |
-| `PRISM_METRICS_PASSWORD(_FILE)` | Password for ClickHouse PromQL basic auth (`metrics_user`). |
+| `PRISM_METRICS_PASSWORD(_FILE)` | Password of `metrics_user` (ClickHouse's `telemetry_reader`), for host metrics (PromQL, `metrics_url`) and the accounts' usage (`usage_url`, which needs `SELECT` on `ai_usage.account_limits`). |
 | `PRISM_TEXT_GENERATION_KEY(_FILE)` | API key for OpenAI-compatible text generation (magic picks). |
 | `PRISM_TELEMETRY_PASSWORD(_FILE)` | The phone's telemetry password (`telemetry_user`, default `prism_phone`): what `POST /v1/telemetry/write` checks and sends on to `telemetry_url`, and what the workers write their placement decisions with (`placement_log_url`, `docs/placement.md`). |
 | `PRISM_LEADER_LEASE` | The Lease's name (default `prism-worker-leader`). |

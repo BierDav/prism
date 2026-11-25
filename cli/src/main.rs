@@ -44,12 +44,18 @@ const USAGE: &str = r#"Usage:
       Mint a Prism API token for a device (replacing its earlier one).
   prism device-revoke <device>
       Revoke a device's Prism API token.
+  prism account-limit <account> [--session N] [--weekly N] [--until TIME]
+  prism account-limit <account> --clear
+      Limit how much of an account's session and weekly windows placement
+      uses (percent used, 1-100), until TIME (RFC 3339) or until cleared.
+      "Stop with 30% of the session left" is --session 70.
 
 Settings come from /etc/prism/client.json ({"url": …, "token_file": …}),
 or PRISM_CLIENT_CONFIG, PRISM_URL, PRISM_TOKEN and PRISM_TOKEN_FILE.
 Severity is info, warning (default) or critical.
 
-pair, machines, device-token and device-revoke need PRISM_EVENT_KEY (or
+pair, machines, device-token, device-revoke and account-limit need
+PRISM_EVENT_KEY (or
 PRISM_EVENT_KEY_FILE): run them in a prism-worker pod. They call the worker
 at PRISM_URL, default http://127.0.0.1:8080.
 
@@ -156,6 +162,13 @@ fn dispatch(argv: &[String], env: Env) -> i32 {
         "machines" => match machines_command(env) {
             Ok(text) => {
                 println!("{text}");
+                0
+            }
+            Err(err) => fail(err),
+        },
+        "account-limit" => match account_limit_command(args, env) {
+            Ok(line) => {
+                println!("{line}");
                 0
             }
             Err(err) => fail(err),
@@ -365,6 +378,53 @@ fn device_command(command: &str, device: &str, env: Env) -> Result<String, Strin
     }
     let out = client.json("POST", &path, None)?;
     Ok(text(&out, "token"))
+}
+
+/// `prism account-limit <account> [--session N] [--weekly N] [--until T] | --clear`.
+fn account_limit_command(args: &[String], env: Env) -> Result<String, String> {
+    const USE: &str =
+        "usage: prism account-limit <account> [--session N] [--weekly N] [--until TIME] | --clear";
+    let (account, flags) = args.split_first().ok_or(USE)?;
+    let mut body = serde_json::Map::new();
+    let mut clear = false;
+    let mut it = flags.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match flag.as_str() {
+            "--clear" => clear = true,
+            "--session" | "--weekly" => {
+                let v = value()?;
+                let n: f64 = v
+                    .parse()
+                    .map_err(|_| format!("{flag}: not a number: {v}"))?;
+                let key = if flag == "--session" {
+                    "sessionPercent"
+                } else {
+                    "weeklyPercent"
+                };
+                body.insert(key.into(), serde_json::json!(n));
+            }
+            "--until" => {
+                body.insert("until".into(), Value::String(value()?));
+            }
+            _ => return Err(USE.into()),
+        }
+    }
+    if clear == !body.is_empty() {
+        return Err(USE.into());
+    }
+    let client = Client::admin_from_env(env)?;
+    let path = format!("/v1/placement/account-limits/{}", url_segment(account));
+    if clear {
+        client.json("DELETE", &path, None)?;
+        return Ok(format!("{account}: limit removed"));
+    }
+    let out = client.json("PUT", &path, Some(&Value::Object(body)))?;
+    Ok(format!("{account}: {}", out["limit"]))
 }
 
 /// Percent-encodes a path segment, so any device name reaches the worker,

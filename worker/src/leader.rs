@@ -361,14 +361,19 @@ impl LeaderWork {
     }
 
     async fn lead_weekly_activations(&self) {
+        let Some(source) = crate::usage::UsageSource::from_config(&self.cfg, &self.secrets) else {
+            return;
+        };
         let mut ticker = tokio::time::interval(crate::activate::ACTIVATE_EVERY);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let usage = source.current().await;
             if let Err(err) = crate::activate::activate_weekly_windows(
                 &self.client,
                 &self.cfg,
                 &self.secrets,
+                &usage,
                 (self.now)(),
             )
             .await

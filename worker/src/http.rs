@@ -46,6 +46,8 @@ pub struct AppState {
     pub eligible: watch::Receiver<Eligibility>,
     /// Where placement decisions are written, when configured.
     pub placement_log: Option<Arc<crate::placement_log::PlacementLog>>,
+    /// Where placement reads the accounts' usage, when configured.
+    pub usage: Option<Arc<crate::usage::UsageSource>>,
 }
 
 pub type PeerHttp = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -65,6 +67,7 @@ impl AppState {
             secrets: Arc::new(crate::auth::secret),
             eligible: watch::channel(Eligibility::Ready).1,
             placement_log: None,
+            usage: None,
         }
     }
 
@@ -92,6 +95,7 @@ impl AppState {
     pub fn with_config(mut self, cfg: Arc<Config>) -> Self {
         self.placement_log =
             crate::placement_log::PlacementLog::from_config(&cfg, &self.secrets, &self.node);
+        self.usage = crate::usage::UsageSource::from_config(&cfg, &self.secrets);
         self.cfg = cfg;
         self
     }
@@ -156,6 +160,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/devices/{device}/token",
             post(crate::admin::post_device_token).delete(crate::admin::delete_device_token),
+        )
+        .route(
+            "/v1/placement/account-limits/{account}",
+            put(crate::admin::put_account_limit).delete(crate::admin::delete_account_limit),
         )
         .with_state(state)
 }
@@ -268,7 +276,15 @@ async fn placement_sync(
 
     let now = (state.now_fn)();
     let (threads, models) = (req.threads.len(), req.models.len());
-    match state.client.sync_placement(machine.clone(), req, now).await {
+    let usage = match &state.usage {
+        Some(source) => source.current().await,
+        None => Arc::default(),
+    };
+    match state
+        .client
+        .sync_placement_with_usage(machine.clone(), req, now, &usage)
+        .await
+    {
         Ok(resp) => {
             if let Some(log) = &state.placement_log {
                 log.record_sync(&machine, now, &resp);

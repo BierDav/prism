@@ -120,6 +120,11 @@ pub struct Config {
     /// with the telemetry credential. Empty turns the log off.
     #[serde(default)]
     pub placement_log_url: String,
+    /// ClickHouse's HTTP interface, where placement reads every gateway
+    /// account's usage (`ai_usage.account_limits`, `usage.rs`) as
+    /// `metrics_user`. Empty: placement ranks with the hosts' own readings.
+    #[serde(default)]
+    pub usage_url: String,
     #[serde(default)]
     pub text_generation: TextGenerationConfig,
     #[serde(default)]

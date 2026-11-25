@@ -7,14 +7,15 @@ use crate::rank::{
 };
 use crate::schema::prism_schema;
 use crate::types::{
-    PLACEMENT_ROLES, PlacementActions, PlacementActiveHours, PlacementEntryDecision,
-    PlacementEntryInput, PlacementEntryRow, PlacementEntryView, PlacementHostModel, PlacementLoad,
-    PlacementModelReasoningView, PlacementModelView, PlacementMoveRow, PlacementMoveView,
-    PlacementPolicy, PlacementProfileRow, PlacementProfileView, PlacementSample,
-    PlacementSelection, PlacementSyncActions, PlacementSyncEntryResp, PlacementSyncModel,
-    PlacementSyncMoveResp, PlacementSyncProfileResp, PlacementSyncRequest, PlacementSyncResponse,
-    PlacementSyncThread, PlacementView, PlacementWindow, PrismError, PutPlacementEntryInput,
-    PutPlacementProfileRequest, SetPlacementActionsRequest,
+    PLACEMENT_ROLES, PlacementAccountLimit, PlacementActions, PlacementActiveHours,
+    PlacementEntryDecision, PlacementEntryInput, PlacementEntryRow, PlacementEntryView,
+    PlacementHostModel, PlacementLoad, PlacementModelReasoningView, PlacementModelView,
+    PlacementMoveRow, PlacementMoveView, PlacementPolicy, PlacementProfileRow,
+    PlacementProfileView, PlacementSample, PlacementSelection, PlacementSyncActions,
+    PlacementSyncEntryResp, PlacementSyncModel, PlacementSyncMoveResp, PlacementSyncProfileResp,
+    PlacementSyncRequest, PlacementSyncResponse, PlacementSyncThread, PlacementUsageReading,
+    PlacementUsageSnapshot, PlacementView, PlacementWindow, PrismError, PutPlacementEntryInput,
+    PutPlacementProfileRequest, SetPlacementActionsRequest, UsageByAccount,
 };
 use crate::weekly::{
     WeeklyActivation, WeeklyActivationState, WeeklyActivationStep, account_of,
@@ -35,10 +36,16 @@ enum First<'a> {
 const PLACEMENT_FRESH_REPORT_SECS: i64 = 3 * 60;
 /// How often an account with unchanged usage gets a new burn-rate sample.
 const PLACEMENT_SAMPLE_EVERY_SECS: i64 = 5 * 60;
-/// Samples deleted per transaction; see [`PrismClient::prune_samples`].
-const SAMPLE_PRUNE_BATCH: i64 = 200;
 const PLACEMENT_DAY_REPORT_SECS: i64 = 24 * 60 * 60;
 const PLACEMENT_MOVE_COOLDOWN_SECS: i64 = 2 * 60;
+/// How old a ClickHouse reading may be and still rank. The gateway reads each
+/// account every few minutes; past this, the host's own reading counts.
+pub const USAGE_FRESH_SECS: i64 = 20 * 60;
+/// How often the apps' usage snapshot may change unless an account ran out
+/// or came back: each change replicates everywhere.
+const USAGE_SNAPSHOT_EVERY_SECS: i64 = 5 * 60;
+/// The setting that holds the apps' [`PlacementUsageSnapshot`].
+const SETTING_PLACEMENT_USAGE: &str = "placement_usage";
 
 const ACTION_ALERT_FIX: &str = "alert-fix";
 const ACTION_TEXT_GENERATION: &str = "text-generation";
@@ -50,6 +57,9 @@ const POLICY_WEEKLY_MOVE_SLACK: &str = "weekly_move_slack_sessions";
 /// Per account, what [`PrismClient::due_weekly_activations`] keeps
 /// (`crate::weekly::WeeklyActivationState`), as `weekly_activation:<account>`.
 const POLICY_WEEKLY_ACTIVATION: &str = "weekly_activation:";
+/// Per account, its temporary limit (`PlacementAccountLimit`), as
+/// `account_limit:<account>`.
+const POLICY_ACCOUNT_LIMIT: &str = "account_limit:";
 
 /// How much synced history a replica keeps before it refuses writes and
 /// incoming frames ("storage queue is full"). Rocky prunes history only after
@@ -65,6 +75,10 @@ pub struct PrismClient {
     pub(crate) alerts_lock: tokio::sync::Mutex<()>,
     /// Serialises this process's machine event reports (`record_host_event`).
     pub(crate) events_lock: tokio::sync::Mutex<()>,
+    /// Burn-rate samples per model key, kept in memory only: every replicated
+    /// write grows Rocky's history, and each worker sees enough syncs to keep
+    /// its own over `PLACEMENT_BURN_WINDOW_SECS`.
+    samples: std::sync::Mutex<BTreeMap<String, Vec<PlacementSample>>>,
 }
 
 impl PrismClient {
@@ -138,6 +152,7 @@ impl PrismClient {
             db: opened.database,
             alerts_lock: tokio::sync::Mutex::new(()),
             events_lock: tokio::sync::Mutex::new(()),
+            samples: std::sync::Mutex::default(),
         })
     }
 
@@ -205,15 +220,43 @@ impl PrismClient {
         Ok(())
     }
 
-    /// Handles `POST /v1/placement/sync` from a T3 host. Retries while Rocky
-    /// refuses the write (`PrismError::Unavailable`).
+    /// Rocky's own view of this replica: its alerts (a seal it skipped, an
+    /// unreachable coordinator), what blocks reads, and how it coordinates.
+    pub async fn rocky_status(&self) -> Result<rocky_sdk::DatabaseStatus, PrismError> {
+        let session = self.db.session();
+        let status = session.status().await;
+        session.close().await;
+        status.map_err(storage_err)
+    }
+
+    /// Handles `POST /v1/placement/sync` from a T3 host with the host's own
+    /// usage readings ([`PrismClient::sync_placement_with_usage`] with none
+    /// from ClickHouse).
     pub async fn sync_placement(
         &self,
         machine: String,
         req: PlacementSyncRequest,
         now_unix: i64,
     ) -> Result<PlacementSyncResponse, PrismError> {
-        retry_unavailable(|| self.sync_placement_once(machine.clone(), req.clone(), now_unix)).await
+        self.sync_placement_with_usage(machine, req, now_unix, &UsageByAccount::new())
+            .await
+    }
+
+    /// Handles `POST /v1/placement/sync` from a T3 host. A model whose account
+    /// `usage` knows (read from ClickHouse within [`USAGE_FRESH_SECS`]) ranks
+    /// with those windows; any other with the host's reading. Retries while
+    /// Rocky refuses the write (`PrismError::Unavailable`).
+    pub async fn sync_placement_with_usage(
+        &self,
+        machine: String,
+        req: PlacementSyncRequest,
+        now_unix: i64,
+        usage: &UsageByAccount,
+    ) -> Result<PlacementSyncResponse, PrismError> {
+        retry_unavailable(|| {
+            self.sync_placement_once(machine.clone(), req.clone(), now_unix, usage)
+        })
+        .await
     }
 
     async fn sync_placement_once(
@@ -221,13 +264,28 @@ impl PrismClient {
         machine: String,
         req: PlacementSyncRequest,
         now_unix: i64,
+        usage: &UsageByAccount,
     ) -> Result<PlacementSyncResponse, PrismError> {
         let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
 
         // 1. Record move acknowledgements and store this host's report + threads.
         // Acknowledgements are their own rows keyed by move id, so they count even
         // when the move row has not replicated to this worker yet.
-        let models_json = serde_json::to_string(&req.models).map_err(storage_err)?;
+        // The report keeps the host's catalog without its usage readings:
+        // usage changes all the time, and every stored change replicates to
+        // every worker, phone and Mac and stays in Rocky's history. Ranking
+        // reads usage from ClickHouse (or this request), the apps from the
+        // `placement_usage` setting.
+        let catalog: Vec<PlacementSyncModel> = req
+            .models
+            .iter()
+            .map(|m| PlacementSyncModel {
+                session: None,
+                weekly: None,
+                ..m.clone()
+            })
+            .collect();
+        let models_json = serde_json::to_string(&catalog).map_err(storage_err)?;
         let acks: Vec<&crate::types::PlacementMoveAck> = req
             .moves
             .iter()
@@ -298,7 +356,8 @@ impl PrismClient {
             }
             tx.commit().await.map_err(storage_err)?;
         }
-        self.after_report(machine, req, now_unix, now_time).await
+        self.after_report(machine, req, now_unix, now_time, usage)
+            .await
     }
 
     /// Replaces this host's `hosts` row and its `threads` rows.
@@ -366,6 +425,7 @@ impl PrismClient {
         req: PlacementSyncRequest,
         now_unix: i64,
         now_time: DateTime<Utc>,
+        usage: &UsageByAccount,
     ) -> Result<PlacementSyncResponse, PrismError> {
         // 2. Load fresh reports (< 3m) for fleet-wide running counts and optionId fallbacks.
         let fresh_since = now_unix - PLACEMENT_FRESH_REPORT_SECS;
@@ -398,81 +458,34 @@ impl PrismClient {
             {
                 option_ids.insert(k.clone(), r.option_id.clone());
             }
+            let (session, weekly) = usage_readings(m, usage, now_unix);
             host_models.insert(
                 k,
                 PlacementHostModel {
                     blocked: m.blocked.clone(),
-                    session: m.session.clone(),
-                    weekly: m.weekly.clone(),
+                    session,
+                    weekly,
                 },
             );
         }
 
-        // 3. Record session samples for burn rate.
-        let prune_before = now_unix - PLACEMENT_BURN_WINDOW_SECS;
-        // Every host reports every account each 30 seconds; a new sample is
-        // kept only when the usage moved or the last one is
-        // PLACEMENT_SAMPLE_EVERY_SECS old, which is plenty for a burn rate
-        // over PLACEMENT_BURN_WINDOW_SECS and keeps the replicas quiet.
-        let existing_samples = self.samples_since(prune_before).await?;
-        let mut recorded_accounts: BTreeSet<String> = BTreeSet::new();
-        let mut samples_to_write: Vec<PlacementSample> = Vec::new();
+        // 3. Record session samples for burn rate, in memory. Every host
+        // reports every account each 30 seconds; a new sample is kept only
+        // when the usage moved or the last one is PLACEMENT_SAMPLE_EVERY_SECS
+        // old, which is plenty for a burn rate over PLACEMENT_BURN_WINDOW_SECS.
+        let mut sessions: Vec<(String, PlacementWindow)> = Vec::new();
         for m in &req.models {
-            if m.session.is_none() || recorded_accounts.contains(&m.model) {
-                continue;
-            }
-            let Some(live) = live_used(m.session.as_ref(), now_time) else {
-                continue;
-            };
-            recorded_accounts.insert(m.model.clone());
-            let running = *running_by_account.get(&m.model).unwrap_or(&0);
-            if let Some(last) = existing_samples.get(&m.model).and_then(|s| s.last())
-                && now_unix - last.at < PLACEMENT_SAMPLE_EVERY_SECS
-                && (last.used - live.used_percent).abs() < 0.05
-                && last.running == running
+            let k = model_key(&m.instance_id, &m.model);
+            if let Some(live) = host_models
+                .get(&k)
+                .and_then(|h| live_used(h.session.as_ref(), now_time))
             {
-                continue;
+                sessions.push((m.model.clone(), live));
             }
-            samples_to_write.push(PlacementSample {
-                account: m.model.clone(),
-                at: now_unix,
-                used: live.used_percent,
-                running,
-            });
         }
-        if !samples_to_write.is_empty() {
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            for sample in &samples_to_write {
-                tx.execute(
-                    "DELETE FROM samples WHERE account = ? AND at = ?",
-                    params![sample.account.clone(), sample.at],
-                )
-                .await
-                .map_err(storage_err)?;
-                let sid = tx.next_id("samples", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO samples (id, account, at, used, running) VALUES (?, ?, ?, ?, ?)",
-                    params![
-                        sid,
-                        sample.account.clone(),
-                        sample.at,
-                        f64_to_sql(sample.used)?,
-                        sample.running,
-                    ],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            tx.commit().await.map_err(storage_err)?;
-            self.prune_samples(prune_before).await?;
-        }
+        let samples_by_account = self.record_samples(&sessions, &running_by_account, now_unix);
 
         // 4. Compute burn rates per account key.
-        let samples_by_account = if samples_to_write.is_empty() {
-            existing_samples
-        } else {
-            self.samples_since(prune_before).await?
-        };
         let mut loads: BTreeMap<String, PlacementLoad> = BTreeMap::new();
         for (acct, count) in &running_by_account {
             loads.entry(acct.clone()).or_default().running = *count;
@@ -485,6 +498,11 @@ impl PrismClient {
                     .burn_per_thread_per_hour = Some(burn);
             }
         }
+        // Best effort: the apps' copy of these readings. A busy replica only
+        // delays it to a later sync.
+        let _ = self
+            .store_usage_snapshot(&host_models, &loads, now_unix)
+            .await;
 
         // 5. Rank all profiles for this host.
         let profiles = self.placement_profiles().await?;
@@ -781,17 +799,27 @@ impl PrismClient {
         }
         let mut models_map: BTreeMap<String, ModelAgg> = BTreeMap::new();
         let mut cluster_models: Option<BTreeMap<String, PlacementHostModel>> = None;
+        // Host reports carry no usage any more (reports stored before did);
+        // the workers keep the readings they rank with in the snapshot.
+        let snapshot = self.usage_snapshot().await?.unwrap_or_default();
 
         for host in &day_hosts {
             if host.name == cluster_machine && host.seen_at >= fresh_since {
                 let mut cm = BTreeMap::new();
                 for m in &host.models {
+                    let reading = snapshot
+                        .models
+                        .get(&format!("{}/{}", m.instance_id, m.model));
                     cm.insert(
                         model_key(&m.instance_id, &m.model),
                         PlacementHostModel {
                             blocked: m.blocked.clone(),
-                            session: m.session.clone(),
-                            weekly: m.weekly.clone(),
+                            session: reading
+                                .and_then(|r| r.session.clone())
+                                .or_else(|| m.session.clone()),
+                            weekly: reading
+                                .and_then(|r| r.weekly.clone())
+                                .or_else(|| m.weekly.clone()),
                         },
                     );
                 }
@@ -857,20 +885,15 @@ impl PrismClient {
                 .then_with(|| a.model.cmp(&b.model))
         });
 
-        let samples_by_account = self
-            .samples_since(now_unix - PLACEMENT_BURN_WINDOW_SECS)
-            .await?;
         let mut loads: BTreeMap<String, PlacementLoad> = BTreeMap::new();
         for (acct, count) in &running_by_account {
             loads.entry(acct.clone()).or_default().running = *count;
         }
-        for (acct, samples) in &samples_by_account {
-            if let Some(burn) = compute_burn_rate(samples, now_unix) {
-                loads
-                    .entry(acct.clone())
-                    .or_default()
-                    .burn_per_thread_per_hour = Some(burn);
-            }
+        for (acct, burn) in &snapshot.burn {
+            loads
+                .entry(acct.clone())
+                .or_default()
+                .burn_per_thread_per_hour = Some(*burn);
         }
 
         let profiles = self.placement_profiles().await?;
@@ -1494,16 +1517,76 @@ impl PrismClient {
         Ok(())
     }
 
+    /// Sets `account`'s temporary limit, or removes it with `None`. Each
+    /// percent is how much of the window placement lets the account use,
+    /// 1 to 100; `until` (RFC 3339, empty for no end) must lie ahead.
+    pub async fn set_account_limit(
+        &self,
+        account: &str,
+        limit: Option<PlacementAccountLimit>,
+        now_unix: i64,
+    ) -> Result<(), PrismError> {
+        if account.is_empty() || account.contains('/') {
+            return Err(PrismError::InvalidInput(
+                "Name a gateway account, like claude-alex.".into(),
+            ));
+        }
+        if let Some(limit) = &limit {
+            if limit.session_percent.is_none() && limit.weekly_percent.is_none() {
+                return Err(PrismError::InvalidInput(
+                    "Give sessionPercent, weeklyPercent or both.".into(),
+                ));
+            }
+            for p in [limit.session_percent, limit.weekly_percent]
+                .into_iter()
+                .flatten()
+            {
+                if !(1.0..=100.0).contains(&p) {
+                    return Err(PrismError::InvalidInput(
+                        "Limits are percents from 1 to 100.".into(),
+                    ));
+                }
+            }
+            if !limit.until.is_empty()
+                && !crate::rank::parse_placement_time(&limit.until)
+                    .is_some_and(|t| t.timestamp() > now_unix)
+            {
+                return Err(PrismError::InvalidInput(
+                    "until must be a time ahead, like 2026-11-28T08:00:00Z.".into(),
+                ));
+            }
+        }
+        let key = format!("{POLICY_ACCOUNT_LIMIT}{account}");
+        let mut tx = self.db.transaction().await.map_err(storage_err)?;
+        tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
+            .await
+            .map_err(storage_err)?;
+        if let Some(limit) = limit {
+            let value = serde_json::to_string(&limit).map_err(storage_err)?;
+            let id = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
+            tx.execute(
+                "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                params![id, key, value],
+            )
+            .await
+            .map_err(storage_err)?;
+        }
+        tx.commit().await.map_err(storage_err)?;
+        Ok(())
+    }
+
     /// The profile accounts whose weekly window ended and has not started
     /// again, for the leader to send each a very small prompt (`crate::weekly`).
-    /// An account counts when an enabled profile entry names it and a fresh
-    /// host report carries a weekly reading for it. Stores each running
+    /// An account counts when an enabled profile entry names it and `usage`
+    /// (ClickHouse) has a weekly reading for it within [`USAGE_FRESH_SECS`]:
+    /// pooled names (`agy-pro`) are no single account. Stores each running
     /// window's reset the first time it shows, and counts a prompt as sent
     /// when it returns the account, so a lost or failed prompt is tried again
     /// only after `WEEKLY_ACTIVATION_RETRY_SECS`.
     pub async fn due_weekly_activations(
         &self,
         now_unix: i64,
+        usage: &UsageByAccount,
     ) -> Result<Vec<WeeklyActivation>, PrismError> {
         let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
         // Each account with the models its enabled entries name, in profile order.
@@ -1520,17 +1603,6 @@ impl PrismClient {
         }
         if models_by_account.is_empty() {
             return Ok(Vec::new());
-        }
-        let mut readings: BTreeMap<String, Vec<PlacementWindow>> = BTreeMap::new();
-        for host in self
-            .hosts_since(now_unix - PLACEMENT_FRESH_REPORT_SECS)
-            .await?
-        {
-            for m in host.models {
-                if let Some(w) = m.weekly {
-                    readings.entry(m.model).or_default().push(w);
-                }
-            }
         }
 
         let mut states: BTreeMap<String, WeeklyActivationState> = BTreeMap::new();
@@ -1561,11 +1633,11 @@ impl PrismClient {
         let mut writes: Vec<(String, WeeklyActivationState)> = Vec::new();
         let mut due = Vec::new();
         for (account, models) in &models_by_account {
-            let account_readings: Vec<PlacementWindow> = models
-                .iter()
-                .filter_map(|m| readings.get(m))
-                .flatten()
-                .cloned()
+            let account_readings: Vec<PlacementWindow> = usage
+                .get(account)
+                .filter(|u| now_unix - u.observed_at <= USAGE_FRESH_SECS)
+                .and_then(|u| u.weekly.clone())
+                .into_iter()
                 .collect();
             let state = states.get(account).cloned().unwrap_or_default();
             match weekly_activation_step(&account_readings, &state, now_time) {
@@ -1647,36 +1719,6 @@ impl PrismClient {
         moves.reverse();
         moves.truncate(limit);
         Ok(moves)
-    }
-
-    /// Deletes samples older than `before`, at most [`SAMPLE_PRUNE_BATCH`] per
-    /// transaction: Rocky refuses a transaction with more than 256 statements
-    /// or 2048 synced rows, and samples pile up while writes fail.
-    async fn prune_samples(&self, before: i64) -> Result<(), PrismError> {
-        loop {
-            let mut rows = self
-                .db
-                .query(
-                    "SELECT id FROM samples WHERE at < ? LIMIT ?",
-                    params![before, SAMPLE_PRUNE_BATCH],
-                )
-                .await
-                .map_err(storage_err)?;
-            let mut ids = Vec::new();
-            while let Some(row) = rows.next().await.map_err(storage_err)? {
-                ids.push(row.get::<SqlValue>("id").map_err(storage_err)?);
-            }
-            if ids.is_empty() {
-                return Ok(());
-            }
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            for id in ids {
-                tx.execute("DELETE FROM samples WHERE id = ?", vec![id])
-                    .await
-                    .map_err(storage_err)?;
-            }
-            tx.commit().await.map_err(storage_err)?;
-        }
     }
 
     /// Reads move rows, keeps one row per instruction id (the smallest Rocky id),
@@ -1848,7 +1890,13 @@ impl PrismClient {
                         policy.active_hours = Some(ah);
                     }
                 }
-                _ => {}
+                _ => {
+                    if let Some(account) = key.strip_prefix(POLICY_ACCOUNT_LIMIT)
+                        && let Ok(limit) = serde_json::from_str::<PlacementAccountLimit>(&value)
+                    {
+                        policy.account_limits.insert(account.to_string(), limit);
+                    }
+                }
             }
         }
         drop(rows);
@@ -2034,52 +2082,106 @@ impl PrismClient {
         Ok(out)
     }
 
-    /// Returns samples since `since` per account, sorted by time, keeping one
-    /// sample per (account, at): the one with the smallest Rocky id.
-    async fn samples_since(
+    /// Adds this sync's session readings to the in-memory samples and returns
+    /// every account's samples within `PLACEMENT_BURN_WINDOW_SECS`.
+    fn record_samples(
         &self,
-        since: i64,
-    ) -> Result<BTreeMap<String, Vec<PlacementSample>>, PrismError> {
-        let mut rows = self
-            .db
-            .query(
-                "SELECT id, account, at, used, running FROM samples WHERE at >= ?",
-                params![since],
-            )
-            .await
-            .map_err(storage_err)?;
-        let mut by_key: BTreeMap<(String, i64), (Vec<u8>, PlacementSample)> = BTreeMap::new();
-        while let Some(row) = rows.next().await.map_err(storage_err)? {
-            let id = id_bytes(&row.get::<SqlValue>("id").map_err(storage_err)?);
-            let account: String = row.get("account").map_err(storage_err)?;
-            let at: i64 = row.get("at").map_err(storage_err)?;
-            let used_val: SqlValue = row.get("used").map_err(storage_err)?;
-            let used = sql_to_opt_f64(&used_val).unwrap_or(0.0);
-            let running: i32 = row.get("running").map_err(storage_err)?;
-            let key = (account.clone(), at);
-            match by_key.get(&key) {
-                Some((kept, _)) if *kept <= id => {}
-                _ => {
-                    by_key.insert(
-                        key,
-                        (
-                            id,
-                            PlacementSample {
-                                account,
-                                at,
-                                used,
-                                running,
-                            },
-                        ),
-                    );
-                }
+        sessions: &[(String, PlacementWindow)],
+        running_by_account: &BTreeMap<String, i32>,
+        now_unix: i64,
+    ) -> BTreeMap<String, Vec<PlacementSample>> {
+        let mut samples = self
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut recorded: BTreeSet<&str> = BTreeSet::new();
+        for (model, live) in sessions {
+            if !recorded.insert(model) {
+                continue;
+            }
+            let running = *running_by_account.get(model).unwrap_or(&0);
+            let kept = samples.entry(model.clone()).or_default();
+            if let Some(last) = kept.last()
+                && (last.at >= now_unix
+                    || now_unix - last.at < PLACEMENT_SAMPLE_EVERY_SECS
+                        && (last.used - live.used_percent).abs() < 0.05
+                        && last.running == running)
+            {
+                continue;
+            }
+            kept.push(PlacementSample {
+                account: model.clone(),
+                at: now_unix,
+                used: live.used_percent,
+                running,
+            });
+        }
+        let since = now_unix - PLACEMENT_BURN_WINDOW_SECS;
+        samples.retain(|_, kept| {
+            kept.retain(|s| s.at >= since);
+            !kept.is_empty()
+        });
+        samples.clone()
+    }
+
+    /// The readings and burn rates the workers ranked with last, for the apps.
+    pub async fn usage_snapshot(&self) -> Result<Option<PlacementUsageSnapshot>, PrismError> {
+        Ok(self
+            .get_setting(SETTING_PLACEMENT_USAGE)
+            .await?
+            .and_then(|raw| serde_json::from_str(&raw).ok()))
+    }
+
+    /// Merges this sync's readings (whole percents) and this worker's burn
+    /// rates into the apps' snapshot. Writes only when something changed, and
+    /// then at most every `USAGE_SNAPSHOT_EVERY_SECS` unless a window ran out
+    /// or came back, which changes what the apps should show at once.
+    async fn store_usage_snapshot(
+        &self,
+        host_models: &BTreeMap<String, PlacementHostModel>,
+        loads: &BTreeMap<String, PlacementLoad>,
+        now_unix: i64,
+    ) -> Result<(), PrismError> {
+        let old = self.usage_snapshot().await?.unwrap_or_default();
+        let mut next = old.clone();
+        for (k, h) in host_models {
+            if h.session.is_some() || h.weekly.is_some() {
+                next.models.insert(
+                    k.replace('\0', "/"),
+                    PlacementUsageReading {
+                        session: h.session.as_ref().map(whole_percent),
+                        weekly: h.weekly.as_ref().map(whole_percent),
+                    },
+                );
             }
         }
-        let mut out: BTreeMap<String, Vec<PlacementSample>> = BTreeMap::new();
-        for ((account, _), (_, sample)) in by_key {
-            out.entry(account).or_default().push(sample);
+        next.burn = loads
+            .iter()
+            .filter_map(|(acct, load)| {
+                let burn = load.burn_per_thread_per_hour?;
+                Some((acct.clone(), (burn * 10.0).round() / 10.0))
+            })
+            .collect();
+        if next == old {
+            return Ok(());
         }
-        Ok(out)
+        let full = |r: Option<&PlacementUsageReading>| {
+            r.map(|r| {
+                [&r.session, &r.weekly].map(|w| w.as_ref().is_some_and(|w| w.used_percent >= 100.0))
+            })
+            .unwrap_or_default()
+        };
+        let ran_out_or_back = next
+            .models
+            .iter()
+            .any(|(k, r)| full(Some(r)) != full(old.models.get(k)));
+        if !ran_out_or_back && now_unix - old.at < USAGE_SNAPSHOT_EVERY_SECS {
+            return Ok(());
+        }
+        next.at = now_unix;
+        let raw = serde_json::to_string(&next).map_err(storage_err)?;
+        self.set_setting(SETTING_PLACEMENT_USAGE, &raw, now_unix)
+            .await
     }
 }
 
@@ -2114,6 +2216,34 @@ struct StoredReport {
     environment_id: String,
     models_json: String,
     threads: Vec<StoredThread>,
+}
+
+/// A model's session and weekly windows: its account's from ClickHouse when
+/// `usage` read them within [`USAGE_FRESH_SECS`], else the host's.
+fn usage_readings(
+    m: &PlacementSyncModel,
+    usage: &UsageByAccount,
+    now_unix: i64,
+) -> (Option<PlacementWindow>, Option<PlacementWindow>) {
+    match usage
+        .get(account_of(&m.model))
+        .filter(|u| now_unix - u.observed_at <= USAGE_FRESH_SECS)
+    {
+        Some(u) => (
+            u.session.clone().or_else(|| m.session.clone()),
+            u.weekly.clone().or_else(|| m.weekly.clone()),
+        ),
+        None => (m.session.clone(), m.weekly.clone()),
+    }
+}
+
+/// A window rounded to whole percents, so the snapshot changes only when the
+/// apps would show a different number.
+fn whole_percent(w: &PlacementWindow) -> PlacementWindow {
+    PlacementWindow {
+        used_percent: w.used_percent.round(),
+        resets_at: w.resets_at.clone(),
+    }
 }
 
 fn same_threads(a: &[StoredThread], b: &[StoredThread]) -> bool {
@@ -2220,7 +2350,7 @@ pub fn is_valid_profile_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{PlacementMoveAck, PlacementWindow};
+    use crate::types::{AccountUsage, PlacementMoveAck, PlacementWindow};
 
     // 2026-11-21T18:00:00Z
     const NOW: i64 = 1_795_284_000;
@@ -2392,16 +2522,17 @@ mod tests {
         tx.commit().await.expect("commit");
     }
 
-    async fn insert_sample(client: &PrismClient, at: i64, used: f64) {
-        let mut tx = client.db.transaction().await.expect("tx");
-        let sid = tx.next_id("samples", vec![]).await.expect("id");
-        tx.execute(
-            "INSERT INTO samples (id, account, at, used, running) VALUES (?, ?, ?, ?, 1)",
-            params![sid, DAVID, at, f64_to_sql(used).expect("finite")],
-        )
-        .await
-        .expect("insert sample");
-        tx.commit().await.expect("commit");
+    /// Adds a burn-rate sample for claude-david with one thread running.
+    fn insert_sample(client: &PrismClient, at: i64, used: f64) {
+        let mut samples = client.samples.lock().expect("samples");
+        let kept = samples.entry(DAVID.into()).or_default();
+        kept.push(PlacementSample {
+            account: DAVID.into(),
+            at,
+            used,
+            running: 1,
+        });
+        kept.sort_by_key(|s| s.at);
     }
 
     async fn insert_move(client: &PrismClient, id: &str, thread_id: &str, created_at: i64) {
@@ -2466,9 +2597,8 @@ mod tests {
             .expect("sync t1");
         if duplicates {
             // A second worker got host-a's previous report a second before and
-            // stored it with its own Rocky ids, plus its own sample at t1.
+            // stored it with its own Rocky ids.
             insert_report(&client, "host-a", NOW - 61, &["thr-1"]).await;
-            insert_sample(&client, NOW - 60, 80.0).await;
         }
         let resp = client
             .sync_placement("host-b".into(), request(55.0, NOW, Vec::new()), NOW)
@@ -2485,7 +2615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_reports_and_samples_from_two_workers_count_once() {
+    async fn duplicate_reports_from_two_workers_count_once() {
         let single = david_load(false).await;
         assert_eq!(single.0, 1);
         assert!(single.1.is_some(), "burn rate from the samples");
@@ -2530,8 +2660,8 @@ mod tests {
         let (_dir, client) = open().await;
         put_profile(&client, "default", &[ONE, DAVID, ALEX]).await;
         // claude-david burns 6% per thread per hour.
-        insert_sample(&client, NOW - 1200, 40.0).await;
-        insert_sample(&client, NOW - 60, 42.0).await;
+        insert_sample(&client, NOW - 1200, 40.0);
+        insert_sample(&client, NOW - 60, 42.0);
         let window = |used: f64, hours: i64| PlacementWindow {
             used_percent: used,
             resets_at: DateTime::from_timestamp(NOW + hours * 3600, 0)
@@ -2571,6 +2701,113 @@ mod tests {
             "david {to_david}, alex {to_alex}"
         );
         assert_eq!(to_david + to_alex, 5);
+    }
+
+    #[tokio::test]
+    async fn usage_comes_from_clickhouse_and_is_never_stored_with_the_report() {
+        let (_dir, client) = open().await;
+        put_profile(&client, "coding", &[DAVID]).await;
+        let reading = |used: f64, observed_at: i64| {
+            UsageByAccount::from([(
+                "claude-david".to_string(),
+                AccountUsage {
+                    session: Some(PlacementWindow {
+                        used_percent: used,
+                        resets_at: DateTime::from_timestamp(NOW + 2 * 3600, 0)
+                            .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                            .unwrap_or_default(),
+                    }),
+                    weekly: None,
+                    observed_at,
+                },
+            )])
+        };
+        let session_of = |resp: &PlacementSyncResponse| {
+            resp.profiles[0].ranked[0]
+                .session
+                .as_ref()
+                .map(|w| w.used_percent)
+        };
+        // The host says 10%, ClickHouse 98%: ClickHouse ranks.
+        let resp = client
+            .sync_placement_with_usage(
+                "host-a".into(),
+                request(10.0, NOW, vec![thread("thr-1", "coding", DAVID)]),
+                NOW,
+                &reading(98.0, NOW - 60),
+            )
+            .await
+            .expect("sync");
+        assert_eq!(session_of(&resp), Some(98.0));
+        assert_ne!(resp.profiles[0].ranked[0].state, "ok");
+        let stored = client.stored_report("host-a").await.expect("stored");
+        assert!(
+            !stored.expect("report").models_json.contains("usedPercent"),
+            "the stored report keeps no usage"
+        );
+
+        // The apps rank with the snapshot.
+        let snapshot = client
+            .usage_snapshot()
+            .await
+            .expect("read")
+            .expect("written");
+        assert_eq!(snapshot.at, NOW);
+        let key = format!("claudeAgent/{DAVID}");
+        assert_eq!(
+            snapshot.models[&key]
+                .session
+                .as_ref()
+                .map(|w| w.used_percent),
+            Some(98.0)
+        );
+        let view = client
+            .placement_view("host-a".into(), NOW)
+            .await
+            .expect("view");
+        assert_eq!(
+            view.profiles[0].entries[0].state,
+            resp.profiles[0].ranked[0].state
+        );
+
+        // A minute later at 99%: not worth replicating yet.
+        client
+            .sync_placement_with_usage(
+                "host-a".into(),
+                request(10.0, NOW + 60, vec![thread("thr-1", "coding", DAVID)]),
+                NOW + 60,
+                &reading(99.0, NOW + 30),
+            )
+            .await
+            .expect("sync");
+        assert_eq!(client.usage_snapshot().await.unwrap().unwrap().at, NOW);
+        // Out at 100%: the apps learn at once.
+        client
+            .sync_placement_with_usage(
+                "host-a".into(),
+                request(10.0, NOW + 120, vec![thread("thr-1", "coding", DAVID)]),
+                NOW + 120,
+                &reading(100.0, NOW + 90),
+            )
+            .await
+            .expect("sync");
+        assert_eq!(
+            client.usage_snapshot().await.unwrap().unwrap().at,
+            NOW + 120
+        );
+
+        // A stale ClickHouse reading gives way to the host's.
+        let resp = client
+            .sync_placement_with_usage(
+                "host-a".into(),
+                request(10.0, NOW + 180, vec![thread("thr-1", "coding", DAVID)]),
+                NOW + 180,
+                &reading(100.0, NOW + 180 - USAGE_FRESH_SECS - 1),
+            )
+            .await
+            .expect("sync");
+        assert_eq!(session_of(&resp), Some(10.0));
+        client.close().await.expect("close");
     }
 
     #[tokio::test]
