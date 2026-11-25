@@ -9,8 +9,8 @@ use crate::push::Pusher;
 use crate::t3::{Secrets, T3Hub};
 use chrono::Utc;
 use rocky_prism::{
-    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, AlertActionOutcome, AlertActionView, Notification,
-    PrismClient, PrismError, check_action, label_fingerprint, parse_time,
+    ACTION_FIX, AlertActionOutcome, AlertActionView, Notification, PrismClient, PrismError,
+    check_action, label_fingerprint, parse_time,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,7 +128,7 @@ impl LeaderWork {
         self.deliver_settings_pushes()
             .await
             .map_err(|err| format!("settings push: {err}"))?;
-        // Ended alerts (dismiss, resolve) wake the phone in the same pass.
+        // Alerts that fired or ended wake the phone in the same pass.
         self.deliver_alert_pushes()
             .await
             .map_err(|err| format!("push delivery: {err}"))
@@ -428,7 +428,7 @@ impl LeaderWork {
     }
 }
 
-/// Runs one claimed alert action (fix, dismiss, resolve): the leader's, and
+/// Runs one claimed alert action (fix): the leader's, and
 /// a device's own when the workers are unreachable (`crate::direct`).
 pub async fn run_alert_action(
     client: &PrismClient,
@@ -449,16 +449,7 @@ pub async fn run_alert_action(
     if let Err(err) = check_action(&row, &req.kind, &req.instruction) {
         return failed(err.to_string());
     }
-    let now = clock();
     match req.kind.as_str() {
-        ACTION_DISMISS => match client.dismiss_alert(&req.alert, now).await {
-            Ok(_) => AlertActionOutcome::default(),
-            Err(err) => failed(owner_text(err)),
-        },
-        ACTION_RESOLVE => match client.resolve_alert(&req.alert, now).await {
-            Ok(_) => AlertActionOutcome::default(),
-            Err(err) => failed(owner_text(err)),
-        },
         ACTION_FIX => {
             let profile = match client.alert_fix_profile().await {
                 Ok(p) => p,
@@ -535,15 +526,7 @@ pub async fn run_alert_action(
                 }
             }
         }
-        other => failed(format!("Unknown action {other:?}.")),
-    }
-}
-
-fn owner_text(err: PrismError) -> String {
-    match err {
-        PrismError::Storage(_) | PrismError::Unavailable(_) => storage_failure(err),
-        PrismError::NotFound => "The alert is gone.".into(),
-        other => other.to_string(),
+        other => failed(rocky_prism::unknown_action(other)),
     }
 }
 
@@ -720,10 +703,20 @@ mod tests {
         }
 
         async fn fire(&self, alertname: &str) {
-            let body = json!({"status": "firing", "alerts": [{
+            self.webhook("firing", alertname).await;
+        }
+
+        /// The alert's rule recovered.
+        async fn recover(&self, alertname: &str) {
+            self.webhook("resolved", alertname).await;
+        }
+
+        async fn webhook(&self, status: &str, alertname: &str) {
+            let body = json!({"status": status, "alerts": [{
                 "labels": {"alertname": alertname, "severity": "critical"},
                 "annotations": {"summary": format!("{alertname} fired")},
                 "startsAt": "2026-11-21T10:00:00Z",
+                "endsAt": if status == "resolved" { "2026-11-21T11:00:00Z" } else { "0001-01-01T00:00:00Z" },
             }]});
             self.client
                 .record_alert_webhook(
@@ -876,8 +869,9 @@ mod tests {
         assert_eq!(rig.t3.launches.lock().expect("launches").len(), 3);
         assert_eq!(rig.t3.distinct_threads(), 2);
 
-        // dismiss ends the episode and wakes the phone quietly.
-        rig.request("r3", "dismiss", "").await;
+        // Only its rule recovering ends the episode; that wakes the phone
+        // quietly.
+        rig.recover("NodeNotReady").await;
         next.tick().await.expect("tick");
         assert_eq!(
             rig.client
@@ -885,10 +879,10 @@ mod tests {
                 .await
                 .expect("list")[0]
                 .state,
-            "dismissed"
+            "resolved"
         );
         let last = rig.posts().pop().expect("post");
-        assert_eq!(last.1["title"], "#1 NodeNotReady dismissed");
+        assert_eq!(last.1["title"], "#1 NodeNotReady resolved");
         assert_eq!(last.1["tags"], json!(["prism", "alert-ended"]));
 
         // A fix on a profile T3 does not offer fails with the owner's text.

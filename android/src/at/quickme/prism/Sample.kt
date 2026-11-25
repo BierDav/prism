@@ -83,7 +83,6 @@ object Sample {
 
     private fun now() = System.currentTimeMillis() / 1000
 
-    private val alertState = mutableMapOf<Long, String>()
     private val startedAgents = mutableListOf<Agent>()
 
     /** Each started agent's turns: what was asked and when (ms). */
@@ -163,8 +162,7 @@ object Sample {
             summary = "The certificate of quickme.at expires in 14 days", startsAt = now() - 5 * 3600,
         ),
     ).map { a ->
-        a.copy(state = alertState[a.id] ?: a.state,
-            agents = (startedAgents.filter { it.alertId == a.id }.asReversed() + a.agents).map { it.withStopState() })
+        a.copy(agents = (startedAgents.filter { it.alertId == a.id }.asReversed() + a.agents).map { it.withStopState() })
     }
 
     private val models = listOf(
@@ -616,11 +614,6 @@ object Sample {
                         else limits + (account to PrismClient.json.decodeFromString(PlacementAccountLimit.serializer(), body.toString())),
                     )
                     encode(placement())
-                }
-                r.method == "POST" && (path.endsWith("/dismiss") || path.endsWith("/resolve")) -> {
-                    val id = path.split("/")[3].toLong()
-                    alertState[id] = if (path.endsWith("/dismiss")) "dismissed" else "resolved"
-                    buildJsonObject { put("alert", encode(alerts().first { it.id == id })) }
                 }
                 r.method == "POST" -> {
                     val request = field("request").ifEmpty { field("instruction") }

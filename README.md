@@ -51,7 +51,7 @@ The menu-bar popout has three tabs:
 
 - **Alerts**: the server's open alerts and machine events, grouped by
   category with their severity; per alert the agents it started (Open in T3)
-  and the quick actions fix, dismiss, resolve and a free-text instruction;
+  and the quick actions fix and a free-text instruction;
   below them "Do…" starts an agent for any task, on the cluster or a machine
   picked from the server's machines. The model and reasoning level for new
   agents are picked there too. The menu-bar glyph shows the number of open
@@ -205,8 +205,6 @@ All from the apps:
 | --- | --- |
 | Fix an alert | Starts an agent that investigates the alert and fixes it where appropriate, on the alert's machine if it has one. |
 | Fix an alert with an instruction | Starts an agent with the instruction and the alert. |
-| Dismiss an alert | Ends the current episode. A cluster alert stays quiet until its next episode; a machine event fires again on the next failed run. |
-| Resolve a machine event | Resolves the check until it fails again. |
 | `fix`, `do`, `alert`, `deploy`, `retire` with a request | Starts an agent for the task, on the cluster or a named machine (`alert`, `deploy`, `retire`: cluster only). |
 | Model and reasoning | Selects the model and reasoning level for future agents. |
 | Machines | Lists the machines, how Prism reaches them and their open events. |
@@ -331,9 +329,8 @@ prism ping                                      # check the token
 - A failure opens an alert in Prism itself, `HostCheckFailed` labelled
   `machine`, `check`, `severity` (default `warning`) and `source=prism`, with
   the output and command, an ID per episode and an `alert.firing` push.
-  Failures of the same check keep the episode open and update it. An `ok`
-  report, or resolving or dismissing it in the app, ends it with an
-  `alert.ended` push; the next failure is a new episode. Machine events do
+  Failures of the same check keep the episode open and update it. Only an
+  `ok` report ends it, with an `alert.ended` push; the next failure is a new episode. Machine events do
   not go through Alertmanager, so its routing, silences and inhibition do not
   apply to them.
 - A minute's tidy-up repeats what a report could not finish and forgets
@@ -356,11 +353,14 @@ prism ping                                      # check the token
 - A firing alert gets an ID (`#12`) per episode, counting up and never reused,
   and one `alert.firing` push. Repeats and webhook retries change nothing:
   the push outbox is keyed by the episode.
-- Dismissing ends the current episode. Cluster alerts stay dismissed until a
-  new episode starts; machine events are resolved and can fire on the next
-  failed run.
-- On recovery or dismissal the alert ends (`resolved`, `dismissed`) with an
-  `alert.ended` push. The API keeps ended alerts and lists them as recent for
+- An alert shows a problem that is still there, so only its condition ends
+  it: the rule recovers, the CronJob reports it resolved, the machine's check
+  passes, or Alertmanager no longer has it. The owner can't dismiss or
+  resolve one. Every source has to report a condition it checks again, never
+  a one-off event; selfhosted-platform's `scripts/check-alert-rules.py`
+  enforces that for the rules.
+- On recovery the alert ends (`resolved`, or `gone` below) with an
+  `alert.ended` push. Episodes dismissed before this keep `dismissed`. The API keeps ended alerts and lists them as recent for
   a week.
 - A recovery whose start time differs from the stored episode still clears the
   alert, as long as the alert ended after that episode began. Only a recovery

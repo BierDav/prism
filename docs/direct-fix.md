@@ -65,4 +65,3 @@ the device: the workers may already have started it.
 
 New alerts and approvals still reach the devices through the workers, who
 watch every T3 for approvals with their own sessions and push them.
-Dismiss and Resolve are replica rows either way.

@@ -50,7 +50,8 @@ data class Alert(
     val command: String = "",
     val output: String = "",
     val labels: Map<String, String> = emptyMap(),
-    /** `open`, `resolved`, `dismissed` or `gone`. */
+    /** `open`, `resolved` or `gone` (`dismissed` on older episodes). An alert
+     *  ends only when its condition does; nothing dismisses or resolves one. */
     val state: String = "open",
     val startsAt: Long = 0,
     val createdAt: Long = 0,
@@ -64,8 +65,6 @@ data class Alert(
     val level: Severity get() = Severity.of(severity)
     val machineEvent: Boolean get() = kind == "machine_event"
     val isOpen: Boolean get() = state == "open"
-    /** Machine events can be resolved until the check fails again; any open alert can be dismissed. */
-    val canResolve: Boolean get() = machineEvent
 
     /** When the episode started; when the server first saw it if that lies
      *  in the future (a clock or time-zone slip upstream). */

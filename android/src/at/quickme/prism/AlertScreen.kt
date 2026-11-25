@@ -1,7 +1,7 @@
 // One alert: what fires and where, the machine check's command and output,
 // the agents on it, and the owner's actions (docs/prism-api.md, "Actions on an
-// alert"): Fix (an agent investigates and fixes), Instruct (an agent follows
-// your instruction), Dismiss (this episode), Resolve (machine checks only).
+// alert"): Fix (an agent investigates and fixes) and Instruct (an agent
+// follows your instruction). An alert ends only when its condition does.
 // The main screen shows it (Route.AlertDetail): beside the Alerts list where
 // the window is wide enough, on its own otherwise.
 
@@ -26,8 +26,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -84,14 +82,13 @@ import at.quickme.prism.shared.Alert
 import at.quickme.prism.shared.PrismClient
 import at.quickme.prism.shared.PrismError
 
-internal data class Action(val what: String, val label: String, val question: String? = null)
+internal data class Action(val what: String, val label: String)
 
 @Composable
 internal fun AlertScreen(id: Long, onBack: () -> Unit) {
     val context = LocalContext.current
     var alert by remember { mutableStateOf<Alert?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var confirm by remember { mutableStateOf<Action?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var stopping by remember { mutableStateOf(setOf<String>()) }
     val snackbar = remember { SnackbarHostState() }
@@ -136,14 +133,6 @@ internal fun AlertScreen(id: Long, onBack: () -> Unit) {
                         alert = alert?.let { it.copy(agents = listOf(agent) + it.agents.filterNot { a -> a.id == agent.id }) }
                         "Agent started."
                     }
-                    "dismiss" -> {
-                        alert = PrismApi.call(context) { dismiss(id, requestId) }
-                        null
-                    }
-                    "resolve" -> {
-                        alert = PrismApi.call(context) { resolve(id, requestId) }
-                        null
-                    }
                     else -> null
                 }
                 PrismPush.changed()
@@ -175,22 +164,8 @@ internal fun AlertScreen(id: Long, onBack: () -> Unit) {
     }
 
     AlertContent(id, alert, error, busy, snackbar, onBack,
-        onAction = { if (it.question == null) act(it) else confirm = it },
+        onAction = ::act,
         stopping = stopping, onStop = ::stop)
-    confirm?.let { c ->
-        AlertDialog(
-            onDismissRequest = { confirm = null },
-            title = { Text(c.label + " #$id") },
-            text = { Text(c.question.orEmpty()) },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirm = null
-                    act(c)
-                }) { Text(c.label) }
-            },
-            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
-        )
-    }
 }
 
 /**
@@ -258,14 +233,6 @@ internal fun AlertContent(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     ActionButton(PrismIcons.Sparkle, "Fix", primary = true, enabled = open && busy == null, busy = busy == "fix") {
                         onAction(Action("fix", "Fix"))
-                    }
-                    ActionButton(Icons.Rounded.Close, "Dismiss", enabled = open && busy == null, busy = busy == "dismiss") {
-                        onAction(Action("dismiss", "Dismiss", "Dismiss this episode of #$id?"))
-                    }
-                    if (a.canResolve) {
-                        ActionButton(Icons.Rounded.Check, "Resolve", outlined = true, enabled = open && busy == null, busy = busy == "resolve") {
-                            onAction(Action("resolve", "Resolve", "Mark the check as resolved until it fails again?"))
-                        }
                     }
                 }
             }

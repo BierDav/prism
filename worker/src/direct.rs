@@ -201,7 +201,7 @@ impl Direct {
         now - CLAIM_TIMEOUT_SECS
     }
 
-    /// Runs an alert action (fix, dismiss, resolve). False when it is not
+    /// Runs an alert action (fix). False when it is not
     /// this device's to run: done, or held by a worker.
     pub async fn alert_action(&self, request_id: &str) -> Result<bool, String> {
         let now = (self.clock)();

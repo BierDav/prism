@@ -119,15 +119,9 @@ async fn lead(worker: Arc<PrismClient>, running: Arc<AtomicBool>, seen: Seen) {
                 continue;
             }
             note("alert_actions", &a.request_id, a.kind.clone());
-            let outcome = match a.kind.as_str() {
-                "dismiss" => {
-                    worker.dismiss_alert(&a.alert, t).await.expect("dismiss");
-                    AlertActionOutcome::default()
-                }
-                _ => AlertActionOutcome {
-                    error: "#1 has already ended.".into(),
-                    ..AlertActionOutcome::default()
-                },
+            let outcome = AlertActionOutcome {
+                error: "#1 has already ended.".into(),
+                ..AlertActionOutcome::default()
             };
             worker
                 .finish_alert_action(&a.request_id, WORKER, t, outcome)
@@ -473,18 +467,24 @@ async fn the_phone_reads_and_acts_through_its_replica() {
         "{body}"
     );
 
-    let (status, body) = call(
-        &on_phone,
-        "POST",
-        "/v1/alerts/1/dismiss",
-        Some(json!({"requestId": "dismiss-1"})),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    eventually(&on_phone, "/v1/alerts?state=open", |b| {
-        b["alerts"].as_array().is_some_and(Vec::is_empty)
-    })
-    .await;
+    // Alerts end only when their condition does: there is no dismiss or
+    // resolve, and the alert stays open.
+    for action in ["dismiss", "resolve"] {
+        let (status, body) = call(
+            &on_phone,
+            "POST",
+            &format!("/v1/alerts/1/{action}"),
+            Some(json!({"requestId": format!("{action}-1")})),
+        )
+        .await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (404, Some("not_found")),
+            "{body}"
+        );
+    }
+    let (_, open) = call(&on_phone, "GET", "/v1/alerts?state=open", None).await;
+    assert_eq!(open["alerts"].as_array().map(Vec::len), Some(1), "{open}");
 
     running.store(false, Ordering::SeqCst);
     leader.await.expect("leader");

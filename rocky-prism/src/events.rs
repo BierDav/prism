@@ -168,7 +168,7 @@ impl PrismClient {
                 return Ok("ok".into());
             }
             for current in &episodes {
-                self.resolve_alert(&current.key, now).await?;
+                self.resolve_host_event(&current.key, now).await?;
             }
             return Ok("resolved".into());
         }
@@ -176,7 +176,7 @@ impl PrismClient {
         // status == "failed"
         if let Some(current) = existing {
             for duplicate in &episodes[1..] {
-                self.resolve_alert(&duplicate.key, now).await?;
+                self.resolve_host_event(&duplicate.key, now).await?;
             }
             let starts_at = DateTime::<Utc>::from_timestamp(current.starts_at, 0)
                 .unwrap_or_default()
