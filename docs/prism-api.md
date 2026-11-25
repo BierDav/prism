@@ -583,8 +583,10 @@ the T3 host sync endpoint (`POST /v1/placement/sync` on the machine event API).
   machine), `models` (union reported in the last day), `alertFixProfile`,
   `policy` and the last 20 `moves`.
 - `PUT /v1/placement/profiles/{id}` creates or replaces a profile.
+  An entry `{"instanceId": "placement", "model": "<profile id>"}` uses
+  that profile's models at its place (`docs/placement.md`).
 - `DELETE /v1/placement/profiles/{id}` removes a profile (`409` for the
-  alert-fix profile).
+  alert-fix profile, or one another profile's entries name).
 - `PUT /v1/placement/order` `{"ids": […]}` orders the profiles.
 - `PUT /v1/placement/alert-fix-profile` `{"profile": "coding"}` sets the
   profile alert fixes start on.

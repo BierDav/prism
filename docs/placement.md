@@ -24,6 +24,17 @@ the instructions into thread starts and moves.
   for the model's default), `enabled`, and optionally
   `sessionShareOfWeekly` (the weekly percent one full 5-hour session window
   costs on this account; turns on the weekly rule).
+- **profile entry**: an entry with `instanceId` `placement` and `model` set
+  to another profile's id. At that place the profile uses the other
+  profile's enabled models, in their order (a model already listed earlier
+  counts once). A disabled profile entry adds nothing. It carries no
+  `reasoning` or `sessionShareOfWeekly` (each model keeps its own). Saving
+  refuses a profile entry for a missing profile or one that would include
+  the profile itself; deleting a profile another one names answers `409`.
+  T3 never sees profile entries: the sync response lists the models they
+  stand for. `GET /v1/placement` shows them as one row labelled with the
+  profile, `driver` `placement`, its state and reason taken from that
+  profile's best model.
 - **account key**: what load and burn are counted by. It is the `model` slug
   (the gateway routes `<account>/<model>` to one account, whichever host
   asks), not the instance.

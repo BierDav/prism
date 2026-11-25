@@ -1,9 +1,10 @@
 use crate::enroll::{contact_node, decode_provisioning};
 use crate::rank::{
-    PLACEMENT_BURN_WINDOW_SECS, compute_burn_rate, guess_driver, live_used, model_key,
+    PLACEMENT_BURN_WINDOW_SECS, PROFILE_ENTRY_INSTANCE, compute_burn_rate,
+    expand_profile_references, guess_driver, is_profile_entry, live_used, model_key,
     placement_compact_target, placement_compact_window_start, placement_drain_target,
-    placement_move_target, placement_waits_for_reset, rank_placement_profile, same_placement_entry,
-    selection_for_entry, vienna_tz,
+    placement_move_target, placement_waits_for_reset, rank_placement_profile, referenced_profiles,
+    same_placement_entry, selection_for_entry, vienna_tz,
 };
 use crate::schema::prism_schema;
 use crate::types::{
@@ -531,8 +532,9 @@ impl PrismClient {
             .store_usage_snapshot(&host_models, &loads, now_unix)
             .await;
 
-        // 5. Rank all profiles for this host.
-        let profiles = self.placement_profiles().await?;
+        // 5. Rank all profiles for this host, each with the profiles it
+        // names expanded in place: T3 only ever sees models.
+        let profiles = expand_profile_references(&self.placement_profiles().await?);
         let policy = self.placement_policy().await?;
         let text_gen = self.text_generation_profile().await?;
 
@@ -928,35 +930,41 @@ impl PrismClient {
         let alert_fix = self.alert_fix_profile().await?;
         let text_gen = self.text_generation_profile().await?;
 
+        // Ranking sees each profile with the profiles it names expanded in
+        // place (as the workers rank it); the rows show what the owner set.
+        let expanded = expand_profile_references(&profiles);
         let mut profile_views = Vec::with_capacity(profiles.len());
-        for p in &profiles {
-            let decision_by_key: Option<BTreeMap<String, PlacementEntryDecision>> =
-                cluster_models.as_ref().map(|cm| {
-                    let inputs: Vec<PlacementEntryInput> = p
-                        .entries
+        for (p, flat) in profiles.iter().zip(&expanded) {
+            let ranked: Option<Vec<PlacementEntryDecision>> = cluster_models.as_ref().map(|cm| {
+                let inputs: Vec<PlacementEntryInput> = flat
+                    .entries
+                    .iter()
+                    .map(|e| PlacementEntryInput {
+                        selection: PlacementSelection {
+                            instance_id: e.instance_id.clone(),
+                            model: e.model.clone(),
+                            options: Vec::new(),
+                        },
+                        enabled: e.enabled,
+                        session_share_of_weekly: e.session_share_of_weekly,
+                    })
+                    .collect();
+                let dec = rank_placement_profile(
+                    &p.id,
+                    &p.label,
+                    &inputs,
+                    &policy,
+                    cm,
+                    &loads,
+                    now_time,
+                    vienna_tz(),
+                );
+                dec.ranked
+            });
+            let decision_by_key: Option<BTreeMap<String, &PlacementEntryDecision>> =
+                ranked.as_ref().map(|ranked| {
+                    ranked
                         .iter()
-                        .map(|e| PlacementEntryInput {
-                            selection: PlacementSelection {
-                                instance_id: e.instance_id.clone(),
-                                model: e.model.clone(),
-                                options: Vec::new(),
-                            },
-                            enabled: e.enabled,
-                            session_share_of_weekly: e.session_share_of_weekly,
-                        })
-                        .collect();
-                    let dec = rank_placement_profile(
-                        &p.id,
-                        &p.label,
-                        &inputs,
-                        &policy,
-                        cm,
-                        &loads,
-                        now_time,
-                        vienna_tz(),
-                    );
-                    dec.ranked
-                        .into_iter()
                         .map(|r| (model_key(&r.selection.instance_id, &r.selection.model), r))
                         .collect()
                 });
@@ -1002,7 +1010,56 @@ impl PrismClient {
                     ev.driver = agg.view.driver.clone();
                     ev.provider = agg.view.provider.clone();
                 }
-                if let Some(dec_map) = &decision_by_key
+                if is_profile_entry(&e.instance_id) {
+                    let named = profiles.iter().position(|q| q.id == e.model);
+                    ev.label = named.map_or_else(|| e.model.clone(), |i| profiles[i].label.clone());
+                    ev.driver = PROFILE_ENTRY_INSTANCE.into();
+                    ev.provider = "Profile".into();
+                    // Its models as this profile ranks them: the best one speaks for it.
+                    let members: BTreeSet<String> = named
+                        .map(|i| {
+                            expanded[i]
+                                .entries
+                                .iter()
+                                .filter(|m| m.enabled)
+                                .map(|m| model_key(&m.instance_id, &m.model))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if named.is_none() {
+                        ev.state = "unavailable".into();
+                        ev.reason = "Skipped: the profile it names no longer exists.".into();
+                    } else if let Some(ranked) = &ranked {
+                        let mine: Vec<&PlacementEntryDecision> = ranked
+                            .iter()
+                            .filter(|r| {
+                                members.contains(&model_key(
+                                    &r.selection.instance_id,
+                                    &r.selection.model,
+                                ))
+                            })
+                            .collect();
+                        ev.running_threads = Some(mine.iter().map(|r| r.running_threads).sum());
+                        if let Some(best) = mine.first() {
+                            let name = models_map
+                                .get(&model_key(
+                                    &best.selection.instance_id,
+                                    &best.selection.model,
+                                ))
+                                .map_or_else(
+                                    || best.selection.model.clone(),
+                                    |m| m.view.label.clone(),
+                                );
+                            ev.state = best.state.clone();
+                            ev.reason = format!("Best of {}: {name}. {}", ev.label, best.reason)
+                                .trim_end()
+                                .to_string();
+                        } else {
+                            ev.state = "unavailable".into();
+                            ev.reason = format!("{} has no enabled models.", ev.label);
+                        }
+                    }
+                } else if let Some(dec_map) = &decision_by_key
                     && let Some(d) = dec_map.get(&k)
                 {
                     ev.state = d.state.clone();
@@ -1175,6 +1232,34 @@ impl PrismClient {
         while entries.last().is_some_and(is_padding) {
             entries.pop();
         }
+        // A profile entry names another existing profile and must not lead
+        // back to this one: ranking expands it in place.
+        let mut with_this: Vec<PlacementProfileRow> =
+            existing.iter().filter(|p| p.id != id).cloned().collect();
+        with_this.push(PlacementProfileRow {
+            id: id.clone(),
+            label: label.clone(),
+            position: 0,
+            entries: entries.clone(),
+        });
+        for e in entries.iter().filter(|e| is_profile_entry(&e.instance_id)) {
+            if !existing.iter().any(|p| p.id == e.model && p.id != id) {
+                return Err(PrismError::InvalidInput(format!(
+                    "Profile entry {:?} names no other profile.",
+                    e.model
+                )));
+            }
+            if !e.reasoning.is_empty() || e.session_share_of_weekly.is_some() {
+                return Err(PrismError::InvalidInput(
+                    "A profile entry takes no reasoning or weekly share.".into(),
+                ));
+            }
+        }
+        if referenced_profiles(&with_this, &id).contains(&id) {
+            return Err(PrismError::InvalidInput(
+                "This profile would include itself through its profile entries.".into(),
+            ));
+        }
         if previous.is_some_and(|p| p.label == label && p.entries == entries) {
             return Ok(());
         }
@@ -1276,6 +1361,22 @@ impl PrismClient {
         let existing = self.placement_profiles().await?;
         if !existing.iter().any(|p| p.id == id) {
             return Err(PrismError::NotFound);
+        }
+        let users: Vec<&str> = existing
+            .iter()
+            .filter(|p| {
+                p.id != id
+                    && p.entries
+                        .iter()
+                        .any(|e| is_profile_entry(&e.instance_id) && e.model == id)
+            })
+            .map(|p| p.label.as_str())
+            .collect();
+        if !users.is_empty() {
+            return Err(PrismError::Conflict(format!(
+                "Cannot delete a profile that {} uses.",
+                users.join(", ")
+            )));
         }
         let mut tx = self.db.transaction().await.map_err(storage_err)?;
         tx.execute(
@@ -1618,7 +1719,7 @@ impl PrismClient {
         let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
         // Each account with the models its enabled entries name, in profile order.
         let mut models_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for p in self.placement_profiles().await? {
+        for p in expand_profile_references(&self.placement_profiles().await?) {
             for e in p.entries.iter().filter(|e| e.enabled) {
                 let models = models_by_account
                     .entry(account_of(&e.model).to_string())
@@ -2357,7 +2458,10 @@ fn sql_to_opt_f64(v: &SqlValue) -> Option<f64> {
 /// A disabled entry with no reasoning and no session share: what the view
 /// adds for a model a profile doesn't name.
 fn is_padding(entry: &PlacementEntryRow) -> bool {
-    !entry.enabled && entry.reasoning.is_empty() && entry.session_share_of_weekly.is_none()
+    !entry.enabled
+        && !is_profile_entry(&entry.instance_id)
+        && entry.reasoning.is_empty()
+        && entry.session_share_of_weekly.is_none()
 }
 
 pub fn is_valid_profile_id(id: &str) -> bool {
