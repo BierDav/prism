@@ -186,6 +186,56 @@ impl PrismClient {
         }
     }
 
+    /// [`PrismClient::open_provisioned_with`], then [`PrismClient::add_peers`]:
+    /// how a device starts. Returns the client and how many peers it added.
+    ///
+    /// A replica of another database can't always tell which database it
+    /// belongs to (an old, incomplete one may not produce its own contact),
+    /// but it refuses the peers: "the contact belongs to another domain".
+    /// When the provisioning and the peers agree on a database and the
+    /// replica refuses them, the replica is the stale one: it is dropped and
+    /// the device enrolls again. A peer list that disagrees with the
+    /// provisioning never drops a replica.
+    pub async fn open_provisioned_with_peers(
+        directory: String,
+        provisioning: String,
+        network: Option<Network>,
+        coordination: Option<rocky_sdk::CoordinatorSlot>,
+        peers: Vec<String>,
+    ) -> Result<(Self, u32), PrismError> {
+        let client = Self::open_provisioned_with(
+            directory.clone(),
+            provisioning.clone(),
+            network.clone(),
+            coordination.clone(),
+        )
+        .await?;
+        let err = match client.add_peers(peers.clone()).await {
+            Ok(added) => return Ok((client, added)),
+            Err(err) => err,
+        };
+        let wanted = crate::enroll::publisher_of(&decode_provisioning(&provisioning)?);
+        let agree = wanted.is_some()
+            && !peers.is_empty()
+            && peers
+                .iter()
+                .all(|peer| crate::enroll::publisher_of(peer) == wanted);
+        if !(agree && err.to_string().contains("another domain")) {
+            let _ = client.close().await;
+            return Err(err);
+        }
+        eprintln!(
+            "rocky-prism: the replica in {directory} refuses its provisioning's peers \
+             ({err}); enrolling again"
+        );
+        client.close().await?;
+        std::fs::remove_dir_all(&directory).map_err(storage_err)?;
+        let client =
+            Self::open_provisioned_with(directory, provisioning, network, coordination).await?;
+        let added = client.add_peers(peers).await?;
+        Ok((client, added))
+    }
+
     async fn open_with(
         directory: &str,
         network: Option<Network>,
