@@ -35,7 +35,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -94,6 +93,8 @@ class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: S
         for (e in now) {
             val s = e.surface
             Renderer.sync(drawn[s.surfaceId], entryOf[s.surfaceId], s, e.id).forEach { processor.processInput(parser, it) }
+            // Another entry's card under this ID starts with no action status.
+            if (entryOf[s.surfaceId] != e.id) status.remove(s.surfaceId)
             entryOf[s.surfaceId] = e.id
             drawn[s.surfaceId] = s
         }
@@ -102,6 +103,7 @@ class SurfaceHost(context: Context, @Volatile var onAction: (suspend (entryId: S
             processor.processInput(parser, Renderer.delete(gone))
             drawn.remove(gone)
             entryOf.remove(gone)
+            status.remove(gone)
         }
     }
 
@@ -140,7 +142,12 @@ fun rememberSurfaceHost(entries: List<Entry>, onAction: (suspend (String, UiActi
     val handler = rememberUpdatedState(onAction)
     val host = shared ?: remember { SurfaceHost(context) }.also { own -> DisposableEffect(own) { onDispose { own.close() } } }
     remember(host) { host.sync(entries) }
-    SideEffect { host.onAction = { id, a -> handler.value?.invoke(id, a) ?: "This chat can't act from here." } }
+    // Only while this screen shows: the handler holds its Activity, and a shared host outlives it.
+    DisposableEffect(host) {
+        val mine: suspend (String, UiAction) -> String? = { id, a -> handler.value?.invoke(id, a) ?: "This chat can't act from here." }
+        host.onAction = mine
+        onDispose { if (host.onAction === mine) host.onAction = null }
+    }
     LaunchedEffect(host, entries) { host.sync(entries) }
     return host
 }

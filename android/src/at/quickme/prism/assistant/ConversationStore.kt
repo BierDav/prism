@@ -281,8 +281,12 @@ object ConversationStore {
         } catch (e: IllegalArgumentException) { // SerializationException too
             // A name of its own, so one set aside earlier isn't replaced; if it can't
             // be moved, the save stops here rather than write over it.
-            val aside = File(f.parentFile, f.name + ".unreadable-" + System.currentTimeMillis())
-            if (!f.renameTo(aside)) throw IOException("an unreadable conversation could not be set aside: ${f.name}")
+            val ms = System.currentTimeMillis()
+            val aside = generateSequence(0) { it + 1 }
+                .map { File(f.parentFile, f.name + ".unreadable-" + ms + if (it == 0) "" else "-$it") }
+                .first { !it.exists() }
+            // Without REPLACE_EXISTING: throws rather than replace a copy set aside before.
+            Files.move(f.toPath(), aside.toPath())
             Log.w(TAG, "an unreadable conversation was set aside: ${aside.name}")
             null
         }

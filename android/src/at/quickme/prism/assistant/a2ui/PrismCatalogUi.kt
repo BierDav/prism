@@ -101,6 +101,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.getValue
@@ -643,17 +644,21 @@ private object SliderUi : A2uiBasicCatalogV1.Slider {
         label: String?, min: Float, max: Float, value: Float, onValueChange: (Float) -> Unit, enabled: Boolean,
         accessibility: AccessibilityAttributes?, checks: List<CheckRule>, modifier: Modifier,
     ) {
+        val drawable = min.isFinite() && max.isFinite() && min < max
+        // A value outside the range (as written, or from a binding) is the nearest end, in the data model too.
+        val shown = if (!drawable) value else if (value.isFinite()) value.coerceIn(min, max) else min
+        if (drawable && shown != value) LaunchedEffect(value, min, max) { onValueChange(shown) }
         Column(modifier.fillMaxWidth().a11y(accessibility)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 label?.let { Text(it, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f)) }
-                Text(if (value % 1f == 0f) value.toInt().toString() else "%.1f".format(value), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(if (shown % 1f == 0f) shown.toInt().toString() else "%.1f".format(shown), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             }
             // Validation rejects a range that can't be drawn (PrismCatalog); one stored from before is shown, not drawn.
-            if (!min.isFinite() || !max.isFinite() || min >= max) Text("This slider's range ($min to $max) can't be shown.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            if (!drawable) Text("This slider's range ($min to $max) can't be shown.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             // material3 1.5 deprecates the value-based Slider; the renderer hands a value and a callback.
             else {
                 @Suppress("DEPRECATION")
-                Slider(value = if (value.isFinite()) value.coerceIn(min, max) else min, onValueChange = onValueChange, valueRange = min..max, enabled = enabled && LocalCardsAct.current)
+                Slider(value = shown, onValueChange = onValueChange, valueRange = min..max, enabled = enabled && LocalCardsAct.current)
             }
             checks.failed()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }

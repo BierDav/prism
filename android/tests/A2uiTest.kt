@@ -132,6 +132,8 @@ fun main() {
     check(bad != null && "\"x\"" in bad && "needs \"max\"" in bad, "every problem is listed for the model: $bad")
     check(ShowUi.plan(obj("""{"createSurface":{"components":[{"id":"root","component":"Text","text":"hi"}]}}"""), { null }, { "auto" }).created?.surfaceId == "auto", "a bare message and a missing surfaceId are taken")
     check(ShowUi.plan(obj("""{"messages":[{"deleteSurface":{"surfaceId":"pick"}}]}"""), shown::get).deleted == listOf("pick"), "deleteSurface")
+    val longId = "x".repeat(ShowUi.MAX_ID + 1)
+    check(uiError { ShowUi.plan(obj("""{"createSurface":{"surfaceId":"$longId","components":[{"id":"root","component":"Text","text":"hi"}]}}"""), { null }) }?.contains("at most") == true, "a surfaceId too long to store is refused")
 
     // --- Every card to a surface and back ---
     val cards: List<Card> = listOf(

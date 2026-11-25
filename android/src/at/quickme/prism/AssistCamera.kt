@@ -229,7 +229,9 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
     val saver = remember { Executors.newSingleThreadExecutor() }
     // Off once the camera has left: a photo still being taken then is dropped, not attached.
     val alive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
-    BackHandler(onBack = onClose)
+    // Leaving drops it at once, before Compose disposes the camera.
+    val close = { alive.set(false); onClose() }
+    BackHandler(onBack = close)
 
     LaunchedEffect(front) {
         val p = provider ?: try {
@@ -294,7 +296,7 @@ internal fun InlineCamera(onPhoto: (Uri) -> Unit, onClose: () -> Unit, modifier:
             )
         },
         onFlip = if (flippable) ({ front = !front }) else null,
-        onClose = onClose,
+        onClose = close,
         modifier = modifier,
     )
 }

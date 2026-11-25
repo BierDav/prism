@@ -127,6 +127,7 @@ data class UiChange(
 object ShowUi {
     /** The most a surface's JSON may be, in UTF-8 bytes. */
     const val MAX_BYTES = 48 * 1024
+    const val MAX_ID = 128
 
     /**
      * The change [args] ask for (`messages`: A2UI v1.0 messages) given the
@@ -160,6 +161,8 @@ object ShowUi {
             }
             val id = m.surfaceId
             when {
+                // Each of a surface's stored rows repeats its ID (Conversations).
+                id.length > MAX_ID -> errors += "messages[$i]: a surfaceId has at most $MAX_ID characters"
                 taken(id) || id.startsWith(Transcript.TOOL_SURFACE) -> errors += "messages[$i]: \"$id\" is a tool's card; show_ui can't create, change or delete it (use a surfaceId of your own)"
                 m is UiMessage.Create -> when {
                     created != null -> errors += "messages[$i]: one createSurface per call"
