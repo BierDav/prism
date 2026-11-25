@@ -102,6 +102,19 @@ pub struct SealStatus {
     pub seal_skipped: Option<String>,
 }
 
+/// How long [`PrismClient::trust_self`] waits for the registry to sync.
+const TRUST_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The registry hasn't synced, or doesn't record this device yet: worth
+/// another try once sync caught up.
+fn is_registry_pending(err: &PrismError) -> bool {
+    match err {
+        PrismError::Storage(msg) => msg.contains("is not available") || msg.contains("Incomplete"),
+        PrismError::Unavailable(msg) => msg.contains("not in its registry yet"),
+        _ => false,
+    }
+}
+
 /// Any table of Prism's schema: [`PrismClient::seal_status`] reads the
 /// replica-wide retained history through it.
 const RETENTION_PROBE_TABLE: &str = "settings";
@@ -120,6 +133,21 @@ impl PrismClient {
     /// accepts this one's seals. Trusting an already trusted identity again
     /// is harmless. Returns the trusted identity, hex.
     pub async fn trust_self(&self, root: &RootSigner) -> Result<String, PrismError> {
+        // A device that just opened may not have synced the registry yet
+        // ("issuer_registry is not available: Incomplete"), or not have
+        // recorded itself after renewing: wait for it, up to a while.
+        let deadline = tokio::time::Instant::now() + TRUST_WAIT;
+        loop {
+            match self.trust_self_once(root).await {
+                Err(err) if is_registry_pending(&err) && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                done => return done,
+            }
+        }
+    }
+
+    async fn trust_self_once(&self, root: &RootSigner) -> Result<String, PrismError> {
         let session = self.db.session();
         let trusted = async {
             let principal = session.info().await.map_err(storage_err)?.principal;
