@@ -92,6 +92,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 object CallBridge {
@@ -461,6 +462,30 @@ object CallBridge {
         val incoming = ArrayBlockingQueue<ByteArray>(QUEUE_FRAMES)
         private val threads = ArrayList<Thread>()
 
+        // Since the last stats(): frames recorded from the call and played
+        // into it, and their loudest sample.
+        private val recorded = AtomicInteger()
+        private val recordedPeak = AtomicInteger()
+        private val played = AtomicInteger()
+        private val playedPeak = AtomicInteger()
+
+        /** Recorded, its peak, played, its peak (0..32768), frames queued for the call; and starts over. */
+        fun stats(): IntArray = intArrayOf(
+            recorded.getAndSet(0), recordedPeak.getAndSet(0),
+            played.getAndSet(0), playedPeak.getAndSet(0), incoming.size,
+        )
+
+        private fun peak(pcm: ByteArray, length: Int): Int {
+            var p = 0
+            var i = 0
+            while (i + 1 < length) {
+                val s = (pcm[i].toInt() and 0xff) or (pcm[i + 1].toInt() shl 8)
+                p = maxOf(p, kotlin.math.abs(s))
+                i += 2
+            }
+            return p
+        }
+
         fun start() {
             record.startRecording()
             track.play()
@@ -473,7 +498,11 @@ object CallBridge {
                         if (running) main.post { if (pipe === this@Pipe) lost("the call's audio stopped ($n)") }
                         return@Thread
                     }
-                    if (n > 0) link.get()?.sendAudio(buf, n)
+                    if (n > 0) {
+                        recorded.incrementAndGet()
+                        recordedPeak.accumulateAndGet(peak(buf, n)) { a, b -> maxOf(a, b) }
+                        link.get()?.sendAudio(buf, n)
+                    }
                 }
             }, "call-downlink")
             threads += Thread({
@@ -484,6 +513,8 @@ object CallBridge {
                         return@Thread
                     } ?: continue
                     if (track.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING) < 0) return@Thread
+                    played.incrementAndGet()
+                    playedPeak.accumulateAndGet(peak(frame, frame.size)) { a, b -> maxOf(a, b) }
                 }
             }, "call-uplink")
             threads.forEach { it.start() }
@@ -869,6 +900,17 @@ object CallBridge {
         l.keys(toMac, toPhone)
     }
 
+    /** The Mac's ping, echoed with the audio's counters since the last (docs/calls.md). */
+    private fun pong(l: Link, ping: JSONObject) {
+        val reply = JSONObject().put("type", "pong").put("t", ping.opt("t"))
+        pipe?.stats()?.let { s ->
+            reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4])
+                .put("mode", audio.mode)
+        }
+        val bytes = reply.toString().toByteArray(Charsets.UTF_8)
+        sender.execute { l.send(CallLink.MESSAGE, bytes) }
+    }
+
     private fun read(l: Link) {
         while (!ended) {
             val frame = l.read()
@@ -882,7 +924,8 @@ object CallBridge {
                         Log.w(TAG, "a message that isn't JSON")
                         continue
                     }
-                    main.post { command(message) }
+                    // Answered here, not on the main thread: the Mac times the round trip.
+                    if (message.optString("type") == "ping") pong(l, message) else main.post { command(message) }
                 }
                 else -> Log.w(TAG, "frame type ${frame.type} after the handshake")
             }

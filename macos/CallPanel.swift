@@ -102,11 +102,20 @@ struct CallView: View {
         case .ended:
             Text("Call ended")
         case .active:
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text((call.audioOnMac ? "On this Mac" : "On the phone")
-                     + (call.since.map { " · " + duration(context.date.timeIntervalSince($0)) } ?? "")
-                     + (calls.connected ? "" : " · reconnecting…"))
-                    .monospacedDigit()
+            HStack(spacing: 6) {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text((call.audioOnMac ? "On this Mac" : "On the phone")
+                         + (call.since.map { " · " + duration(context.date.timeIntervalSince($0)) } ?? "")
+                         + (calls.connected ? "" : " · reconnecting…"))
+                        .monospacedDigit()
+                }
+                // Only when it's noticeable (PhoneCalls.delayShownFrom).
+                if call.audioOnMac, let delay = calls.delay, delay >= PhoneCalls.delayShownFrom {
+                    Label("+\(delay) ms", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                        .monospacedDigit()
+                        .help("The call's audio reaches you and the caller about \(delay) ms later than on the phone.")
+                }
             }
         }
     }

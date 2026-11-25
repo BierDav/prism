@@ -53,6 +53,13 @@ final class PhoneCalls: ObservableObject {
     }
     /// What keeps calls from working on this Mac, if anything.
     @Published private(set) var problem: String?
+    /// About how much later than on the phone the caller is heard here, or
+    /// the Mac's microphone there (the larger), in ms, while the call's
+    /// audio is on this Mac.
+    @Published private(set) var delay: Int?
+    /// From this delay on (ms) the panel shows it: past ITU-T G.114's 150 ms
+    /// a conversation starts to feel it, and the network's delay comes on top.
+    nonisolated static let delayShownFrom = 150
 
     /// Called when `call` comes or goes, for the panel.
     var onChange: (() -> Void)?
@@ -73,6 +80,10 @@ final class PhoneCalls: ObservableObject {
     private var audio: CallAudio?
     private var clearTask: Task<Void, Never>?
     private var ringTimer: Timer?
+    /// Pings the phone while linked: the round trip, and the phone's audio counters.
+    private var pingTimer: Timer?
+    private var pongs = 0
+    private var recentDelays: [Int] = []
 
     init(keyFile: String?) {
         self.keyFile = keyFile
@@ -143,7 +154,7 @@ final class PhoneCalls: ObservableObject {
     func moveToMac() { send(["type": "audio", "to": "mac"]) }
     func moveToPhone() { send(["type": "audio", "to": "phone"]) }
 
-    private func send(_ message: [String: String]) {
+    private func send(_ message: [String: Any]) {
         guard let link, let data = try? JSONSerialization.data(withJSONObject: message) else {
             call?.error = "The phone isn't connected."
             return
@@ -198,6 +209,7 @@ final class PhoneCalls: ObservableObject {
         if let old, old !== candidate { old.cancel("replaced by a newer link") }
         connected = true
         clearTask?.cancel()
+        startPings()
         log("calls: the phone connected over \(candidate.transport.bluetooth ? "Bluetooth" : "TCP") (\(candidate.peer))\(old != nil && old !== candidate ? ", replacing the earlier link" : "")")
     }
 
@@ -205,6 +217,8 @@ final class PhoneCalls: ObservableObject {
         link = nil
         audioLink.link = nil
         connected = false
+        pingTimer?.invalidate()
+        pingTimer = nil
         log("calls: the phone's connection closed (\(reason))")
         stopAudio()
         guard var call, call.state != .ended else { return }
@@ -219,9 +233,65 @@ final class PhoneCalls: ObservableObject {
         }
     }
 
+    // MARK: - The delay
+
+    private static func milliseconds() -> Int { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) }
+
+    private func startPings() {
+        pingTimer?.invalidate()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let link = self.link,
+                      let data = try? JSONSerialization.data(withJSONObject: ["type": "ping", "t": Self.milliseconds()]) else { return }
+                link.send(type: CallConnection.message, payload: data)
+            }
+        }
+    }
+
+    /// The phone's answer to a ping: the round trip gives the link's share
+    /// of the delay; the buffers on both sides give the rest.
+    private func pong(_ json: [String: Any]) {
+        guard let t = (json["t"] as? NSNumber)?.intValue else { return }
+        let rtt = Self.milliseconds() - t
+        guard let audio, call?.audioOnMac == true else {
+            if delay != nil { delay = nil }
+            recentDelays = []
+            return
+        }
+        let mac = audio.stats()
+        let phoneQueued = (json["queued"] as? NSNumber)?.intValue ?? 0
+        // Per direction: half the round trip, one frame of framing, the
+        // other side's queue and this Mac's audio device.
+        let frame = 20
+        let hear = rtt / 2 + 2 * frame + mac.playQueued * frame + mac.outputLatency
+        let speak = rtt / 2 + 2 * frame + phoneQueued * frame + mac.inputLatency
+        recentDelays = (recentDelays + [max(hear, speak)]).suffix(5)
+        let shown = recentDelays.sorted()[recentDelays.count / 2]
+        if shown != delay { delay = shown }
+        pongs += 1
+        if pongs % 5 == 1 {
+            func dB(_ peak: Any?) -> String {
+                guard let p = (peak as? NSNumber)?.doubleValue, p > 0 else { return "silent" }
+                return String(format: "peak %.0f dBFS", 20 * log10(p / 32768))
+            }
+            log("calls: audio: delay about \(shown) ms (hear \(hear), speak \(speak), round trip \(rtt) ms);"
+                + " from the phone \(mac.received) frames (\(dB(mac.receivedPeak))), dropped \(mac.dropped);"
+                + " to the phone \(mac.sent) frames (\(dB(mac.sentPeak)));"
+                + " the phone recorded \(json["recorded"] ?? "?") (\(dB(json["recordedPeak"])))"
+                + " and played \(json["played"] ?? "?") (\(dB(json["playedPeak"]))), queued \(phoneQueued), mode \(json["mode"] ?? "?")")
+        }
+    }
+
     private func message(_ data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["type"] as? String == "call",
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            log("calls: a message that isn't JSON")
+            return
+        }
+        if json["type"] as? String == "pong" {
+            pong(json)
+            return
+        }
+        guard json["type"] as? String == "call",
               let state = (json["state"] as? String).flatMap(State.init(rawValue:)) else {
             log("calls: a message that isn't a call's state")
             return
@@ -288,7 +358,13 @@ final class PhoneCalls: ObservableObject {
             }
             do {
                 try audio.start()
-                self.log("calls: the call's audio is on this Mac")
+                let devices = audio.devices
+                self.log("calls: the call's audio is on this Mac (playing to \(devices.output), recording from \(devices.input))")
+                try? await Task.sleep(for: .seconds(3))
+                if self.audio === audio, audio.outputStalled {
+                    self.log("calls: \(devices.output) plays nothing")
+                    self.call?.error = "\(devices.output) plays nothing; it may be busy with another device. Choose another output in Sound settings, or move the call to the phone."
+                }
             } catch {
                 self.log("calls: audio failed: \(error.localizedDescription)")
                 self.call?.error = "The Mac's audio failed: \(error.localizedDescription)"
@@ -301,6 +377,8 @@ final class PhoneCalls: ObservableObject {
     private func stopAudio() {
         guard let audio else { return }
         self.audio = nil
+        delay = nil
+        recentDelays = []
         audio.stop()
         log("calls: the call's audio left this Mac")
     }
@@ -1225,6 +1303,61 @@ final class CallAudio: @unchecked Sendable {
     private var converter: AVAudioConverter?
     private var running = false
     private var _muted = false
+    // For the whole call, under the lock: frames from the phone, and those the output played.
+    private var receivedTotal = 0
+    private var playedTotal = 0
+    // Since the last stats(), under the lock.
+    private var received = 0
+    private var receivedPeak: Int16 = 0
+    private var dropped = 0
+    private var sent = 0
+    private var sentPeak: Int16 = 0
+
+    struct Stats {
+        var received: Int, receivedPeak: Int, dropped: Int, sent: Int, sentPeak: Int
+        /// Frames waiting for the player now.
+        var playQueued: Int
+        /// The audio devices' own delay, ms.
+        var outputLatency: Int, inputLatency: Int
+    }
+
+    /// The counters since the last call, and starts them over.
+    func stats() -> Stats {
+        let output = Int(engine.outputNode.presentationLatency * 1000)
+        let input = Int(engine.inputNode.presentationLatency * 1000)
+        return lock.withLock {
+            defer { received = 0; receivedPeak = 0; dropped = 0; sent = 0; sentPeak = 0 }
+            return Stats(received: received, receivedPeak: Int(receivedPeak), dropped: dropped, sent: sent,
+                         sentPeak: Int(sentPeak), playQueued: queued, outputLatency: output, inputLatency: input)
+        }
+    }
+
+    /// Frames came from the phone but the output played none: it doesn't run
+    /// (a Bluetooth headset busy with another device, say).
+    var outputStalled: Bool { lock.withLock { receivedTotal >= 25 && playedTotal == 0 } }
+
+    /// The devices the engine plays to and records from, by name.
+    var devices: (output: String, input: String) {
+        (Self.deviceName(engine.outputNode.audioUnit), Self.deviceName(engine.inputNode.audioUnit))
+    }
+
+    private static func deviceName(_ unit: AudioUnit?) -> String {
+        guard let unit else { return "?" }
+        var device = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &size) == noErr else { return "?" }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var name: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &name) == noErr, let name else { return "device \(device)" }
+        return name.takeRetainedValue() as String
+    }
+
+    private static func peak(_ samples: UnsafeBufferPointer<Int16>) -> Int16 {
+        var p: Int16 = 0
+        for s in samples { p = max(p, s == .min ? .max : abs(s)) }
+        return p
+    }
 
     var muted: Bool {
         get { lock.withLock { _muted } }
@@ -1294,14 +1427,17 @@ final class CallAudio: @unchecked Sendable {
         }
         guard error == nil, out.frameLength > 0, let samples = out.int16ChannelData else { return }
         let bytes = Data(bytes: samples[0], count: Int(out.frameLength) * 2)
+        let peak = Self.peak(UnsafeBufferPointer(start: samples[0], count: Int(out.frameLength)))
         var frames: [Data] = []
         lock.withLock {
             guard running else { return }
             pending.append(bytes)
+            if !_muted { sentPeak = max(sentPeak, peak) }
             while pending.count >= Self.frameBytes {
                 let frame = pending.prefix(Self.frameBytes)
                 pending.removeFirst(Self.frameBytes)
                 frames.append(_muted ? Data(count: Self.frameBytes) : Data(frame))
+                sent += 1
             }
         }
         frames.forEach(send)
@@ -1310,7 +1446,13 @@ final class CallAudio: @unchecked Sendable {
     /// A frame from the phone, scheduled on the player; the oldest go when it falls behind.
     func play(_ frame: Data) {
         let ok: Bool = lock.withLock {
-            guard running, queued < Self.maxQueued else { return false }
+            guard running else { return false }
+            received += 1
+            receivedTotal += 1
+            guard queued < Self.maxQueued else {
+                dropped += 1
+                return false
+            }
             queued += 1
             return true
         }
@@ -1319,13 +1461,22 @@ final class CallAudio: @unchecked Sendable {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(count)),
               let channel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = AVAudioFrameCount(count)
+        var peak: Int16 = 0
         frame.withUnsafeBytes { raw in
             let samples = raw.bindMemory(to: Int16.self)
-            for i in 0..<count { channel[i] = Float(Int16(littleEndian: samples[i])) / 32768 }
+            for i in 0..<count {
+                let s = Int16(littleEndian: samples[i])
+                peak = max(peak, s == .min ? .max : abs(s))
+                channel[i] = Float(s) / 32768
+            }
         }
+        lock.withLock { receivedPeak = max(receivedPeak, peak) }
         player.scheduleBuffer(buffer) { [weak self] in
             guard let self else { return }
-            self.lock.withLock { self.queued -= 1 }
+            self.lock.withLock {
+                self.queued -= 1
+                self.playedTotal += 1
+            }
         }
     }
 }

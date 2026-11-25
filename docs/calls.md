@@ -202,6 +202,23 @@ Mac → phone:
 | `{"type": "decline"}` | declines a ringing call |
 | `{"type": "hangup"}` | ends the call |
 | `{"type": "audio", "to": "mac"}` / `"phone"` | moves the active call's audio |
+| `{"type": "ping", "t": 123456}` | asks for a `pong` (every 2 s while linked) |
+
+The phone answers a ping at once, from the link's reader:
+
+```json
+{"type": "pong", "t": 123456, "recorded": 100, "recordedPeak": 8123,
+ "played": 100, "playedPeak": 2400, "queued": 1, "mode": 5}
+```
+
+`t` comes back unchanged (the Mac's clock, ms), so the Mac has the round
+trip. While the call's audio is on the Mac the pong also counts the frames
+the phone recorded from the call and played into it since the last pong,
+their loudest sample (0–32768), the frames waiting to be played into the
+call and Android's audio mode. The Mac logs these and estimates the delay
+the link adds in each direction (half the round trip, the framing, the
+queues and its audio device's latency); the call panel shows the larger
+from 150 ms on.
 
 Audio frames flow both ways while `audio` is `mac`; the Mac sends silence
 while it's muted. A side that falls more than 200 ms behind drops audio
