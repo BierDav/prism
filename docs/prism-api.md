@@ -756,7 +756,8 @@ the committed one.
   started it if it is new. An ID is 1 to 100 letters, digits or `-_.:`; each
   entry's and message's JSON is at most 16 KiB (`400` otherwise): the app
   cuts long texts and never stores image or file bytes, only their names.
-  A conversation may have any number of entries.
+  A conversation may have any number of entries. Concurrent writers from
+  several devices are not reconciled: the later save gets `409`.
 - `DELETE /v1/assistant/conversations/{id}` deletes it with its rows and
   leaves a tombstone, which refuses every later save of that ID; it returns
   `{"ok": true}`, also for an ID the replica never had.

@@ -1,12 +1,15 @@
 // The assistant's conversations on this phone and in Rocky. A save goes to
-// the outbox first (a file per conversation in the app's files), then to the
-// replica (PUT /v1/assistant/conversations/{id}), naming the revision it
-// builds on; the file goes once the replica committed that very version.
+// the outbox first (a file per conversation in the app's files: core/Outbox),
+// then to the replica (PUT /v1/assistant/conversations/{id}), naming the
+// revision it builds on and the one it makes. One save is in flight at a
+// time and is sent as it is until its answer is known; the latest version
+// waits next to it and then builds on what it committed.
 // While the replica is busy, closed or not provisioned the file stays and is
 // sent again later (backing off), on the next save, on the history screen
 // and whenever the replica opens. A save the replica refuses for good (the
 // conversation changed on another device, or can't be stored) stays on the
-// phone with why, and the history screen shows it. A delete leaves a
+// phone with why, and the history screen shows it, until a newer version
+// replaces it, which is tried in turn. A delete leaves a
 // tombstone file, written before the copy goes, and the replica a tombstone
 // row: no later save brings the conversation back. The replica syncs to the
 // workers on its own, as every table does.
@@ -17,6 +20,7 @@ import android.content.Context
 import android.util.Log
 import at.quickme.prism.PrismApi
 import at.quickme.prism.Sample
+import at.quickme.prism.assistant.core.Outbox
 import at.quickme.prism.shared.AssistantConversation
 import at.quickme.prism.shared.PrismClient
 import at.quickme.prism.shared.PrismError
@@ -49,30 +53,33 @@ data class ConversationSnapshot(
     val createdAt: Long,
     val updatedAt: Long,
     /** The committed revision this builds on (0: new). */
-    val revision: Long = 0,
+    override val revision: Long = 0,
     /** The ID of the revision this version makes, new for every version queued: its retry is answered as the first time. */
-    val saveId: String = "",
+    override val saveId: String = "",
     val entries: List<StoredEntry>,
     val history: List<String>,
     /** Why the replica refused it for good; it then stays on the phone, unsent. */
-    val problem: String = "",
-) {
+    override val problem: String = "",
+) : Outbox.Version<ConversationSnapshot> {
     val summary: AssistantConversation get() = AssistantConversation(id, "", title, createdAt, updatedAt, revision)
+
+    override fun with(revision: Long, saveId: String, problem: String) = copy(revision = revision, saveId = saveId, problem = problem)
 }
 
 object ConversationStore {
     private const val TAG = "PrismConversations"
     private const val DIR = "assistant-outbox"
+    /** The conversation's Outbox: what was committed, what is in flight and what waits. */
     private const val JSON = ".json"
     /** A delete still to send. */
     private const val DELETED = ".deleted"
     /** A delete sent: kept so no save here brings it back. */
     private const val GONE = ".gone"
-    /** The last revision the replica committed for this phone. */
-    private const val REVISION = ".rev"
 
     private val json = Json { ignoreUnknownKeys = true }
+    private val record = Outbox.serializer(ConversationSnapshot.serializer())
     private val failures = MutableStateFlow<String?>(null)
+    private val version = MutableStateFlow(0)
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
             Log.w(TAG, "conversation store: ${e.message}")
@@ -89,6 +96,13 @@ object ConversationStore {
     /** Why the outbox couldn't write or send, for the history screen; null while all is well. */
     val problem: StateFlow<String?> get() = failures
 
+    /** Counts what changed in the outbox (saved, sent, refused, deleted), for the history screen to follow. */
+    val changes: StateFlow<Int> get() = version
+
+    private fun changed() {
+        version.value++
+    }
+
     private fun dir(c: Context) = File(c.applicationContext.filesDir, DIR).apply { mkdirs() }
 
     /** A file for [id] (IDs are letters, digits and `-_.:`). */
@@ -96,23 +110,21 @@ object ConversationStore {
 
     private fun tombstoned(c: Context, id: String) = file(c, id, DELETED).exists() || file(c, id, GONE).exists()
 
-    private fun committed(c: Context, id: String): Long =
-        runCatching { file(c, id, REVISION).readText().trim().toLong() }.getOrDefault(0L)
-
     /**
-     * Keeps [s] on the phone now and sends it to the replica. It builds on
-     * the revision the replica last committed for it, unless a save of it
-     * still waits (then on that one's); a deleted conversation is not kept.
+     * Keeps [s] on the phone now and sends it to the replica. It replaces
+     * the version that waited, not the save in flight, and builds on what
+     * the replica last committed (Outbox.base); a deleted conversation is
+     * not kept.
      */
     fun save(c: Context, s: ConversationSnapshot) {
         val app = c.applicationContext
         scope.launch {
             files.withLock {
                 if (tombstoned(app, s.id)) return@launch
-                val waiting = read(file(app, s.id, JSON))
-                val base = waiting?.revision ?: maxOf(s.revision, committed(app, s.id))
-                write(file(app, s.id, JSON), s.copy(revision = base, saveId = PrismClient.requestId(), problem = waiting?.problem.orEmpty()))
+                val f = file(app, s.id, JSON)
+                write(f, (read(f) ?: Outbox()).queued(s, PrismClient.requestId()))
             }
+            changed()
             send(app)
         }
     }
@@ -131,6 +143,7 @@ object ConversationStore {
                 writeText(file(app, id, DELETED), id)
                 file(app, id, JSON).delete()
             }
+            changed()
             send(app)
         }
     }
@@ -139,7 +152,7 @@ object ConversationStore {
     suspend fun pending(c: Context): Pair<List<ConversationSnapshot>, Set<String>> = withContext(Dispatchers.IO) {
         files.withLock {
             val all = dir(c).listFiles().orEmpty()
-            val kept = all.filter { it.name.endsWith(JSON) }.mapNotNull { read(it) }
+            val kept = all.filter { it.name.endsWith(JSON) }.mapNotNull { read(it)?.latest }
             val deleted = all.filter { it.name.endsWith(DELETED) || it.name.endsWith(GONE) }
                 .mapNotNull { runCatching { it.readText() }.getOrNull() }.toSet()
             kept to deleted
@@ -151,7 +164,7 @@ object ConversationStore {
         val local = withContext(Dispatchers.IO) {
             files.withLock {
                 if (tombstoned(c, id)) throw PrismError(410, "gone", "This chat was deleted.")
-                read(file(c, id, JSON))
+                read(file(c, id, JSON))?.latest
             }
         }
         if (local != null) return local
@@ -205,17 +218,19 @@ object ConversationStore {
             writeText(file(app, id, GONE), id)
             f.delete()
         }
+        changed()
     }
 
     private suspend fun sendSave(app: Context, f: File) {
-        val (text, s) = files.withLock {
-            val text = if (f.exists()) f.readText() else return
-            text to (runCatching { json.decodeFromString(ConversationSnapshot.serializer(), text) }.getOrNull() ?: run {
+        // The save in flight, or the latest version made it (on disk before
+        // it is sent, so it is sent again as it was after the app is killed).
+        val s = files.withLock {
+            val o = read(f) ?: run {
                 f.delete()
                 return
-            })
-        }
-        if (s.problem.isNotEmpty()) return
+            }
+            o.started().also { if (it != o) write(f, it) }.sending
+        } ?: return
         val revision = try {
             // A save whose answer was lost after it committed: sent again with
             // its saveId, it is answered as the first time.
@@ -226,33 +241,32 @@ object ConversationStore {
                     writeText(file(app, s.id, GONE), s.id)
                     f.delete()
                 }
-                e.status == 409 -> hold(f, "Changed on another device since; this copy stays on the phone.")
-                e.status == 400 -> hold(f, "Not saved: ${e.message}")
+                e.status == 409 -> answered(f, s) { it.refused("Changed on another device since; this copy stays on the phone.") }
+                e.status == 400 -> answered(f, s) { it.refused("Not saved: ${e.message}") }
                 else -> throw e
             }
+            changed()
             return
         }
+        // Its answer and the next version's new base, in one write.
+        answered(f, s) { it.acknowledged(revision) }
+        changed()
+    }
+
+    /** Records the answer to save [s] in [f], if [s] is still the one in flight there. */
+    private suspend fun answered(f: File, s: ConversationSnapshot, how: (Outbox<ConversationSnapshot>) -> Outbox<ConversationSnapshot>) =
         files.withLock {
-            writeText(file(app, s.id, REVISION), revision.toString())
-            val now = if (f.exists()) f.readText() else null
-            when {
-                now == text -> f.delete()
-                // Saved again meanwhile: that version builds on what was just committed.
-                now != null -> read(f)?.let { write(f, it.copy(revision = revision)) }
-            }
+            val o = read(f) ?: return@withLock
+            if (o.sending?.saveId != s.saveId) return@withLock
+            val after = how(o)
+            after.latest?.problem?.takeIf { it.isNotEmpty() }?.let { Log.w(TAG, "a conversation was refused: $it") }
+            write(f, after)
         }
-    }
 
-    /** Keeps [f]'s conversation on the phone, unsent, with why. */
-    private suspend fun hold(f: File, why: String) = files.withLock {
-        Log.w(TAG, "a conversation was refused: $why")
-        read(f)?.let { write(f, it.copy(problem = why)) }
-    }
+    private fun read(f: File): Outbox<ConversationSnapshot>? =
+        if (!f.exists()) null else runCatching { json.decodeFromString(record, f.readText()) }.getOrNull()
 
-    private fun read(f: File): ConversationSnapshot? =
-        if (!f.exists()) null else runCatching { json.decodeFromString(ConversationSnapshot.serializer(), f.readText()) }.getOrNull()
-
-    private fun write(f: File, s: ConversationSnapshot) = writeText(f, json.encodeToString(ConversationSnapshot.serializer(), s))
+    private fun write(f: File, o: Outbox<ConversationSnapshot>) = writeText(f, json.encodeToString(record, o))
 
     /** Replaces [f] whole or not at all; a failure is reported ([problem]) and thrown. */
     private fun writeText(f: File, text: String) {

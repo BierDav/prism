@@ -90,6 +90,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 /** The history screen's entry point. */
@@ -155,9 +156,13 @@ private fun HistoryScreen(onClose: () -> Unit) {
         }
         items = byId.values.filter { it.conversation.id !in deleted }.sortedByDescending { it.conversation.updatedAt }
     }
-    // Synced or written here: the list follows.
+    // Synced or written here: the list follows; so it does when the outbox
+    // sent a chat, or the replica refused one.
     LaunchedEffect(Unit) {
         PrismApi.changes(listOf("assistant_conversations")).collect { if (!inChat) reload++ }
+    }
+    LaunchedEffect(Unit) {
+        ConversationStore.changes.drop(1).collect { if (!inChat) reload++ }
     }
     DisposableEffect(Unit) { onDispose { session?.detach() } }
 

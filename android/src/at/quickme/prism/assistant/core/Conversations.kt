@@ -51,12 +51,17 @@ object Conversations {
      * again): a message still too long has its tool calls replaced by a line
      * saying what was called, and their results, in the messages after it,
      * by text, so every call keeps its result and the model gets valid JSON.
+     * Results too many or too long to keep as they are go as text the same
+     * way, and so do their calls, in the message before: never a call
+     * without its result (Harness.sanitize would drop the rest after it).
      */
     fun historyRows(messages: List<String>): List<String> {
+        val parsed = messages.mapNotNull { m -> runCatching { Json.parseToJsonElement(m) as? JsonObject }.getOrNull() }
+        val tooLong = parsed.filter { fitText(it) == null }.flatMapTo(HashSet()) { ids(it, RESULT) }
         val summarized = HashMap<String, String>()
-        return messages.mapNotNull { m ->
-            val parsed = runCatching { Json.parseToJsonElement(m) as? JsonObject }.getOrNull() ?: return@mapNotNull null
-            val message = withParts(parsed) { p -> resultAsText(p, summarized) }
+        return parsed.map { m ->
+            val pairs = withParts(m) { p -> if (p.str("id") in tooLong) callAsText(p, summarized) else p }
+            val message = withParts(pairs) { p -> resultAsText(p, summarized) }
             fitText(message)
                 ?: fitText(withParts(message) { p -> callAsText(p, summarized) })
                 ?: withParts(message) { p -> callAsText(p, summarized) }.let { m2 ->
@@ -64,6 +69,10 @@ object Conversations {
                 }
         }
     }
+
+    /** The IDs of [m]'s parts of [type]. */
+    private fun ids(m: JsonObject, type: String): List<String> =
+        (m["parts"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.takeIf { p -> p.str("type") == type }?.str("id") }
 
     private const val KOOG = "ai.koog.prompt.message.MessagePart."
     private const val TEXT = KOOG + "Text"
@@ -84,7 +93,7 @@ object Conversations {
         if (p.str("type") != CALL) return p
         val tool = p.str("tool").orEmpty()
         p.str("id")?.let { summarized[it] = tool }
-        return text("[Called $tool; its arguments were too long to keep.]")
+        return text("[Called $tool; too long to keep as a call.]")
     }
 
     /** The result of a call that went as text, as text. */

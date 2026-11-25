@@ -26,7 +26,7 @@
 
 use crate::client::{PrismClient, storage_err};
 use crate::types::PrismError;
-use rocky_sdk::{Row, SqlValue, params};
+use rocky_sdk::{Row, SqlValue, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -286,12 +286,13 @@ impl PrismClient {
         &self,
         id: &str,
     ) -> Result<AssistantConversation, PrismError> {
-        let Found::Live(head) = self.assistant_head(id).await? else {
+        // The head and its rows from one snapshot: a save committing
+        // meanwhile (and deleting the rows it replaced) is seen whole or not
+        // at all. Of the rows, only those up to the committed revision count.
+        let (Found::Live(head), entries, history) = self.assistant_read(id).await? else {
             return Err(PrismError::NotFound);
         };
         let committed = head.row.revision;
-        let entries = self.assistant_rows("assistant_entries", id).await?;
-        let history = self.assistant_rows("assistant_history", id).await?;
         Ok(AssistantConversation {
             entries: visible(&entries, 0, head.entry_count, committed)
                 .into_values()
@@ -364,7 +365,8 @@ impl PrismClient {
         }
 
         let _guard = self.assistant_lock.lock().await;
-        let head = match self.assistant_head(&id).await? {
+        let (head, stored_entries, stored_history) = self.assistant_read(&id).await?;
+        let head = match head {
             Found::Deleted => return Err(PrismError::Conflict(ASSISTANT_DELETED.into())),
             Found::Nothing => None,
             Found::Live(head) => Some(head),
@@ -377,8 +379,6 @@ impl PrismClient {
             return Err(PrismError::Conflict(ASSISTANT_STALE.into()));
         }
         let revision = committed + 1;
-        let stored_entries = self.assistant_rows("assistant_entries", &id).await?;
-        let stored_history = self.assistant_rows("assistant_history", &id).await?;
         let (count, from, to) = head
             .as_ref()
             .map_or((0, 0, 0), |h| (h.entry_count, h.history_from, h.history_to));
@@ -516,7 +516,8 @@ impl PrismClient {
             ));
         }
         let _guard = self.assistant_lock.lock().await;
-        let mut ops = vec![match self.assistant_head(id).await? {
+        let (head, entries, history) = self.assistant_read(id).await?;
+        let mut ops = vec![match head {
             Found::Nothing => Op::Tombstone(AssistantConversationRow {
                 conversation_id: id.into(),
                 device: device.into(),
@@ -526,13 +527,11 @@ impl PrismClient {
             }),
             _ => Op::MarkDeleted,
         }];
-        for table in ["assistant_entries", "assistant_history"] {
-            ops.extend(
-                self.assistant_rows(table, id)
-                    .await?
-                    .into_iter()
-                    .map(|r| Op::Delete(table, r.id)),
-            );
+        for (table, rows) in [
+            ("assistant_entries", entries),
+            ("assistant_history", history),
+        ] {
+            ops.extend(rows.into_iter().map(|r| Op::Delete(table, r.id)));
         }
         self.run_assistant_ops(id, ops).await
     }
@@ -675,54 +674,74 @@ impl PrismClient {
         Ok(())
     }
 
-    async fn assistant_head(&self, id: &str) -> Result<Found, PrismError> {
-        let mut rows = self
-            .db
-            .query(
-                &format!(
-                    "SELECT {HEAD_COLUMNS} FROM assistant_conversations \
-                     WHERE conversation_id = ? ORDER BY id ASC"
-                ),
-                params![id],
-            )
-            .await
-            .map_err(storage_err)?;
-        let mut all = Vec::new();
-        while let Some(r) = rows.next().await.map_err(storage_err)? {
-            all.push(head_row(&r)?);
+    /// Conversation `id`'s head and every row of its entries and history,
+    /// read in one transaction (rolled back), so all of it is of one moment.
+    async fn assistant_read(
+        &self,
+        id: &str,
+    ) -> Result<(Found, Vec<Stored>, Vec<Stored>), PrismError> {
+        let mut tx = self.db.transaction().await.map_err(storage_err)?;
+        let read = async {
+            let head = assistant_head(&mut tx, id).await?;
+            let entries = assistant_rows(&mut tx, "assistant_entries", id).await?;
+            let history = assistant_rows(&mut tx, "assistant_history", id).await?;
+            Ok((head, entries, history))
         }
-        Ok(head_of(all))
+        .await;
+        tx.rollback().await.map_err(storage_err)?;
+        read
     }
+}
 
-    /// Every row of conversation `id` in `table`, in Rocky id order.
-    async fn assistant_rows(&self, table: &str, id: &str) -> Result<Vec<Stored>, PrismError> {
-        let (order, entry_id) = match table {
-            "assistant_entries" => ("position", "entry_id"),
-            _ => ("seq", "''"),
-        };
-        let mut rows = self
-            .db
-            .query(
-                &format!(
-                    "SELECT id, {order} AS ord, revision, {entry_id} AS entry_id, body \
-                     FROM {table} WHERE conversation_id = ? ORDER BY id ASC"
-                ),
-                params![id],
-            )
-            .await
-            .map_err(storage_err)?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await.map_err(storage_err)? {
-            out.push(Stored {
-                id: r.get::<SqlValue>("id").map_err(storage_err)?,
-                order: col_i64(&r, "ord"),
-                revision: col_i64(&r, "revision"),
-                entry_id: col_str(&r, "entry_id"),
-                body: col_str(&r, "body"),
-            });
-        }
-        Ok(out)
+async fn assistant_head(tx: &mut Transaction, id: &str) -> Result<Found, PrismError> {
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT {HEAD_COLUMNS} FROM assistant_conversations \
+                     WHERE conversation_id = ? ORDER BY id ASC"
+            ),
+            params![id],
+        )
+        .await
+        .map_err(storage_err)?;
+    let mut all = Vec::new();
+    while let Some(r) = rows.next().await.map_err(storage_err)? {
+        all.push(head_row(&r)?);
     }
+    Ok(head_of(all))
+}
+
+/// Every row of conversation `id` in `table`, in Rocky id order.
+async fn assistant_rows(
+    tx: &mut Transaction,
+    table: &str,
+    id: &str,
+) -> Result<Vec<Stored>, PrismError> {
+    let (order, entry_id) = match table {
+        "assistant_entries" => ("position", "entry_id"),
+        _ => ("seq", "''"),
+    };
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT id, {order} AS ord, revision, {entry_id} AS entry_id, body \
+                     FROM {table} WHERE conversation_id = ? ORDER BY id ASC"
+            ),
+            params![id],
+        )
+        .await
+        .map_err(storage_err)?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.map_err(storage_err)? {
+        out.push(Stored {
+            id: r.get::<SqlValue>("id").map_err(storage_err)?,
+            order: col_i64(&r, "ord"),
+            revision: col_i64(&r, "revision"),
+            entry_id: col_str(&r, "entry_id"),
+            body: col_str(&r, "body"),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -860,9 +879,8 @@ mod tests {
         assert_eq!(bodies(&c), ["a", "b", "z"]);
         assert_eq!(c.history, ["m1", "m2", "m9"]);
         // Nothing of the cut-short save is left behind.
-        let rows = |table| client.assistant_rows(table, "c-1");
-        assert_eq!(rows("assistant_entries").await.expect("rows").len(), 3);
-        assert_eq!(rows("assistant_history").await.expect("rows").len(), 3);
+        let (_, entries, history) = client.assistant_read("c-1").await.expect("rows");
+        assert_eq!((entries.len(), history.len()), (3, 3));
     }
 
     #[test]

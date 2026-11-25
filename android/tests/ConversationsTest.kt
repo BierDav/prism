@@ -110,6 +110,25 @@ fun main() {
     check(messageRows[3] == assistant(textPart("Done.")), "what follows stays as it is")
     check(messageRows.all { r -> runCatching { Json.parseToJsonElement(r) }.isSuccess }, "every row is valid JSON")
 
+    // Results too many to keep (each cut, still too long together): they go
+    // as text, and so do their calls, though the calls' message fits.
+    fun ids(row: String, t: String) = parts(row).filter { type(it) == t }.map { it["id"]!!.jsonPrimitive.content }
+    val batch = (1..100).map { "w$it" }
+    val batchRows = Conversations.historyRows(listOf(
+        assistant(call("n1", "save_note", "{}")),
+        user(result("n1", "save_note", "saved")),
+        assistant(*batch.map { call(it, "get_weather", "{}") }.toTypedArray()),
+        user(*batch.map { result(it, "get_weather", "w".repeat(1000)) }.toTypedArray()),
+        assistant(textPart("Done.")),
+    ))
+    check(batchRows.all { bytes(it) <= Conversations.ROW_BYTES }, "every row of a large batch of results fits")
+    val callIds = batchRows.flatMap { ids(it, "MessagePart.Tool.Call") }
+    val resultIds = batchRows.flatMap { ids(it, "MessagePart.Tool.Result") }
+    check(callIds == resultIds, "every call kept has its result, and no other: $callIds / ${resultIds.size} results")
+    check(callIds == listOf("n1"), "the batch's calls went as text with their results, the pair before stays")
+    check("[Called get_weather;" in parts(batchRows[2])[0]["text"]!!.jsonPrimitive.content, "saying what was called")
+    check(batchRows[4] == assistant(textPart("Done.")), "and what follows stays")
+
     // --- Titles and IDs ---
     check(Conversations.title(t) == "Weather in Vienna and a screenshot?", "the title is the first request on one line")
     val wordy = Transcript().after(Event.Said("Please look into why the nightly backup on david-mm keeps failing since Tuesday"))

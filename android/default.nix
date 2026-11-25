@@ -600,6 +600,7 @@ in
         run CoreTestKt
         run AssistantTestKt
         run ConversationsTestKt
+        run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
         run MetricsTestKt remote-write.bin
