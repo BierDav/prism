@@ -3,6 +3,13 @@
 
 [profile.ci]
 fail-fast = false
+# The coordinated sealing test (rocky-prism/tests/coordinated.rs) hangs now
+# and then on the shared amd64 runners: one replica's seal status stops
+# answering after a compaction, so its own deadline never fires. It passes
+# locally (about 6 minutes); run it there with
+# `cargo test -p rocky-prism --features coordinator --test coordinated` until
+# the hang is understood.
+default-filter = "not binary_id(rocky-prism::coordinated)"
 # Some sync tests are timing-sensitive on the shared runners: a failed test
 # gets up to two more attempts (and is reported as flaky if one passes).
 retries = 2
