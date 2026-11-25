@@ -436,6 +436,17 @@ impl Api {
                 retrying(|| c.set_placement_actions(req.clone())).await?;
                 self.placement().await
             }
+            ("PUT", ["v1", "placement", "account-limits", account]) => {
+                let limit: rocky_prism::PlacementAccountLimit = serde_json::from_value(body)?;
+                let (c, account) = (&self.client, account.to_string());
+                retrying(|| c.set_account_limit(&account, Some(limit.clone()), now_unix())).await?;
+                self.placement().await
+            }
+            ("DELETE", ["v1", "placement", "account-limits", account]) => {
+                let (c, account) = (&self.client, account.to_string());
+                retrying(|| c.set_account_limit(&account, None, now_unix())).await?;
+                self.placement().await
+            }
             ("PUT", ["v1", "placement", "policy"]) => {
                 let policy: PlacementPolicy = serde_json::from_value(body)?;
                 let c = &self.client;

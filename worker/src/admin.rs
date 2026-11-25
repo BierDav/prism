@@ -8,6 +8,8 @@
 //! - `GET /v1/machines` → the machines view (`machines.rs`)
 //! - `POST /v1/devices/{device}/token` → `{device, token}`
 //! - `DELETE /v1/devices/{device}/token` → `{device, revoked}`
+//! - `PUT /v1/placement/account-limits/{account}` `{sessionPercent?,
+//!   weeklyPercent?, until?}` → the account's limits; `DELETE` removes it
 //!
 //! Device tokens are `prism_` + 32 random bytes (base64url), as Go minted
 //! them. Only their SHA-256 is stored, in the replicated `settings` table
@@ -238,6 +240,63 @@ pub async fn post_device_token(
         }
         Ok(Err(message)) => error(StatusCode::BAD_REQUEST, message, "invalid"),
         Err(err) => unavailable("device token", err),
+    }
+}
+
+/// `PUT` and `DELETE /v1/placement/account-limits/{account}`: sets or
+/// removes an account's temporary placement limit (`prism account-limit`).
+pub async fn put_account_limit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    if body.len() > MAX_ADMIN_BODY {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Body too large.", "invalid");
+    }
+    let Ok(limit) = serde_json::from_slice::<rocky_prism::PlacementAccountLimit>(&body) else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON.", "invalid");
+    };
+    account_limit(&state, &account, Some(limit)).await
+}
+
+pub async fn delete_account_limit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    account_limit(&state, &account, None).await
+}
+
+async fn account_limit(
+    state: &AppState,
+    account: &str,
+    limit: Option<rocky_prism::PlacementAccountLimit>,
+) -> Response {
+    let now = (state.now_fn)();
+    match rocky_prism::retry_unavailable(|| {
+        state.client.set_account_limit(account, limit.clone(), now)
+    })
+    .await
+    {
+        Ok(()) => {
+            println!("prism-worker: account limit for {account}: {limit:?}");
+            (
+                StatusCode::OK,
+                Json(json!({ "account": account, "limit": limit })),
+            )
+                .into_response()
+        }
+        Err(rocky_prism::PrismError::InvalidInput(message)) => {
+            error(StatusCode::BAD_REQUEST, message, "invalid")
+        }
+        Err(err) => unavailable("account limit", err),
     }
 }
 

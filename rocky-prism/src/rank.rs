@@ -1,7 +1,8 @@
 use crate::types::{
-    PlacementActiveHours, PlacementEntryDecision, PlacementEntryInput, PlacementEntryRow,
-    PlacementHostModel, PlacementLoad, PlacementMoveTarget, PlacementOption, PlacementPolicy,
-    PlacementProfileDecision, PlacementSample, PlacementSelection, PlacementWindow,
+    PlacementAccountLimit, PlacementActiveHours, PlacementEntryDecision, PlacementEntryInput,
+    PlacementEntryRow, PlacementHostModel, PlacementLoad, PlacementMoveTarget, PlacementOption,
+    PlacementPolicy, PlacementProfileDecision, PlacementSample, PlacementSelection,
+    PlacementWindow,
 };
 use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
@@ -210,7 +211,106 @@ fn preempt_reason(
     None
 }
 
+/// The account's temporary limit (`PlacementPolicy::account_limits`) when
+/// one applies at `now`.
+pub fn active_account_limit<'a>(
+    policy: &'a PlacementPolicy,
+    model: &str,
+    now: DateTime<Utc>,
+) -> Option<&'a PlacementAccountLimit> {
+    policy
+        .account_limits
+        .get(crate::weekly::account_of(model))
+        .filter(|l| l.session_percent.is_some() || l.weekly_percent.is_some())
+        .filter(|l| l.until.is_empty() || parse_placement_time(&l.until).is_some_and(|t| t > now))
+}
+
+/// Ranks an entry. Under a temporary account limit the entry is ranked as if
+/// the limit were the window's end: readings, the burn rate and the weekly
+/// share are scaled by 100 / limit, so the switch point, predictions and
+/// weekly slack all count against the limit. The decision still shows the
+/// windows' real readings, and its reason names the limit.
 pub fn decide_entry(
+    entry: &PlacementEntryInput,
+    policy: &PlacementPolicy,
+    host_model: Option<&PlacementHostModel>,
+    load: &PlacementLoad,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> PlacementEntryDecision {
+    let (Some(limit), Some(host_model)) = (
+        active_account_limit(policy, &entry.selection.model, now),
+        host_model,
+    ) else {
+        return decide_unlimited(entry, policy, host_model, load, now, tz);
+    };
+    let factor = |percent: Option<f64>| percent.filter(|p| *p > 0.0).map_or(1.0, |p| 100.0 / p);
+    let (session_factor, weekly_factor) =
+        (factor(limit.session_percent), factor(limit.weekly_percent));
+    let scale = |w: &Option<PlacementWindow>, by: f64| {
+        w.as_ref().map(|w| PlacementWindow {
+            used_percent: w.used_percent * by,
+            resets_at: w.resets_at.clone(),
+        })
+    };
+    let scaled_model = PlacementHostModel {
+        blocked: host_model.blocked.clone(),
+        session: scale(&host_model.session, session_factor),
+        weekly: scale(&host_model.weekly, weekly_factor),
+    };
+    let scaled_entry = PlacementEntryInput {
+        session_share_of_weekly: entry.session_share_of_weekly.map(|s| s * weekly_factor),
+        ..entry.clone()
+    };
+    let scaled_load = PlacementLoad {
+        running: load.running,
+        burn_per_thread_per_hour: load.burn_per_thread_per_hour.map(|b| b * session_factor),
+    };
+    let mut decision = decide_unlimited(
+        &scaled_entry,
+        policy,
+        Some(&scaled_model),
+        &scaled_load,
+        now,
+        tz,
+    );
+    if decision.state == "disabled" || decision.state == "unavailable" {
+        return decision;
+    }
+    decision.session = live_used(host_model.session.as_ref(), now);
+    decision.weekly = live_used(host_model.weekly.as_ref(), now);
+    decision.predicted_session_percent = decision
+        .predicted_session_percent
+        .map(|p| p / session_factor);
+    let mut limits = Vec::new();
+    if let Some(p) = limit.session_percent {
+        limits.push(format!("the session window at {}", format_percent(p)));
+    }
+    if let Some(p) = limit.weekly_percent {
+        limits.push(format!("the weekly window at {}", format_percent(p)));
+    }
+    let until = if limit.until.is_empty() {
+        String::new()
+    } else {
+        format!(" until {}", limit.until)
+    };
+    let note = format!(
+        "A temporary limit counts {} as full{until}.",
+        limits.join(" and ")
+    );
+    let really_out = [&decision.session, &decision.weekly]
+        .iter()
+        .any(|w| w.as_ref().is_some_and(|w| w.used_percent >= 100.0));
+    decision.reason = if decision.reason.is_empty() || decision.state == "exhausted" && !really_out
+    {
+        note
+    } else {
+        format!("{} {note}", decision.reason)
+    };
+    decision
+}
+
+fn decide_unlimited(
     entry: &PlacementEntryInput,
     policy: &PlacementPolicy,
     host_model: Option<&PlacementHostModel>,

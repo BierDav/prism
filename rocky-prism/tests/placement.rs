@@ -1,10 +1,10 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
 use rocky_prism::{
-    PlacementActiveHours, PlacementEntryInput, PlacementHostModel, PlacementLoad, PlacementMoveAck,
-    PlacementPolicy, PlacementSample, PlacementSelection, PlacementSyncModel,
-    PlacementSyncReasoning, PlacementSyncRequest, PlacementSyncThread, PlacementWindow,
-    PrismClient, PrismError, PutPlacementEntryInput, PutPlacementProfileRequest,
+    PlacementAccountLimit, PlacementActiveHours, PlacementEntryInput, PlacementHostModel,
+    PlacementLoad, PlacementMoveAck, PlacementPolicy, PlacementSample, PlacementSelection,
+    PlacementSyncModel, PlacementSyncReasoning, PlacementSyncRequest, PlacementSyncThread,
+    PlacementWindow, PrismClient, PrismError, PutPlacementEntryInput, PutPlacementProfileRequest,
     SetPlacementActionsRequest, compute_burn_rate, decide_entry, model_key, placement_drain_target,
     placement_move_target, placement_waits_for_reset, rank_placement_profile, same_placement_entry,
     usable_hours,
@@ -760,6 +760,133 @@ fn test_implausible_weekly_reset_is_unknown() {
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
+#[test]
+fn test_a_temporary_account_limit_counts_as_the_window_end() {
+    // claude-alex: stop with 30% of the session and 10% of the week left.
+    let now = utc_dt(2026, 11, 25, 12, 0, 0);
+    let limit = PlacementAccountLimit {
+        session_percent: Some(70.0),
+        weekly_percent: Some(90.0),
+        until: "2026-11-28T00:00:00Z".into(),
+    };
+    let policy = PlacementPolicy {
+        account_limits: BTreeMap::from([("claude-alex".to_string(), limit)]),
+        ..PlacementPolicy::default()
+    };
+    let window = |used: f64, hours: i64| PlacementWindow {
+        used_percent: used,
+        resets_at: (now + Duration::hours(hours))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    let decide = |model: &str, session: f64, weekly: f64, at: DateTime<Utc>| {
+        decide_entry(
+            &PlacementEntryInput {
+                selection: sel("claudeAgent", model),
+                enabled: true,
+                session_share_of_weekly: None,
+            },
+            &policy,
+            Some(&PlacementHostModel {
+                blocked: None,
+                session: Some(window(session, 3)),
+                weekly: Some(window(weekly, 48)),
+            }),
+            &PlacementLoad::default(),
+            at,
+            chrono_tz::Europe::Vienna,
+        )
+    };
+    const ALEX: &str = "claude-alex/claude-opus-5-5";
+    // Well inside both limits.
+    let dec = decide(ALEX, 40.0, 50.0, now);
+    assert_eq!(dec.state, "ok", "{}", dec.reason);
+    assert!(dec.reason.contains("temporary limit"), "{}", dec.reason);
+    // 70% of the session is used up: out, and the real reading shows.
+    let dec = decide(ALEX, 70.0, 50.0, now);
+    assert_eq!(dec.state, "exhausted", "{}", dec.reason);
+    assert_eq!(dec.session.as_ref().map(|w| w.used_percent), Some(70.0));
+    assert!(
+        dec.reason
+            .starts_with("A temporary limit counts the session window at 70%")
+    );
+    // Close to the session limit: switch before it, as at 95% without one.
+    let dec = decide(ALEX, 67.0, 50.0, now);
+    assert_eq!(dec.state, "over_threshold", "{}", dec.reason);
+    // 90% of the week.
+    assert_eq!(decide(ALEX, 10.0, 90.0, now).state, "exhausted");
+    // Another account, and the same account once the limit ended, run on.
+    assert_eq!(
+        decide("claude-david/claude-opus-5-5", 70.0, 90.0, now).state,
+        "ok"
+    );
+    assert_eq!(
+        decide(ALEX, 70.0, 90.0, utc_dt(2026, 11, 28, 0, 0, 1)).state,
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn test_account_limits_are_stored_apart_from_the_policy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+        .await
+        .expect("open_or_create");
+    let now = utc_dt(2026, 11, 25, 12, 0, 0).timestamp();
+    let limit = PlacementAccountLimit {
+        session_percent: Some(70.0),
+        weekly_percent: Some(90.0),
+        until: String::new(),
+    };
+    client
+        .set_account_limit("claude-alex", Some(limit.clone()), now)
+        .await
+        .expect("set");
+    // An app that saves the policy without knowing limits keeps them.
+    client
+        .set_placement_policy(PlacementPolicy::default())
+        .await
+        .expect("policy");
+    let view = client
+        .placement_view("host".into(), now)
+        .await
+        .expect("view");
+    assert_eq!(view.policy.account_limits["claude-alex"], limit);
+    // Out of range, a past end, or a model instead of an account: refused.
+    for bad in [
+        PlacementAccountLimit {
+            session_percent: Some(0.0),
+            ..limit.clone()
+        },
+        PlacementAccountLimit {
+            until: "2026-11-24T00:00:00Z".into(),
+            ..limit.clone()
+        },
+    ] {
+        assert!(matches!(
+            client
+                .set_account_limit("claude-alex", Some(bad), now)
+                .await,
+            Err(PrismError::InvalidInput(_))
+        ));
+    }
+    assert!(
+        client
+            .set_account_limit("claude-alex/claude-opus-5-5", Some(limit.clone()), now)
+            .await
+            .is_err()
+    );
+    client
+        .set_account_limit("claude-alex", None, now)
+        .await
+        .expect("clear");
+    let view = client
+        .placement_view("host".into(), now)
+        .await
+        .expect("view");
+    assert!(view.policy.account_limits.is_empty());
+    client.close().await.expect("close");
+}
+
 #[tokio::test]
 async fn test_placement_sync_and_moves() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1199,6 +1326,7 @@ async fn test_placement_phone_api() {
             weekly_move_slack_sessions: None,
             active_hours: Some(PlacementActiveHours { start: 8, end: 23 }),
             role_profiles,
+            account_limits: Default::default(),
         })
         .await
         .expect("set policy");

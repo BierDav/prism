@@ -89,6 +89,38 @@ pub struct PlacementPolicy {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub role_profiles: BTreeMap<String, String>,
+    /// Temporary limits per gateway account (`claude-alex`), set with
+    /// `PrismClient::set_account_limit`; `set_placement_policy` leaves them
+    /// alone, so an app that doesn't know them can't drop them.
+    #[serde(
+        rename = "accountLimits",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub account_limits: BTreeMap<String, PlacementAccountLimit>,
+}
+
+/// A temporary limit on one account: placement counts the account's session
+/// window as full at `session_percent` used and its weekly window at
+/// `weekly_percent`, until `until`. "Stop with 30% of the session left" is
+/// `session_percent: 70`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacementAccountLimit {
+    #[serde(
+        rename = "sessionPercent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_percent: Option<f64>,
+    #[serde(
+        rename = "weeklyPercent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub weekly_percent: Option<f64>,
+    /// When the limit ends (RFC 3339); empty: until it is removed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub until: String,
 }
 
 pub const DEFAULT_WEEKLY_MOVE_SLACK_SESSIONS: f64 = 1.5;
@@ -108,6 +140,7 @@ impl Default for PlacementPolicy {
             weekly_move_slack_sessions: None,
             active_hours: None,
             role_profiles: BTreeMap::new(),
+            account_limits: BTreeMap::new(),
         }
     }
 }
@@ -118,6 +151,48 @@ pub struct PlacementWindow {
     pub used_percent: f64,
     #[serde(rename = "resetsAt", default, skip_serializing_if = "String::is_empty")]
     pub resets_at: String,
+}
+
+/// One gateway account's windows as the AI gateway last reported them, which
+/// the worker reads from ClickHouse (`ai_usage.account_limits`). A model
+/// `<account>/<model>` uses its account's windows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<PlacementWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<PlacementWindow>,
+    /// When the gateway last read the account (unix seconds).
+    #[serde(rename = "observedAt", default)]
+    pub observed_at: i64,
+}
+
+/// [`AccountUsage`] per gateway account (`claude-alex`, `codex-2`).
+pub type UsageByAccount = BTreeMap<String, AccountUsage>;
+
+/// What the apps rank with (the `placement_usage` setting): the readings and
+/// burn rates the workers ranked with last. Usage never goes into the host
+/// reports, so it doesn't replicate with every change.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacementUsageSnapshot {
+    /// When a worker wrote it (unix seconds).
+    #[serde(default)]
+    pub at: i64,
+    /// Readings per model, keyed `<instanceId>/<model>`.
+    #[serde(default)]
+    pub models: BTreeMap<String, PlacementUsageReading>,
+    /// Percent of the session window one running thread uses per hour, per
+    /// model (`PlacementLoad::burn_per_thread_per_hour`).
+    #[serde(default)]
+    pub burn: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacementUsageReading {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<PlacementWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<PlacementWindow>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -24,7 +24,9 @@ pub mod provision;
 pub mod push;
 pub mod questions;
 pub mod rocky_route;
+pub mod rocky_status;
 pub mod t3;
 pub mod telemetry;
 #[cfg(test)]
 mod testutil;
+pub mod usage;

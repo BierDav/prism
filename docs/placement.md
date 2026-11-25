@@ -49,21 +49,13 @@ CREATE TABLE placement_entries (
   session_share_of_weekly DOUBLE PRECISION,   -- NULL: no weekly rule
   PRIMARY KEY (profile_id, position)
 );
--- what each host last reported (models, readings, and its running
--- threads; idle ones are not stored), for the fleet-wide load; a report
--- older than 3 minutes no longer counts
+-- what each host last reported (its models without their usage readings,
+-- and its running threads; idle ones are not stored), for the fleet-wide
+-- load; a report older than 3 minutes no longer counts
 CREATE TABLE placement_reports (
   machine     TEXT PRIMARY KEY,
   reported_at BIGINT NOT NULL,
   body        JSONB NOT NULL
-);
--- session readings per account key, for the burn rate
-CREATE TABLE placement_samples (
-  account     TEXT NOT NULL,
-  at          BIGINT NOT NULL,
-  used        DOUBLE PRECISION NOT NULL,
-  running     INTEGER NOT NULL,
-  PRIMARY KEY (account, at)
 );
 -- the moves Prism asked for, so it asks once per thread and the phone can list them
 CREATE TABLE placement_moves (
@@ -77,6 +69,50 @@ CREATE TABLE placement_moves (
   state       TEXT NOT NULL            -- asked | continued | failed | dropped
 );
 ```
+
+### Usage readings
+
+Usage is not stored with the reports. Readings change every few minutes,
+and every stored change replicates to every worker, phone and Mac and stays
+in Rocky's history, which Prism can't compact yet. Instead:
+
+- The workers read every gateway account's windows from ClickHouse
+  (`ai_usage.account_limits`, which the AI gateway's collector fills every
+  few minutes) at most once a minute (`usage_url`, `worker/src/usage.rs`).
+  The session window is `five_hour` (Codex: `primary_window`), the weekly
+  window `seven_day` (Codex: `secondary_window`).
+- A model `<account>/<model>` ranks with its account's windows when
+  ClickHouse read them in the last 20 minutes. Any other model (pooled
+  names like `agy-pro`, `jetbrains`, `gh`), and any account ClickHouse
+  doesn't have fresh, ranks with the host's reading from the sync request.
+- Burn-rate samples live in each worker's memory (45 minutes of them),
+  not in Rocky.
+- The apps rank from the `placement_usage` setting: the readings and burn
+  rates the workers ranked with last, in whole percents. A worker rewrites
+  it when it changed, at most every 5 minutes unless a window ran out or
+  came back.
+
+### Temporary account limits
+
+An account can be held back for a while: placement counts its session
+window as full at `sessionPercent` used and its weekly window at
+`weeklyPercent`, until `until` (or until removed). "Stop claude-alex with
+30% of the session and 10% of the week left" is:
+
+```sh
+prism account-limit claude-alex --session 70 --weekly 90 --until 2026-11-28T08:00:00Z
+prism account-limit claude-alex --clear
+```
+
+(in a prism-worker pod, like the other admin commands; the apps' API has
+`PUT`/`DELETE /v1/placement/account-limits/{account}` with the same JSON).
+Ranking scales the account's readings, burn rate and weekly share by
+100 / limit, so the switch point, the prediction and the weekly slack all
+count against the limit: at 70% used the entry is `exhausted` and its
+threads move, and at about 66% (95% of 70) they are compacted and moved
+before it. The decision shows the real readings, and its reason names the
+limit. Limits are `policy` rows `account_limit:<account>`, listed in the
+policy's `accountLimits`; saving the policy doesn't change them.
 
 The policy, the alert-fix profile and the text-generation profile are
 settings (`placement_policy`, `alert_fix_profile`,
@@ -156,9 +192,10 @@ text generation (`text_generation.url`; the gateway routes `<account>/<model>`
 to that account).
 
 - An account counts when an enabled profile entry names it (the part of
-  `model` before `/`) and a fresh host report carries a weekly reading for
-  it. Switching every entry of an account off stops its prompts.
-- The window has ended when no fresh report shows a weekly reset in the
+  `model` before `/`) and ClickHouse has a weekly reading for it from the
+  last 20 minutes (pooled names are no single account and get none).
+  Switching every entry of an account off stops its prompts.
+- The window has ended when the reading shows no weekly reset in the
   future. The first prompt goes out a minute after the reset; Prism tries
   again every 10 minutes while the readings show no new window, at most 3
   times per ended window.
@@ -234,6 +271,8 @@ Request:
   (`"its provider is signed out"`, …) or `null`. `session` and `weekly` are
   the worst window of that kind that limits the model, as the fork's
   `placementWindows` reads it (the usage hub's account first), or absent.
+  Prism ranks with them only for models ClickHouse has no fresh reading
+  for, and never stores them (see "Usage readings").
   `reasoning` is absent for a model without a reasoning option. `driver` is
   the instance's driver kind (`claudeAgent`, `codex`, `antigravity`,
   `opencode`, …) and `provider` its display name ("Antigravity · pooled");

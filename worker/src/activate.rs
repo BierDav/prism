@@ -2,11 +2,12 @@
 //! ended: the leader sends the account a very small prompt through the AI
 //! gateway (`text_generation.url`, which routes `<account>/<model>` to that
 //! account), so the new window starts now and not at the next thread's first
-//! request (`rocky_prism::weekly`, `docs/placement.md`).
+//! request (`rocky_prism::weekly`, `docs/placement.md`). Which windows ended
+//! comes from ClickHouse (`usage.rs`); without `usage_url`, nothing is sent.
 
 use crate::config::Config;
 use crate::t3::Secrets;
-use rocky_prism::{PrismClient, WeeklyActivation};
+use rocky_prism::{PrismClient, UsageByAccount, WeeklyActivation};
 use serde_json::json;
 use std::time::Duration;
 
@@ -21,13 +22,14 @@ pub async fn activate_weekly_windows(
     client: &PrismClient,
     cfg: &Config,
     secrets: &Secrets,
+    usage: &UsageByAccount,
     now: i64,
 ) -> Result<(), String> {
     let url = cfg.text_generation.url.trim_end_matches('/');
-    if url.is_empty() {
+    if url.is_empty() || usage.is_empty() {
         return Ok(());
     }
-    let due = rocky_prism::retry_unavailable(|| client.due_weekly_activations(now))
+    let due = rocky_prism::retry_unavailable(|| client.due_weekly_activations(now, usage))
         .await
         .map_err(|err| err.to_string())?;
     if due.is_empty() {
@@ -83,8 +85,7 @@ mod tests {
     use super::*;
     use axum::{Json, Router, extract::State, routing::post};
     use rocky_prism::{
-        PlacementSyncModel, PlacementSyncRequest, PlacementWindow, PutPlacementEntryInput,
-        PutPlacementProfileRequest,
+        AccountUsage, PlacementWindow, PutPlacementEntryInput, PutPlacementProfileRequest,
     };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -93,39 +94,24 @@ mod tests {
     // 2026-11-23T20:50:56Z, the moment codex-2's weekly window ended.
     const ENDED: i64 = 1_795_467_056;
 
-    fn model(model: &str, weekly: PlacementWindow) -> PlacementSyncModel {
-        PlacementSyncModel {
-            instance_id: "codex".into(),
-            model: model.into(),
-            label: String::new(),
-            driver: String::new(),
-            hidden: false,
-            provider: String::new(),
-            reasoning: None,
-            blocked: None,
+    /// What ClickHouse says at `at`: codex-2's weekly window, and codex-3's,
+    /// which no profile names.
+    fn usage(weekly: PlacementWindow, at: i64) -> UsageByAccount {
+        let reading = |weekly| AccountUsage {
             session: None,
             weekly: Some(weekly),
-        }
-    }
-
-    fn report(weekly: PlacementWindow) -> PlacementSyncRequest {
-        PlacementSyncRequest {
-            v: 1,
-            environment_id: "env".into(),
-            models: vec![
-                model("codex-2/gpt-6.2-sol", weekly),
-                // Not in a profile: never prompted.
-                model(
-                    "codex-3/gpt-6.2-sol",
-                    PlacementWindow {
-                        used_percent: 100.0,
-                        resets_at: "2026-11-23T20:00:00Z".into(),
-                    },
-                ),
-            ],
-            threads: Vec::new(),
-            moves: Vec::new(),
-        }
+            observed_at: at,
+        };
+        UsageByAccount::from([
+            ("codex-2".to_string(), reading(weekly)),
+            (
+                "codex-3".to_string(),
+                reading(PlacementWindow {
+                    used_percent: 100.0,
+                    resets_at: "2026-11-23T20:00:00Z".into(),
+                }),
+            ),
+        ])
     }
 
     #[tokio::test]
@@ -179,22 +165,14 @@ mod tests {
             resets_at: "2026-11-23T20:50:56Z".into(),
         };
         let at = ENDED - 3600;
-        client
-            .sync_placement("host-a".into(), report(running.clone()), at)
-            .await
-            .expect("sync");
-        activate_weekly_windows(&client, &cfg, &secrets, at)
+        activate_weekly_windows(&client, &cfg, &secrets, &usage(running.clone(), at), at)
             .await
             .expect("pass");
         assert!(posts.lock().unwrap().is_empty());
 
-        // Two minutes after the reset, the host still reports the ended window.
+        // Two minutes after the reset, ClickHouse still has the ended window.
         let at = ENDED + 120;
-        client
-            .sync_placement("host-a".into(), report(running.clone()), at)
-            .await
-            .expect("sync");
-        activate_weekly_windows(&client, &cfg, &secrets, at)
+        activate_weekly_windows(&client, &cfg, &secrets, &usage(running.clone(), at), at)
             .await
             .expect("pass");
         {
@@ -203,9 +181,15 @@ mod tests {
             assert_eq!(posts[0]["model"], "codex-2/gpt-6.2-sol");
         }
         // The next pass waits for the prompt to show.
-        activate_weekly_windows(&client, &cfg, &secrets, at + 60)
-            .await
-            .expect("pass");
+        activate_weekly_windows(
+            &client,
+            &cfg,
+            &secrets,
+            &usage(running.clone(), at),
+            at + 60,
+        )
+        .await
+        .expect("pass");
         assert_eq!(posts.lock().unwrap().len(), 1);
 
         // The new window shows: no more prompts.
@@ -214,11 +198,7 @@ mod tests {
             resets_at: "2026-11-30T20:53:00Z".into(),
         };
         let at = ENDED + 15 * 60;
-        client
-            .sync_placement("host-a".into(), report(started), at)
-            .await
-            .expect("sync");
-        activate_weekly_windows(&client, &cfg, &secrets, at)
+        activate_weekly_windows(&client, &cfg, &secrets, &usage(started, at), at)
             .await
             .expect("pass");
         assert_eq!(posts.lock().unwrap().len(), 1);

@@ -563,3 +563,55 @@ fn register_t3_devices_mints_only_what_is_missing_or_due() {
     assert_eq!(issued[1].1, "5m");
     assert_eq!(*t3.revoked.lock().unwrap(), ["s2", "s3"]);
 }
+
+#[test]
+fn account_limits_are_set_and_cleared() {
+    let (url, seen) = serve(Arc::new(|req: &Seen| {
+        match (req.method.as_str(), req.path.as_str()) {
+            ("PUT", "/v1/placement/account-limits/claude-alex") => (
+                200,
+                json!({"account": "claude-alex", "limit": req.body}).to_string(),
+            ),
+            ("DELETE", "/v1/placement/account-limits/claude-alex") => {
+                (200, r#"{"account":"claude-alex","limit":null}"#.into())
+            }
+            _ => (401, r#"{"error":"no","code":"unauthorized"}"#.into()),
+        }
+    }));
+    let e = admin_env(&url);
+    let out = account_limit_command(
+        &s(&[
+            "claude-alex",
+            "--session",
+            "70",
+            "--weekly",
+            "90",
+            "--until",
+            "2026-11-28T08:00:00Z",
+        ]),
+        &e,
+    )
+    .expect("set");
+    assert!(out.starts_with("claude-alex: "), "{out}");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0].body,
+            json!({"sessionPercent": 70.0, "weeklyPercent": 90.0, "until": "2026-11-28T08:00:00Z"})
+        );
+    }
+    assert_eq!(
+        account_limit_command(&s(&["claude-alex", "--clear"]), &e),
+        Ok("claude-alex: limit removed".into())
+    );
+    // Nothing to set, both at once, or a bad number: refused before sending.
+    for bad in [
+        &["claude-alex"][..],
+        &["claude-alex", "--clear", "--session", "70"],
+        &["claude-alex", "--session", "lots"],
+        &["claude-alex", "--weekly"],
+    ] {
+        assert!(account_limit_command(&s(bad), &e).is_err(), "{bad:?}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
