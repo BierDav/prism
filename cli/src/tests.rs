@@ -501,7 +501,12 @@ fn register_t3_devices_mints_only_what_is_missing_or_due() {
     let (url, seen) = serve(Arc::new(handler));
     let prism = Client::new(&url, TOKEN);
     let t3 = FakeT3::default();
-    let done = devices::register_devices(&prism, &t3, &format!("{url}/"), NOW).expect("register");
+    // The T3 origin is this host's NetBird name, which it may not reach
+    // itself: the pairing goes to loopback, the sessions name the origin.
+    let port = url.rsplit(':').next().unwrap();
+    let origin = format!("http://t3-host.invalid:{port}");
+    let done =
+        devices::register_devices(&prism, &t3, &format!("{origin}/"), NOW).expect("register");
     assert_eq!(
         done,
         ["david-pixel client", "david-pixel mcp", "david-mb mcp"]
@@ -516,7 +521,18 @@ fn register_t3_devices_mints_only_what_is_missing_or_due() {
     assert_eq!(puts.len(), 3);
     assert_eq!(puts[0]["token"], "tok-Prism on david-pixel");
     assert_eq!(puts[0]["kind"], "client");
-    assert_eq!(puts[0]["origin"], url.as_str());
+    assert_eq!(puts[0]["origin"], origin.as_str());
+    let decision = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.path == "/oauth/mcp/decision")
+        .map(|s| s.body.clone())
+        .expect("a pairing decision");
+    assert_eq!(
+        decision["authorization"]["resource"],
+        format!("{origin}/mcp").as_str()
+    );
     // 2027-02-14T08:00:00Z, as `t3 auth session issue` printed it.
     assert_eq!(puts[0]["expiresAt"], NOW + 30 * DAY);
     assert_eq!(puts[1]["token"], "mcp-token");

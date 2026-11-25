@@ -113,12 +113,21 @@ impl T3Sessions for T3Command {
     }
 }
 
-fn http() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+/// A client for this host's own T3 at `origin`: the same URLs (T3 checks
+/// the host its tokens are for), but `origin`'s name resolves to loopback,
+/// because a Mac often can't reach its own NetBird address (connections to
+/// it time out).
+fn http_to_self(origin: &str) -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| err.to_string())
+        .redirect(reqwest::redirect::Policy::none());
+    if let Ok(url) = reqwest::Url::parse(origin)
+        && let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default())
+        && host.parse::<std::net::IpAddr>().is_err()
+    {
+        builder = builder.resolve(host, std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    builder.build().map_err(|err| err.to_string())
 }
 
 fn answer(resp: reqwest::blocking::Response, what: &str) -> Result<Value, String> {
@@ -184,7 +193,7 @@ fn mcp_oauth(
     client: &McpClient,
     now: i64,
 ) -> Result<(String, i64), String> {
-    let http = http()?;
+    let http = http_to_self(origin)?;
     let ua = "prism-client";
     let (label, access) = (client.label, client.access);
     let code = answer(
