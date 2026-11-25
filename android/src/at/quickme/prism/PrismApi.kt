@@ -195,6 +195,8 @@ object PrismApi {
                     failure = null
                     Log.i(TAG, "replica opened")
                     watch(app)
+                    // Conversations saved while it was closed go now.
+                    at.quickme.prism.assistant.ConversationStore.flush(app)
                 }
             } catch (e: CancellationException) {
                 throw e

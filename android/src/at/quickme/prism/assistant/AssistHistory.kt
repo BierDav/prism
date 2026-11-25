@@ -56,7 +56,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -87,6 +89,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /** The history screen's entry point. */
@@ -104,8 +107,11 @@ class AssistHistoryActivity : ComponentActivity() {
     }
 }
 
-/** A conversation in the list; [waiting]: saved on the phone, not in the replica yet. */
-data class HistoryItem(val conversation: AssistantConversation, val waiting: Boolean = false)
+/**
+ * A conversation in the list; [waiting]: kept on the phone, not in the
+ * replica yet; [problem]: why the replica refused it (it stays on the phone).
+ */
+data class HistoryItem(val conversation: AssistantConversation, val waiting: Boolean = false, val problem: String = "")
 
 @Composable
 private fun HistoryScreen(onClose: () -> Unit) {
@@ -114,20 +120,25 @@ private fun HistoryScreen(onClose: () -> Unit) {
     val device = remember { Settings.deviceName(context) }
     var items by remember { mutableStateOf<List<HistoryItem>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    val storeProblem by ConversationStore.problem.collectAsState()
     var reload by remember { mutableIntStateOf(0) }
-    // The conversation shown: its own session, so leaving it doesn't stop a turn.
+    // The chat shown (null: the list). Its session is the one holding the
+    // conversation in this process (the overlay's too), so a turn goes on
+    // when the chat is left, and reopening shows it; no session while it loads.
+    var inChat by remember { mutableStateOf(false) }
     var session by remember { mutableStateOf<AssistantSession?>(null) }
     var opening by remember { mutableStateOf(false) }
     var openError by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf<Job?>(null) }
     var text by remember { mutableStateOf("") }
 
     LaunchedEffect(reload) {
         if (Sample.on(context)) {
-            items = sampleHistory(System.currentTimeMillis() / 1000)
+            items = emptyList()
             return@LaunchedEffect
         }
         ConversationStore.flush(context)
-        val (waiting, deleted) = ConversationStore.pending(context)
+        val (kept, deleted) = ConversationStore.pending(context)
         val stored = try {
             PrismApi.call(context) { assistantConversations() }.also { error = null }
         } catch (e: PrismError) {
@@ -136,29 +147,56 @@ private fun HistoryScreen(onClose: () -> Unit) {
         }
         val byId = LinkedHashMap<String, HistoryItem>()
         stored.forEach { byId[it.id] = HistoryItem(it) }
-        for (s in waiting) {
+        for (s in kept) {
             val known = byId[s.id]?.conversation
-            if (known == null || known.updatedAt <= s.updatedAt) {
-                byId[s.id] = HistoryItem(s.summary.copy(device = known?.device ?: device), waiting = true)
+            if (known == null || known.updatedAt <= s.updatedAt || s.problem.isNotEmpty()) {
+                byId[s.id] = HistoryItem(s.summary.copy(device = known?.device ?: device), waiting = true, problem = s.problem)
             }
         }
         items = byId.values.filter { it.conversation.id !in deleted }.sortedByDescending { it.conversation.updatedAt }
     }
     // Synced or written here: the list follows.
     LaunchedEffect(Unit) {
-        PrismApi.changes(listOf("assistant_conversations")).collect { if (session == null) reload++ }
+        PrismApi.changes(listOf("assistant_conversations")).collect { if (!inChat) reload++ }
+    }
+    DisposableEffect(Unit) { onDispose { session?.detach() } }
+
+    fun show(s: AssistantSession) {
+        s.attach(context)
+        s.onHandoff = { _, _ -> }
+        s.followed = { null }
+        session = s
+    }
+
+    fun leave() {
+        loading?.cancel()
+        loading = null
+        session?.detach()
+        session = null
+        opening = false
+        openError = null
+        inChat = false
+        reload++
     }
 
     fun openConversation(id: String?) {
+        loading?.cancel()
+        session?.detach()
+        session = null
         openError = null
         text = ""
-        val s = AssistantSession(context, ScreenCapture.None, resume = false)
-        session = s
-        if (id == null) return
+        inChat = true
+        if (id == null) {
+            show(AssistantSession(context, ScreenCapture.None, resume = false))
+            return
+        }
+        AssistantSession.live(id)?.let { return show(it) }
         opening = true
-        scope.launch {
+        loading = scope.launch {
             try {
-                s.open(ConversationStore.load(context, id))
+                val loaded = ConversationStore.load(context, id)
+                // Opened meanwhile by the overlay? Then that session.
+                show(AssistantSession.live(id) ?: AssistantSession(context, ScreenCapture.None, resume = false).also { it.open(loaded) })
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -171,41 +209,41 @@ private fun HistoryScreen(onClose: () -> Unit) {
 
     fun delete(id: String) {
         ConversationStore.delete(context, id)
-        AssistantMemory(context).forget(id)
         items = items?.filterNot { it.conversation.id == id }
     }
 
-    val shown = session
-    if (shown == null) {
+    if (!inChat) {
         HistoryList(
-            items = items, error = error, device = device, now = System.currentTimeMillis() / 1000,
+            items = items, error = error ?: storeProblem, device = device, now = System.currentTimeMillis() / 1000,
             onOpen = { openConversation(it) }, onNew = { openConversation(null) }, onDelete = ::delete, onBack = onClose,
         )
     } else {
-        BackHandler { session = null; reload++ }
+        BackHandler { leave() }
+        val shown = session
         HistoryChat(
-            transcript = shown.transcript,
-            running = shown.running,
+            transcript = shown?.transcript ?: Transcript(),
+            running = shown?.running == true,
             loading = opening,
             error = openError,
-            configured = shown.configured,
+            // Only the chat asked for, once it is there, takes what is typed.
+            configured = shown?.configured ?: true,
+            canSend = shown != null,
             text = text,
             onText = { text = it },
             onSend = {
                 val request = text.trim()
-                if (request.isNotEmpty() && !shown.running) {
+                if (shown != null && request.isNotEmpty() && !shown.running) {
                     text = ""
                     scope.launch { shown.send(request) }
                 }
             },
-            onEdit = shown::edit,
+            onEdit = { entry, edited -> shown?.edit(entry, edited) },
             onNew = { openConversation(null) },
-            onDelete = if (shown.transcript.isEmpty) null else ({
+            onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
                 delete(shown.conversationId)
-                session = null
-                reload++
+                leave()
             }),
-            onBack = { session = null; reload++ },
+            onBack = ::leave,
         )
     }
 }
@@ -302,9 +340,12 @@ private fun ConversationRow(item: HistoryItem, device: String, now: Long, onOpen
             val detail = listOfNotNull(
                 timeLabel(c.updatedAt, now),
                 c.device.takeIf { it.isNotEmpty() && it != device },
-                "Not synced yet".takeIf { item.waiting },
+                item.problem.ifEmpty { "Not synced yet" }.takeIf { item.waiting },
             ).joinToString(" · ")
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1)
+            Text(
+                detail, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                color = if (item.problem.isNotEmpty()) colors.error else colors.onSurfaceVariant,
+            )
         }
         Box {
             IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "More for ${c.title}") }
@@ -327,6 +368,8 @@ internal fun HistoryChat(
     loading: Boolean,
     error: String?,
     configured: Boolean,
+    /** The chat asked for is there (not loading, not failed): what is typed goes to it. */
+    canSend: Boolean,
     text: String,
     onText: (String) -> Unit,
     onSend: () -> Unit,
@@ -373,7 +416,7 @@ internal fun HistoryChat(
                             value = text,
                             onValueChange = onText,
                             placeholder = { Text("Ask Prism") },
-                            enabled = configured && !loading,
+                            enabled = configured && canSend,
                             maxLines = 5,
                             shape = RoundedCornerShape(28.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -385,7 +428,7 @@ internal fun HistoryChat(
                         )
                         FilledIconButton(
                             onClick = onSend,
-                            enabled = configured && !running && !loading && text.isNotBlank(),
+                            enabled = configured && canSend && !running && text.isNotBlank(),
                             modifier = Modifier.padding(start = 8.dp).size(52.dp),
                         ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
                     }
@@ -441,18 +484,4 @@ private fun timeLabel(unix: Long, now: Long, zone: ZoneId = ZoneId.systemDefault
         at.year == today.year -> at.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH))
         else -> at.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
     }
-}
-
-/** What sample mode and the previews list. */
-internal fun sampleHistory(now: Long): List<HistoryItem> {
-    fun c(id: String, title: String, ago: Long, device: String = "david-pixel") =
-        HistoryItem(AssistantConversation(id, device, title, now - ago - 600, now - ago))
-    return listOf(
-        c("c-1", "What's the weather in Vienna tonight?", 20 * 60),
-        c("c-2", "Text Anna that I'm running ten minutes late", 3 * 3600),
-        c("c-3", "Why is the backup on david-mm failing?", 26 * 3600, device = "david-mb"),
-        c("c-4", "Set an alarm for 6:30 on weekdays", 3 * 86400),
-        c("c-5", "Summarize the Matrix room Team from today", 4 * 86400),
-        c("c-6", "Deploy the new Prism worker to the cluster", 40 * 86400, device = "david-mb"),
-    ).let { list -> list.take(5) + list.last().copy(waiting = true) }
 }

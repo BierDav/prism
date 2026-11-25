@@ -82,18 +82,32 @@ async fn conversations_are_saved_on_the_phone_and_reach_the_workers() {
         "PUT",
         "/v1/assistant/conversations/c-1",
         Some(
-            json!({"title": "What's the weather?", "createdAt": 100, "updatedAt": 200,
-            "entries": entries, "history": history}),
+            json!({"revision": 0, "title": "What's the weather?", "createdAt": 100,
+            "updatedAt": 200, "entries": entries, "history": history}),
         ),
     )
     .await;
     assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["conversation"], json!({"id": "c-1", "revision": 1}));
+    // Saved again on the revision it no longer is: refused.
+    let (status, stale) = call(
+        &on_phone,
+        "PUT",
+        "/v1/assistant/conversations/c-1",
+        Some(json!({"revision": 0, "title": "other", "entries": [], "history": []})),
+    )
+    .await;
     assert_eq!(
-        saved["conversation"],
-        json!({"id": "c-1", "device": "david-pixel", "title": "What's the weather?",
-            "createdAt": 100, "updatedAt": 200})
+        (status, &stale["code"]),
+        (409, &json!("conflict")),
+        "{stale}"
     );
     let (status, list) = call(&on_phone, "GET", "/v1/assistant/conversations", None).await;
+    assert_eq!(
+        list["conversations"][0],
+        json!({"id": "c-1", "device": "david-pixel", "title": "What's the weather?",
+            "createdAt": 100, "updatedAt": 200, "revision": 1})
+    );
     assert_eq!(
         (status, &list["conversations"][0]["id"]),
         (200, &json!("c-1"))
@@ -139,6 +153,16 @@ async fn conversations_are_saved_on_the_phone_and_reach_the_workers() {
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
+
+    // A save after the delete (a session still running) is refused for good.
+    let (status, gone) = call(
+        &on_phone,
+        "PUT",
+        "/v1/assistant/conversations/c-1",
+        Some(json!({"revision": 1, "title": "back", "entries": [], "history": []})),
+    )
+    .await;
+    assert_eq!((status, &gone["code"]), (410, &json!("gone")), "{gone}");
 
     // Refusals.
     let (status, _) = call(

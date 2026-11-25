@@ -23,9 +23,9 @@
 
 use crate::{ReplicaError, now_unix, retrying};
 use rocky_prism::{
-    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, AgentRow, AlertActionRequest, AlertFilter,
-    AlertView, AssistantConversationRow, AssistantEntry, PlacementPolicy, PrismClient, PrismError,
-    PutPlacementProfileRequest, QuestionRow, RequestOutcome, RequestTable,
+    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, ASSISTANT_DELETED, AgentRow, AlertActionRequest,
+    AlertFilter, AlertView, AssistantConversationRow, AssistantEntry, PlacementPolicy, PrismClient,
+    PrismError, PutPlacementProfileRequest, QuestionRow, RequestOutcome, RequestTable,
     SetPlacementActionsRequest, sha256_hex,
 };
 use serde_json::{Map, Value, json};
@@ -423,8 +423,8 @@ impl Api {
                 self.save_assistant_conversation(id, &body).await
             }
             ("DELETE", ["v1", "assistant", "conversations", id]) => {
-                let (c, id) = (&self.client, id.to_string());
-                retrying(|| c.delete_assistant_conversation(&id)).await?;
+                let (c, id, now) = (&self.client, id.to_string(), now_unix());
+                retrying(|| c.delete_assistant_conversation(&id, &self.device, now)).await?;
                 ok(json!({"ok": true}))
             }
             ("GET", ["v1", "placement"]) => self.placement().await,
@@ -1396,9 +1396,11 @@ impl Api {
     }
 
     /// `PUT /v1/assistant/conversations/{id}`: the conversation as it is now
-    /// (`title`, `createdAt`, `updatedAt`, `entries` `[{id, body}]`,
-    /// `history` `[body]`); this device started it if it is new. Only what
-    /// changed is written, so saving it again after a failure is safe.
+    /// (the `revision` it builds on, `title`, `createdAt`, `updatedAt`,
+    /// `entries` `[{id, body}]`, `history` `[body]`); this device started it
+    /// if it is new. Answers `{"conversation": {id, revision}}` with the
+    /// committed revision; 409 when it changed since `revision`, 410 once
+    /// deleted.
     async fn save_assistant_conversation(&self, id: &str, body: &Value) -> Result<Reply, ApiError> {
         let entries: Vec<AssistantEntry> = body
             .get("entries")
@@ -1420,12 +1422,24 @@ impl Api {
             title: str_field(body, "title"),
             created_at: at("createdAt"),
             updated_at: at("updatedAt"),
+            revision: 0,
         };
+        let base = body.get("revision").and_then(Value::as_i64).unwrap_or(0);
         let c = &self.client;
-        retrying(|| c.save_assistant_conversation(row.clone(), entries.clone(), history.clone()))
-            .await?;
-        let saved = self.client.assistant_conversation(id).await?;
-        ok(json!({"conversation": conversation_json(&saved.conversation)}))
+        let saved = retrying(|| {
+            c.save_assistant_conversation(row.clone(), base, entries.clone(), history.clone())
+        })
+        .await;
+        match saved {
+            Ok(revision) => ok(json!({"conversation": {"id": id, "revision": revision}})),
+            // The tombstone of a deleted conversation: the app drops its copy.
+            Err(ReplicaError::Conflict(m)) if m == ASSISTANT_DELETED => Err(ApiError {
+                status: 410,
+                code: "gone",
+                message: m,
+            }),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // --- Placement ------------------------------------------------------------
@@ -1480,6 +1494,7 @@ fn conversation_json(c: &AssistantConversationRow) -> Value {
         "title": c.title,
         "createdAt": c.created_at,
         "updatedAt": c.updated_at,
+        "revision": c.revision,
     })
 }
 

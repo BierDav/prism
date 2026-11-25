@@ -44,9 +44,76 @@ object Conversations {
         return Transcript(entries, next = rows.size).settled()
     }
 
-    /** The model's history as rows: each message's JSON ([messages], from Harness.encodeEach), fitted. */
-    fun historyRows(messages: List<String>): List<String> =
-        messages.mapNotNull { m -> runCatching { fit(Json.parseToJsonElement(m)) }.getOrNull() }
+    /**
+     * The model's history as rows: each message's JSON ([messages], Koog's,
+     * from Harness.encodeEach), fitted. Only free text (`text`) is cut, never
+     * a tool call's arguments (JSON in a string, which the gateway gets
+     * again): a message still too long has its tool calls replaced by a line
+     * saying what was called, and their results, in the messages after it,
+     * by text, so every call keeps its result and the model gets valid JSON.
+     */
+    fun historyRows(messages: List<String>): List<String> {
+        val summarized = HashMap<String, String>()
+        return messages.mapNotNull { m ->
+            val parsed = runCatching { Json.parseToJsonElement(m) as? JsonObject }.getOrNull() ?: return@mapNotNull null
+            val message = withParts(parsed) { p -> resultAsText(p, summarized) }
+            fitText(message)
+                ?: fitText(withParts(message) { p -> callAsText(p, summarized) })
+                ?: withParts(message) { p -> callAsText(p, summarized) }.let { m2 ->
+                    JsonObject(m2 + ("parts" to JsonArray(listOf(text("[A message too long to keep.]"))))).toString()
+                }
+        }
+    }
+
+    private const val KOOG = "ai.koog.prompt.message.MessagePart."
+    private const val TEXT = KOOG + "Text"
+    private const val CALL = KOOG + "Tool.Call"
+    private const val RESULT = KOOG + "Tool.Result"
+
+    private fun text(s: String) = JsonObject(mapOf("type" to JsonPrimitive(TEXT), "text" to JsonPrimitive(s)))
+
+    private fun JsonObject.str(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun withParts(m: JsonObject, map: (JsonObject) -> JsonObject): JsonObject {
+        val parts = m["parts"] as? JsonArray ?: return m
+        return JsonObject(m + ("parts" to JsonArray(parts.map { if (it is JsonObject) map(it) else it })))
+    }
+
+    /** A tool call as a line of text; its result then goes as text too. */
+    private fun callAsText(p: JsonObject, summarized: MutableMap<String, String>): JsonObject {
+        if (p.str("type") != CALL) return p
+        val tool = p.str("tool").orEmpty()
+        p.str("id")?.let { summarized[it] = tool }
+        return text("[Called $tool; its arguments were too long to keep.]")
+    }
+
+    /** The result of a call that went as text, as text. */
+    private fun resultAsText(p: JsonObject, summarized: Map<String, String>): JsonObject {
+        if (p.str("type") != RESULT) return p
+        val tool = summarized[p.str("id") ?: return p] ?: return p
+        val said = (p["parts"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.str("text") }.joinToString("\n")
+        return text("[$tool answered: $said]")
+    }
+
+    /** [m] as at most [ROW_BYTES], cutting `text` values only; null when that isn't enough. */
+    private fun fitText(m: JsonObject): String? {
+        val whole = m.toString()
+        if (whole.encodeToByteArray().size <= ROW_BYTES) return whole
+        for (chars in intArrayOf(8000, 4000, 2000, 1000, 400, 120)) {
+            val cut = cutTexts(m, chars).toString()
+            if (cut.encodeToByteArray().size <= ROW_BYTES) return cut
+        }
+        return null
+    }
+
+    private fun cutTexts(e: JsonElement, chars: Int): JsonElement = when (e) {
+        is JsonObject -> JsonObject(e.mapValues { (k, v) ->
+            val s = (v as? JsonPrimitive)?.takeIf { it.isString }?.content
+            if (k == "text" && s != null && s.length > chars) JsonPrimitive(s.take(chars - CUT.length) + CUT) else cutTexts(v, chars)
+        })
+        is JsonArray -> JsonArray(e.map { cutTexts(it, chars) })
+        is JsonPrimitive -> e
+    }
 
     /**
      * A conversation's title: its first request on one line, cut at a word

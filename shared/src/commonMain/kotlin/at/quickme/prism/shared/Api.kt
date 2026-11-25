@@ -549,6 +549,8 @@ data class AssistantConversation(
     val title: String = "",
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
+    /** The committed revision, which the next save names as its base. */
+    val revision: Long = 0,
 )
 
 /** One stored transcript entry: its ID and the app's JSON of it. */

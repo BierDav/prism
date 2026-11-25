@@ -131,16 +131,21 @@ All tables are replayed Rocky tables. Ids are Rocky ids unless noted.
   volume keeps one version per package. The leader pushes `app.release` once
   per release.
 
-- `assistant_conversations(conversation_id, device, title, created_at, updated_at)`,
-  `assistant_entries(conversation_id, entry_id, position, body)` and
-  `assistant_history(conversation_id, seq, body)`: the phone assistant's
-  conversations (`rocky-prism/src/assistant.rs`), written by the devices
-  only. One row per conversation, per transcript entry and per message of
-  the model's history, never one that grows with the conversation: a body
-  holds at most 16 KiB, and one transaction at most 24 KiB of bodies,
-  because Rocky refuses an intent frame over 128 KiB and encodes a SQL
-  value's bytes as CBOR integers (about two bytes each). A save writes only
-  the rows that changed.
+- `assistant_conversations(conversation_id, device, title, created_at, updated_at, revision, entry_count, history_from, history_to, deleted)`,
+  `assistant_entries(conversation_id, position, revision, entry_id, body)` and
+  `assistant_history(conversation_id, seq, revision, body)`: the phone
+  assistant's conversations (`rocky-prism/src/assistant.rs`), written by the
+  devices only. One row per conversation, per transcript entry and per
+  message of the model's history, never one that grows with the
+  conversation: a body holds at most 16 KiB, and one transaction at most
+  24 KiB of bodies, because Rocky refuses an intent frame over 128 KiB and
+  encodes a SQL value's bytes as CBOR integers (about two bytes each). A
+  save writes its changed rows under the next revision, commits it in the
+  conversation's row, then deletes what it replaced; readers take the
+  newest row per position up to the committed revision, so they never see
+  half a save. A save names the revision it builds on and is refused when
+  that is no longer the committed one; `deleted` marks a tombstone that
+  refuses every save.
 
 Request rows are written once per `request_id`, claimed like `alert_actions`
 (unclaimed, stale after 5 minutes, or already the worker's) and finished only
