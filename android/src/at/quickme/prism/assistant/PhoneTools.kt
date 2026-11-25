@@ -1,7 +1,9 @@
 // The assistant's tools on this phone: weather where it is (or anywhere),
 // contacts, calls placed directly, texts sent at once and read back, alarms
 // and timers in the clock app, apps, links and directions, playback, volume,
-// the flashlight, Do Not Disturb, the calendar, and a look at the screen.
+// the flashlight, Do Not Disturb, the calendar, and a look at the screen. The
+// switches on their cards run the same tools again (core/Toggles.kt,
+// AssistantSession.toggle).
 // Gemini's overlay does the same through its device utilities; unlike it,
 // nothing here asks for confirmation (the model only asks when the target is
 // ambiguous: SystemPrompt).
@@ -386,9 +388,9 @@ internal fun phoneTools(c: Context, capture: ScreenCapture): List<AssistantTool>
         },
         object : AssistantTool(
             Tools.VOLUME,
-            "Set a volume: to a level in percent, or one step up or down, or mute it.",
+            "Set a volume: to a level in percent, or one step up or down, or mute or unmute it.",
             required = listOf(choiceParam("stream", "Which volume", "media", "ring", "notification", "alarm", "call")),
-            optional = listOf(intParam("percent", "The level, 0 to 100"), choiceParam("change", "Instead of a level", "up", "down", "mute")),
+            optional = listOf(intParam("percent", "The level, 0 to 100"), choiceParam("change", "Instead of a level", "up", "down", "mute", "unmute")),
         ) {
             override suspend fun run(args: Args): ToolOutput = setVolume(c, args)
         },
@@ -548,7 +550,7 @@ private fun setVolume(c: Context, args: Args): ToolOutput {
         else -> AudioManager.STREAM_VOICE_CALL
     }
     val percent = args.optInt("percent")
-    val change = args.optChoice("change", listOf("up", "down", "mute"))
+    val change = args.optChoice("change", listOf("up", "down", "mute", "unmute"))
     if (percent == null && change == null) throw ToolArgumentException("give \"percent\" or \"change\"")
     val audio = c.getSystemService(AudioManager::class.java)
     val max = audio.getStreamMaxVolume(type)
@@ -560,6 +562,7 @@ private fun setVolume(c: Context, args: Args): ToolOutput {
                 audio.setStreamVolume(type, (min + (max - min) * percent / 100.0).toInt().coerceIn(min, max), AudioManager.FLAG_SHOW_UI)
             }
             change == "mute" -> audio.adjustStreamVolume(type, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
+            change == "unmute" -> audio.adjustStreamVolume(type, AudioManager.ADJUST_UNMUTE, AudioManager.FLAG_SHOW_UI)
             else -> audio.adjustStreamVolume(type, if (change == "up") AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
         }
     } catch (e: SecurityException) {

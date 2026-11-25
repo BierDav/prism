@@ -50,6 +50,7 @@ import ai.koog.serialization.typeToken
 import at.quickme.prism.assistant.core.Args
 import at.quickme.prism.assistant.core.Card
 import at.quickme.prism.assistant.core.Event
+import at.quickme.prism.assistant.core.HandNotes
 import at.quickme.prism.assistant.core.Tools
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -151,7 +152,7 @@ class Harness(
         attachments: List<AssistAttachment>,
         emit: suspend (Event) -> Unit,
         saved: (List<Message>) -> Unit,
-        /** What happened since the last turn that the model should know (an edit made by hand on a card). */
+        /** What happened since the last turn that the model should know (an edit or a switch made by hand on a card: HandNotes). */
         note: String = "",
     ): List<Message> {
         emit(Event.Said(text, attachments.map { it.name }))
@@ -230,7 +231,7 @@ class Harness(
     }
 
     private fun ai.koog.prompt.dsl.RequestMessagePartsBuilder.userParts(turn: Turn) {
-        if (turn.note.isNotBlank()) part(MessagePart.Text("[Since the last turn: ${turn.note}]"))
+        HandNotes.framed(turn.note)?.let { part(MessagePart.Text(it)) }
         part(MessagePart.Text(turn.text.ifBlank { "(no text)" }))
         for (a in turn.attachments) {
             when {

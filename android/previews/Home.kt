@@ -240,7 +240,7 @@ private fun AssistantSample(
                 text = text, onText = {}, canSend = true, sending = false, onSend = {}, animate = false,
                 onMic = {},
                 attachments = attachments,
-                attach = remember { AttachActions({}, {}, {}, {}) },
+                attach = remember { AttachActions({}, {}, {}) },
                 menuOpen = menuOpen,
                 selectors = {},
                 modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 16.dp).fillMaxWidth(),

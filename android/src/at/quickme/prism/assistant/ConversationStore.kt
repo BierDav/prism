@@ -189,7 +189,7 @@ object ConversationStore {
             for (f in queued) {
                 try {
                     // A save answered, the version made meanwhile goes next (after a restart, both wait).
-                    if (f.name.endsWith(DELETED)) sendDelete(app, f) else while (sendSave(app, f)) Unit
+                    if (f.name.endsWith(DELETED)) sendDelete(app, f) else while (sendSave(app, f)) { }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

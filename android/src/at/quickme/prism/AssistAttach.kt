@@ -1,13 +1,17 @@
 // The assistant overlay's attachments, in Gemini's look (the Google app,
 // GSA 17.76: its input's attachment sheet and input chips):
 //
-// - The + opens the attach menu: a row of tiles, Camera, Screen, Photos and
-//   Files (Gemini's order: camera, screen share, photos, files). Each tile is
-//   104 dp wide (narrower here when four don't fit), its corners 40 dp, filled
+// - The + opens the attach menu: a row of tiles, Camera, Photos and Files
+//   (Gemini's order, without its screen share: the assistant takes a
+//   screenshot itself when it needs one). Each tile is
+//   104 dp wide (narrower here when three don't fit), its corners 40 dp, filled
 //   in Gemini's surfaceDim with the label in onSurface: a 32 dp icon, 8 dp,
 //   then the label at 15/20 sp, 20 dp above and below. The row has 12 dp
 //   between tiles and 16 dp at its sides, 12 dp above and 20 dp below, in a
 //   card in the chips' look with 28 dp corners.
+// - Camera turns the menu into the camera itself, in the same card
+//   (AssistCamera.kt, Gemini's inline camera); its photo lands with the
+//   attachments like a picked one.
 // - What is attached shows at the top of the input card, 12 dp in from its
 //   sides and top, 8 dp apart: each a 48 dp pill in onSurfaceLow (white at
 //   12 % on dark, black at 8 % on light); a picture as a 40 dp circle 4 dp
@@ -18,6 +22,7 @@
 package at.quickme.prism
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.MutableTransitionState
@@ -73,10 +78,12 @@ import at.quickme.prism.ui.GeminiIcons
 
 /** What the + menu's tiles do. */
 internal class AttachActions(
+    /** Opens the camera in the menu ([cameraSheet]). */
     val camera: () -> Unit,
-    val screen: () -> Unit,
     val photos: () -> Unit,
     val files: () -> Unit,
+    /** The camera, shown in the menu in place of the tiles while it is open (AssistCamera.kt); null: the tiles. */
+    val cameraSheet: (@Composable () -> Unit)? = null,
 )
 
 /** Gemini's neutral colours for the attach UI (LumiSysColor), dark or light. */
@@ -110,11 +117,13 @@ internal fun AttachMenu(actions: AttachActions, modifier: Modifier = Modifier) {
     Box(
         modifier
             .geminiChip(colors.card, scheme.primary, dark, MenuRadius)
+            .animateContentSize()
             .semantics { contentDescription = "Add to your request" },
     ) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val tiles = 4
-            // Gemini's tiles are 104 dp and scroll; four fit here, narrower if need be.
+        val sheet = actions.cameraSheet
+        if (sheet != null) sheet() else BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val tiles = 3
+            // Gemini's tiles are 104 dp and scroll; three fit here, narrower if need be.
             val room = maxWidth - MenuSide * 2 - TileGap * (tiles - 1)
             val width = minOf(TileWidth, room / tiles).coerceAtLeast(72.dp)
             Row(
@@ -126,7 +135,6 @@ internal fun AttachMenu(actions: AttachActions, modifier: Modifier = Modifier) {
                 verticalAlignment = Alignment.Top,
             ) {
                 AttachTile(GeminiIcons.Camera, "Camera", width, colors, actions.camera)
-                AttachTile(GeminiIcons.ScreenShare, "Screen", width, colors, actions.screen)
                 AttachTile(GeminiIcons.Photo, "Photos", width, colors, actions.photos)
                 AttachTile(GeminiIcons.AttachFile, "Files", width, colors, actions.files)
             }

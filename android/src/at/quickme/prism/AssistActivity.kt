@@ -26,9 +26,11 @@
 // keyboard is up or an answer shows, the card spans the screen, as Gemini's.
 //
 // The card's + opens Gemini's attach menu (AssistAttach.kt): a photo from the
-// camera, the screen under the overlay, photos from the Photo Picker, any
-// file. What is attached shows at the top of the card and goes with the next
-// send (assistant/AttachmentReader.kt, assistant/PhoneScreenCapture.kt).
+// camera, taken in the menu itself (AssistCamera.kt), photos from the Photo
+// Picker, any file. What is attached shows at the top of the card and goes
+// with the next send (assistant/AttachmentReader.kt). The assistant looks at
+// the screen under the overlay itself when it needs to (its screenshot tool,
+// assistant/PhoneScreenCapture.kt).
 
 package at.quickme.prism
 
@@ -200,6 +202,7 @@ import at.quickme.prism.assistant.FollowedAgent
 import at.quickme.prism.assistant.core.HandoffCard
 import at.quickme.prism.assistant.Attached
 import at.quickme.prism.assistant.AttachmentReader
+import at.quickme.prism.assistant.Grants
 import at.quickme.prism.assistant.OverlayWindow
 import at.quickme.prism.assistant.PhoneScreenCapture
 import at.quickme.prism.assistant.Read
@@ -499,11 +502,11 @@ private fun Assist(
         ActivityResultContracts.PickMultipleVisualMedia(AttachmentRules.MAX_ATTACHMENTS),
     ) { attachUris(it) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { attachUris(it) }
-    var cameraShot by remember { mutableStateOf<android.net.Uri?>(null) }
-    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
-        val shot = cameraShot
-        cameraShot = null
-        if (taken && shot != null) attachUris(listOf(shot))
+    // The camera in the + menu (AssistCamera.kt), open while the menu is.
+    var cameraOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(menuOpen) { if (!menuOpen) cameraOpen = false }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) cameraOpen = true else sendError = "Prism may not use the camera."
     }
 
     /** Opens a picker over the overlay, once the phone is unlocked (none shows over the lock screen). */
@@ -533,32 +536,33 @@ private fun Assist(
 
     val attachActions = AttachActions(
         camera = {
-            pick {
-                val shot = CameraShots.next(context)
-                cameraShot = shot
-                camera.launch(shot)
-            }
-        },
-        screen = {
-            menuOpen = false
             if (attached.size >= AttachmentRules.MAX_ATTACHMENTS) {
+                menuOpen = false
                 sendError = AttachmentRules.tooMany()
             } else {
-                reading++
-                scope.launch {
-                    try {
-                        val shot = capture.captureAttached(preferInvocation = true)
-                        if (shot != null) attach(listOf(shot)) else sendError = "Couldn't capture the screen."
-                    } finally {
-                        reading--
-                    }
-                }
+                keyboard?.hide()
+                voice.cancel()
+                sendError = null
+                // As the phone's tools: the Device Owner grants itself CAMERA
+                // (Grants); without that, Android asks the owner.
+                val granted = runCatching { Grants.require(context, Manifest.permission.CAMERA) }.isSuccess
+                if (granted) cameraOpen = true else cameraPermission.launch(Manifest.permission.CAMERA)
             }
         },
         photos = {
             pick { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
         },
         files = { pick { filePicker.launch(arrayOf("*/*")) } },
+        cameraSheet = if (!cameraOpen) null else ({
+            InlineCamera(
+                onPhoto = { uri ->
+                    cameraOpen = false
+                    menuOpen = false
+                    attachUris(listOf(uri))
+                },
+                onClose = { cameraOpen = false },
+            )
+        }),
     )
     fun progress(): Float = if (reducedMotion) 0f else maxOf(back.value, swipe)
 
@@ -1029,6 +1033,7 @@ private fun Assist(
                     agent = followed,
                     onNew = ::newRequest,
                     onEdit = session::edit,
+                    onToggle = session::toggle,
                     onOpen = { full = true },
                     modifier = Modifier.fillMaxWidth().chipEnter(0).onGloballyPositioned { panel = it.boundsInRoot() },
                 )
@@ -1109,6 +1114,7 @@ private fun Assist(
                     onText = { text = it; sendError = null },
                     onSend = { send() },
                     onEdit = session::edit,
+                    onToggle = session::toggle,
                     onNew = ::newRequest,
                     onDelete = if (session.transcript.isEmpty || session.running) null else ::deleteChat,
                     onBack = { full = false },
@@ -1250,20 +1256,6 @@ internal class AssistMemory(context: Context) {
         private const val CONVERSATION_AT = "conversation_at"
         /** Opened again within this, the overlay shows the same agent. */
         private const val RESUME_MS = 10 * 60 * 1000L
-    }
-}
-
-/**
- * Where the camera writes the photo it takes for the overlay: a file in
- * Prism's cache, shared with the camera app through Prism's FileProvider
- * (res/xml/attach_paths.xml); the ones before are deleted.
- */
-internal object CameraShots {
-    fun next(context: Context): android.net.Uri {
-        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
-        dir.listFiles()?.forEach { it.delete() }
-        val file = java.io.File(dir, "photo-${System.currentTimeMillis()}.jpg")
-        return androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".attach", file)
     }
 }
 

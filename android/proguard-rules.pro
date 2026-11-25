@@ -70,3 +70,12 @@
 # Ktor's debugger detection (through Koog's Ktor server modules) asks the
 # JVM's management API, which Android doesn't have; it's never reached here.
 -dontwarn java.lang.management.**
+
+# CameraX's Guava (the overlay's camera, AssistCamera.kt) and its other
+# annotation-only dependencies: annotations deps/resolve.py leaves out
+# (jspecify) or that only checkers read; nothing reads them at run time.
+-dontwarn org.jspecify.annotations.**
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn com.google.j2objc.annotations.**
+-dontwarn javax.annotation.**
+-dontwarn org.checkerframework.**
