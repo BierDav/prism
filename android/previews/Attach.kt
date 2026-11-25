@@ -79,7 +79,7 @@ private fun CameraSheetPreview() = Themed {
                 },
                 menuOpen = true,
                 selectors = {},
-                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp).padding(bottom = 8.dp).fillMaxWidth(),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp).padding(bottom = 8.dp).fillMaxWidth(),
             )
         }
     }

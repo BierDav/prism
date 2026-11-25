@@ -13,17 +13,19 @@
 // the composer then sends follow-ups into its thread, by text or by voice
 // (Voice.kt, VoiceWave.kt).
 //
-// Dragged up, the card grows with the finger; past a threshold it grows on
-// into the conversation full screen (assistant/AssistHistory.kt's HistoryChat,
-// in this window, a shared-bounds transition), whose Back shrinks it into the
-// card again and whose Chats opens the list.
+// Dragged up by Gemini's handle (on the answer panel while one shows, else on
+// the composer), the card grows with the finger; past a threshold it blows up
+// over the screen and the conversation cuts in full screen
+// (assistant/AssistHistory.kt's HistoryChat, in this window; OverlayDrag.kt),
+// whose Back returns to the card and whose Chats opens the list.
 //
 // Predictive Back and an upward swipe on the overlay dismiss it; the
 // navigation bar stays, and the live app remains underneath. The composer
 // alone asks: an agent starts on the machine and project Prism picks from the
 // request, with the assistant's placement profile (Phone › Profiles ›
 // Actions). The composer sends its request directly after unlock. While the
-// keyboard is up or an answer shows, the card spans the screen, as Gemini's.
+// keyboard is up the composer spans the screen, as Gemini's; an answer panel
+// above it always does, the composer staying in its margins.
 //
 // The card's + opens Gemini's attach menu (AssistAttach.kt): a photo from the
 // camera, taken in the menu itself (AssistCamera.kt), photos from the Photo
@@ -54,15 +56,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -149,6 +147,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.runtime.SideEffect
+import at.quickme.prism.core.OverlayGesture
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -365,10 +367,6 @@ internal fun GeminiColors(content: @Composable () -> Unit) {
 @Composable
 private fun overlayDark(): Boolean = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
-/** Gemini's send button: the primary container. */
-@Composable
-private fun sendFill(): Color = MaterialTheme.colorScheme.primaryContainer
-
 /** M3's emphasized curves, for what appears (fast, then gently) and leaves. */
 private val Decelerate = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
 private val Accelerate = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
@@ -418,7 +416,7 @@ private val ConversationShape = androidx.compose.foundation.shape.RoundedCornerS
 
 private fun phase(t: Float, start: Float, length: Float) = ((t - start) / length).coerceIn(0f, 1f)
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Assist(
     reducedMotion: Boolean,
@@ -474,8 +472,11 @@ private fun Assist(
     var menuOpen by remember { mutableStateOf(false) }
     var reading by remember { mutableIntStateOf(0) }
     // The card dragged up (or the panel's open button): the conversation full
-    // screen, in this window, the card growing into it (a shared transition).
+    // screen, in this window, cut in once the card has blown up over it.
     var full by remember { mutableStateOf(false) }
+    val drag = remember { OverlayDrag() }
+    // The full-screen chat's content, fading in over its background.
+    val reveal = remember { Animatable(1f) }
 
     fun attach(items: List<Attached>) {
         val room = AttachmentRules.MAX_ATTACHMENTS - attached.size
@@ -514,6 +515,20 @@ private fun Assist(
         cameraOpen = false
         menuOpen = false
         full = on
+        if (!on) scope.launch { drag.reset() }
+    }
+
+    /**
+     * The card has blown up over the screen (OverlayDrag): the chat cuts in,
+     * its background at once and its content fading in over 250 ms
+     * (Gemini's app, as it starts after its overlay).
+     */
+    fun expand() {
+        scope.launch {
+            reveal.snapTo(if (reducedMotion) 1f else 0f)
+            showFull(true)
+            if (!reducedMotion) reveal.animateTo(1f, tween(REVEAL_MS, easing = LinearEasing))
+        }
     }
 
     /** A button on a card or a surface: like sending, only once the phone is unlocked. */
@@ -989,13 +1004,11 @@ private fun Assist(
         val lift = with(LocalDensity.current) { 20.dp.toPx() }
         val following = agentId != null || starting != null
         val chatting = session.configured && !session.transcript.isEmpty
-        // Gemini's card spans the screen while an answer shows (its response
-        // page, 16 dp from the sides) or the keyboard is up, and sits back in
-        // its margins otherwise.
-        val answering = following || chatting
+        // Gemini's composer spans the screen (16 dp from the sides) while the
+        // keyboard is up, and sits back in its margins otherwise, also while
+        // an answer shows; the answer panel above it keeps 16 dp.
         val margin by androidx.compose.animation.core.animateDpAsState(
             when {
-                answering -> AnswerMargin
                 WindowInsets.isImeVisible || menuOpen -> WideMargin
                 else -> sideMargin(LocalConfiguration.current.screenWidthDp)
             },
@@ -1004,13 +1017,19 @@ private fun Assist(
         )
         /** The card, in the overlay and at the bottom of the full-screen chat. */
         @Composable
-        fun InputCard(cardModifier: Modifier, expand: (() -> Unit)?, selectors: @Composable () -> Unit, modifier: Modifier) = AssistComposer(
+        fun InputCard(
+            expand: (() -> Unit)?,
+            selectors: @Composable () -> Unit,
+            modifier: Modifier,
+            inset: androidx.compose.ui.unit.Dp = 0.dp,
+            /** The overlay's card (not the full-screen chat's): it measures for the drag. */
+            overlay: Boolean = true,
+        ) = AssistComposer(
             text = text,
             onText = { text = it; sendError = null },
             canSend = (if (session.configured) !session.running else starting == null) && reading == 0,
             sending = sending || session.running,
             onSend = { send() },
-            animate = !reducedMotion,
             error = sendError ?: voice.error,
             placeholder = if (following && !session.configured) "Reply to the agent" else "Ask Prism",
             voice = voice,
@@ -1024,7 +1043,9 @@ private fun Assist(
             onMenu = { menuOpen = it },
             onCard = { plate = it },
             onExpand = expand,
-            cardModifier = cardModifier,
+            drag = if (overlay) drag else null,
+            animate = !reducedMotion,
+            composerInset = inset,
             selectors = selectors,
             modifier = modifier,
         )
@@ -1048,8 +1069,11 @@ private fun Assist(
                     agent = followed,
                     onNew = ::newRequest,
                     onAction = act,
-                    onOpen = { showFull(true) },
+                    onOpen = { scope.launch { drag.blowUpThen(!reducedMotion, ::expand) } },
                     host = session.surfaces,
+                    drag = drag,
+                    onExpand = ::expand,
+                    animate = !reducedMotion,
                     modifier = Modifier.fillMaxWidth().chipEnter(0).onGloballyPositioned { panel = it.boundsInRoot() },
                 )
             } else if (!following) {
@@ -1066,37 +1090,31 @@ private fun Assist(
                 modifier = Modifier.fillMaxWidth().chipEnter(0),
             )
         }
-        val transition: FiniteAnimationSpec<androidx.compose.ui.geometry.Rect> =
-            if (reducedMotion) snap() else tween(FULL_MS, easing = EmphasizedEasing)
-        val chatShape = androidx.compose.foundation.shape.RoundedCornerShape(CardRadius)
-        CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { SharedTransitionLayout(Modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalOverlayAge provides { clock.value }) {
             AnimatedContent(
                 targetState = full,
                 transitionSpec = {
-                    if (reducedMotion) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(FULL_MS / 2, FULL_MS / 4)) togetherWith fadeOut(tween(FULL_MS / 3))
+                    // Into the chat: a cut, the card having blown up over the
+                    // screen (Gemini starts its app without an animation).
+                    // Back: a cross-fade.
+                    if (reducedMotion || targetState) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(250, 125)) togetherWith fadeOut(tween(166))
                 },
                 label = "full",
             ) { fullScreen ->
-                // Both ends of the transition: the card, and the full-screen chat.
-                val chat = Modifier.sharedBounds(
-                    rememberSharedContentState(FullChatKey),
-                    this@AnimatedContent,
-                    boundsTransform = { _, _ -> transition },
-                    resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-                    clipInOverlayDuringTransition = OverlayClip(chatShape),
-                )
                 if (!fullScreen) Box(Modifier.fillMaxSize()) {
                     InputCard(
-                        cardModifier = chat,
-                        expand = { showFull(true) },
+                        // With the answer panel, the handle and the drag are the panel's.
+                        expand = if (chatting) null else ::expand,
                         selectors = selectors,
+                        // The panel 16 dp from the sides, the composer in its own margin.
+                        inset = (margin - AnswerMargin).coerceAtLeast(0.dp),
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).union(WindowInsets.statusBars))
                             .padding(top = 8.dp)
-                            // Gemini's card: 40 dp from the sides (less on a narrow phone), 8 dp from the bottom, at most 696 dp wide.
-                            .padding(horizontal = margin)
+                            // Gemini's page: 16 dp from the sides (its composer up to 40 dp), 8 dp from the bottom, at most 696 dp wide.
+                            .padding(horizontal = AnswerMargin)
                             .padding(bottom = 8.dp)
                             .widthIn(max = 696.dp)
                             .fillMaxWidth()
@@ -1118,31 +1136,33 @@ private fun Assist(
                                 transformOrigin = TransformOrigin(0.5f, 1f)
                         },
                     )
-                } else HistoryChat(
-                    transcript = session.transcript,
-                    running = session.running,
-                    loading = false,
-                    error = null,
-                    configured = session.configured,
-                    canSend = true,
-                    text = text,
-                    onText = { text = it; sendError = null },
-                    onSend = { send() },
-                    onAction = act,
-                    onNew = ::newRequest,
-                    onDelete = if (session.transcript.isEmpty || session.running) null else ::deleteChat,
-                    onBack = { showFull(false) },
-                    onChats = ::openChats,
-                    agent = followed,
-                    handoff = handoffEntry,
-                    composer = {
-                        InputCard(Modifier, null, {}, Modifier.fillMaxWidth().widthIn(max = 696.dp))
-                    },
-                    modifier = chat,
-                    host = session.surfaces,
-                )
+                } else Box(Modifier.fillMaxSize().background(if (overlayDark()) Color.Black else Color.White)) {
+                    HistoryChat(
+                        transcript = session.transcript,
+                        running = session.running,
+                        loading = false,
+                        error = null,
+                        configured = session.configured,
+                        canSend = true,
+                        text = text,
+                        onText = { text = it; sendError = null },
+                        onSend = { send() },
+                        onAction = act,
+                        onNew = ::newRequest,
+                        onDelete = if (session.transcript.isEmpty || session.running) null else ::deleteChat,
+                        onBack = { showFull(false) },
+                        onChats = ::openChats,
+                        agent = followed,
+                        handoff = handoffEntry,
+                        composer = {
+                            InputCard(null, {}, Modifier.fillMaxWidth().widthIn(max = 696.dp), overlay = false)
+                        },
+                        modifier = Modifier.graphicsLayer { alpha = reveal.value },
+                        host = session.surfaces,
+                    )
+                }
             }
-        } }
+        }
     }
 }
 
@@ -1277,17 +1297,15 @@ internal class AssistMemory(context: Context) {
 /** The magic pick, as machine and project: Prism chooses from the request. */
 private const val AUTO = "auto"
 
-/** The card's margin while it spans the screen. */
-private val WideMargin = 8.dp
+/** The composer's margin while it spans the screen (Gemini's popup_horizontal_margin). */
+private val WideMargin = 16.dp
 
-/** The card's and the panel's margin while an answer shows: Gemini's response page (floaty_popup_horizontal_margin). */
+/** The answer panel's margin: Gemini's response page (floaty_popup_horizontal_margin). */
 private val AnswerMargin = 16.dp
 
-/** The card's growing into the full-screen chat and back (ms), on M3's emphasized curve. */
-private const val FULL_MS = 500
+/** The full-screen chat's content fades in over this (ms) after the cut (observed on Gemini's). */
+private const val REVEAL_MS = 250
 
-/** The card and the full-screen chat share their bounds under this key. */
-private const val FullChatKey = "prism-chat"
 /** Floating selectors and the text field move together above the keyboard. */
 @Composable
 internal fun AssistComposer(
@@ -1311,18 +1329,38 @@ internal fun AssistComposer(
     menuOpen: Boolean = false,
     onMenu: (Boolean) -> Unit = {},
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit = {},
-    /** The card dragged up past [ExpandDrag] (or flung up); without it the card doesn't drag. */
+    /**
+     * The card dragged up past the threshold (or flung up) and blown up
+     * ([drag]); without it the card has no handle and doesn't drag (the
+     * answer panel has them then).
+     */
     onExpand: (() -> Unit)? = null,
-    /** On the card itself, first: the overlay's shared bounds with the full-screen chat. */
-    cardModifier: Modifier = Modifier,
-    /** How far the card is dragged up to begin with; for previews. */
-    initialPull: androidx.compose.ui.unit.Dp = 0.dp,
+    /** The overlay's drag-to-open, shared with the answer panel. */
+    drag: OverlayDrag? = null,
+    /** How much further in from the sides the composer is than [selectors] (Gemini's narrower pill). */
+    composerInset: androidx.compose.ui.unit.Dp = 0.dp,
     selectors: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    Column(modifier.semantics { paneTitle = "Prism" }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    if (drag != null) {
+        // What Gemini's growth cap is measured on: the screen, its top inset.
+        val density = LocalDensity.current
+        val screen = LocalWindowInfo.current.containerSize
+        val top = WindowInsets.statusBars.getTop(density).toFloat()
+        SideEffect {
+            drag.density = density.density
+            drag.screen = screen
+            drag.topInset = top
+        }
+    }
+    Column(
+        modifier
+            .semantics { paneTitle = "Prism" }
+            .then(if (drag != null) Modifier.onSizeChanged { drag.columnHeight = it.height - drag.applied } else Modifier),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         // Measured after the card, so the card always fits (the keyboard up)
         // and the transcript scrolls in what is left.
         Column(Modifier.fillMaxWidth().weight(1f, fill = false).padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { selectors() }
@@ -1334,10 +1372,10 @@ internal fun AssistComposer(
             exit = if (animate) androidx.compose.animation.shrinkVertically(tween(200, easing = Accelerate), shrinkTowards = Alignment.Bottom) +
                 fadeOut(tween(150)) else ExitTransition.None,
         ) {
-            attach?.let { AttachMenu(it, Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
+            attach?.let { AttachMenu(it, Modifier.padding(horizontal = composerInset).fillMaxWidth().padding(bottom = 8.dp)) }
         }
         error?.let { message ->
-            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.medium).padding(12.dp)) {
+            Column(Modifier.padding(horizontal = composerInset).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.medium).padding(12.dp)) {
                 Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 onReload?.let { TextButton(onClick = it) { Text("Reload choices") } }
             }
@@ -1365,28 +1403,10 @@ internal fun AssistComposer(
             menuOpen = menuOpen,
             onCard = onCard,
             onExpand = onExpand,
-            cardModifier = cardModifier,
-            initialPull = initialPull,
-            modifier = Modifier.fillMaxWidth(),
+            drag = drag,
+            modifier = Modifier.padding(horizontal = composerInset).fillMaxWidth(),
         )
     }
-}
-
-/** How far the card must be dragged up to expand. */
-internal val ExpandDrag = 72.dp
-
-/** Or how fast it must be flung up (dp/s), from at least [FlingMinDrag]. */
-private const val ExpandFlingDpPerS = 1200f
-private val FlingMinDrag = 16.dp
-
-/**
- * How much taller the card is for [pull] px of finger travel up: as far as
- * the finger to the [threshold], then half as fast and less and less (a
- * rubber band to twice the threshold).
- */
-private fun dragGrowth(pull: Float, threshold: Float): Float {
-    if (pull <= threshold || threshold <= 0f) return pull.coerceAtLeast(0f)
-    return threshold + threshold * (1f - kotlin.math.exp(-(pull - threshold) / (2 * threshold)))
 }
 
 /**
@@ -1419,8 +1439,7 @@ private fun Composer(
     menuOpen: Boolean,
     onCard: (androidx.compose.ui.geometry.Rect) -> Unit,
     onExpand: (() -> Unit)?,
-    cardModifier: Modifier,
-    initialPull: androidx.compose.ui.unit.Dp,
+    drag: OverlayDrag?,
     modifier: Modifier,
 ) {
     // Listening, Gemini first only pulses its mic; once speech begins, the bars.
@@ -1450,61 +1469,51 @@ private fun Composer(
         }
     }
     val processing by animateFloatAsState(if (sending) 1f else 0f, tween(300), label = "processing")
-    val textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 20.sp, lineHeight = 28.sp)
+    // Gemini's BodyL in its Lumi theme: 17 sp on 24 sp lines.
+    val textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 24.sp)
     val age = { (now - opened).toFloat() }
-    // Dragged up, the card grows with the finger and, past a threshold (or
-    // on a fling up), goes on into the full-screen chat; below it, it springs
-    // back.
-    val density = LocalDensity.current
+    // Without an answer panel the handle and Gemini's drag-to-open are the
+    // composer's (OverlayDrag): it grows with the finger, its content staying
+    // at its top, and past the threshold blows up into the full-screen chat.
     val view = LocalView.current
-    var pull by remember { mutableFloatStateOf(with(density) { initialPull.toPx() }) }
-    val grow = { with(density) { dragGrowth(pull, ExpandDrag.toPx()).roundToInt() } }
-    var settling by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    val drag = rememberDraggableState { dy ->
-        val before = pull
-        pull = (pull - dy).coerceAtLeast(0f)
-        val threshold = with(density) { ExpandDrag.toPx() }
-        if (before < threshold && pull >= threshold) {
-            view.performHapticFeedback(
-                if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
-                else HapticFeedbackConstants.CONTEXT_CLICK,
-            )
-        }
+    val scope = rememberCoroutineScope()
+    val dragging = drag != null && onExpand != null
+    val dragState = rememberDraggableState { dy -> drag?.by(dy, view) }
+    // Gemini's corners (ccix): a pill below 95 dp tall, 28 dp from there,
+    // 100 ms linear; the first layout snaps.
+    val density = LocalDensity.current
+    var tall by remember { mutableStateOf<Boolean?>(null) }
+    val radius = remember { Animatable(CardRadius, androidx.compose.ui.unit.Dp.VectorConverter) }
+    val laidOut = remember { booleanArrayOf(false) }
+    LaunchedEffect(tall, animate) {
+        val t = tall ?: return@LaunchedEffect
+        val target = OverlayGesture.composerRadiusDp(if (t) OverlayGesture.TALL_DP else 0f).dp
+        if (!animate || !laidOut[0]) radius.snapTo(target)
+        else radius.animateTo(target, tween(OverlayGesture.ANIM_MS, easing = LinearEasing))
+        laidOut[0] = true
     }
     Box(
         modifier
-            .then(cardModifier)
             .onGloballyPositioned { onCard(it.boundsInRoot()) }
+            .then(if (dragging) Modifier.overlayDragBlowUp(drag) else Modifier)
             .draggable(
-                drag,
+                dragState,
                 Orientation.Vertical,
-                enabled = onExpand != null,
-                onDragStarted = { settling?.cancel() },
-                onDragStopped = { velocity ->
-                    settling = coroutineContext[kotlinx.coroutines.Job]
-                    val (threshold, fling, least) = with(density) {
-                        Triple(ExpandDrag.toPx(), ExpandFlingDpPerS.dp.toPx(), FlingMinDrag.toPx())
-                    }
-                    // Expanding, the card stays as it was dragged: the
-                    // transition takes it from there to the full screen.
-                    if (onExpand != null && (pull >= threshold || (velocity <= -fling && pull >= least))) {
-                        onExpand()
-                        return@draggable
-                    }
-                    androidx.compose.animation.core.animate(
-                        pull, 0f,
-                        animationSpec = if (animate) spring(Spring.DampingRatioLowBouncy, Spring.StiffnessMediumLow) else snap(),
-                    ) { value, _ -> pull = value }
-                },
+                enabled = dragging,
+                onDragStarted = { drag?.start() },
+                onDragStopped = { velocity -> if (drag != null && onExpand != null) drag.release(scope, velocity, animate, onExpand) },
             )
-            .geminiPlate(plateColors, CardRadius, ageMs = age, processing = { processing })
+            .onSizeChanged { tall = with(density) { it.height.toDp() } >= OverlayGesture.TALL_DP.dp }
+            .geminiPlate(plateColors, radius.value, ageMs = age, processing = { processing })
             // Gemini's handle: inside the card, 6 dp below its top edge, over
-            // the plate and under what is in it.
+            // the plate and under what is in it; only on the card that drags.
             .drawBehind {
+                if (!dragging) return@drawBehind
                 val w = 32.dp.toPx()
                 val h = 2.dp.toPx()
+                val fade = PlateAppear.contentAlpha(age()) * drag.contentAlpha
                 drawRoundRect(
-                    colors.outlineVariant.copy(alpha = colors.outlineVariant.alpha * PlateAppear.contentAlpha(age())),
+                    colors.outlineVariant.copy(alpha = colors.outlineVariant.alpha * fade),
                     topLeft = androidx.compose.ui.geometry.Offset((size.width - w) / 2, 6.dp.toPx()),
                     size = androidx.compose.ui.geometry.Size(w, h),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(h),
@@ -1516,7 +1525,8 @@ private fun Composer(
                 indication = null,
                 onClickLabel = "Type a request",
                 onClick = onFocus,
-            ),
+            )
+            .then(if (dragging) Modifier.overlayDragGrowth(drag) else Modifier),
     ) {
         Layout(
             modifier = Modifier.graphicsLayer {
@@ -1525,7 +1535,7 @@ private fun Composer(
                 val s = PlateAppear.contentScale(t)
                 scaleX = s
                 scaleY = s
-                alpha = PlateAppear.contentAlpha(t)
+                alpha = PlateAppear.contentAlpha(t) * (if (dragging) drag.contentAlpha else 1f)
             },
             content = {
                 // Gemini's plus: the attach menu. A quarter turn to a cross while it is open.
@@ -1565,16 +1575,20 @@ private fun Composer(
                     cursorBrush = SolidColor(colors.primary),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
-                    modifier = Modifier.heightIn(max = 210.dp).padding(vertical = 12.dp)
+                    // Gemini's hint wraps to two lines at most; its text grows
+                    // a line at a time, then scrolls (its input box: 210 dp,
+                    // less its 8 dp padding in two rows).
+                    maxLines = if (text.isEmpty()) 2 else Int.MAX_VALUE,
+                    modifier = Modifier.heightIn(min = FieldMin, max = FieldMax)
                         .focusRequester(focus).onFocusChanged {
                             focused = it.isFocused
                             // Typing instead of speaking: stop the listening nobody used.
                             if (it.isFocused && voice?.active == true && !voice.speaking) voice.cancel()
                         },
                     decorationBox = { inner ->
-                        Box(contentAlignment = Alignment.CenterStart) {
+                        Box(Modifier.heightIn(min = FieldMin), contentAlignment = Alignment.CenterStart) {
                             if (text.isEmpty()) {
-                                Text(placeholder, style = textStyle, color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(placeholder, style = textStyle, color = colors.outline, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                             inner()
                         }
@@ -1584,9 +1598,9 @@ private fun Composer(
                 // while the bars show), and its combined button's, which is
                 // Live there and send here, shown when there is something to
                 // send. The slots stay while empty, so the mic stays where
-                // Gemini's is.
+                // Gemini's is; once there is text (two rows) only send shows.
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (onMic != null) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    if (onMic != null && !(twoRows && text.isNotBlank())) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                         when {
                             sending -> {}
                             listening -> ListeningStop(onClick = onMic, animate = animate)
@@ -1610,19 +1624,22 @@ private fun Composer(
             // bottom in two rows (measured on the owner's Pixel; the Google
             // app's floaty input, fsplit2).
             val pad = 16.dp.roundToPx()
-            val textPad = 8.dp.roundToPx()
             val gap = 4.dp.roundToPx()
             // In two rows the text keeps clear of the card's rounded corners.
             val textInset = 24.dp.roundToPx()
-            // Gemini's card is 80 dp tall at one row (measured on the owner's
-            // Pixel): 48 dp buttons with 16 dp round them, room for the handle.
+            // Gemini's plate (bzzh): one row 7 + 9 dp above the text and 16 dp
+            // below it, 80 dp with one line; two rows 6 + 8 dp above the
+            // text, then 16 dp, the 48 dp buttons and 16 dp.
+            val top1 = 16.dp.roundToPx()
+            val top2 = 14.dp.roundToPx()
             val minHeight = 80.dp.roundToPx()
             val plus = plusM.measure(Constraints())
             val trailing = trailingM.measure(Constraints(maxWidth = width))
             // What is attached goes above everything else, across the card.
             val attached = attachedM.measure(Constraints(maxWidth = width))
             val top = attached.height
-            // The text's place in one row, and across the card in two.
+            // The text's place in one row, between the + and the mic (4 dp
+            // from each), and across the card in two.
             val x1 = pad + plus.width + gap
             val w1 = (width - x1 - gap - trailing.width - pad).coerceAtLeast(0)
             val x2 = textInset
@@ -1631,27 +1648,27 @@ private fun Composer(
             val fieldWidth = lerp(w1, w2)
             val field = fieldM.measure(Constraints.fixedWidth(fieldWidth))
             val buttons = maxOf(plus.height, trailing.height)
-            val h1 = maxOf(minHeight, field.height + 2 * textPad, buttons + 2 * pad)
-            val h2 = field.height + buttons + pad
-            val natural = top + lerp(h1, h2)
-            // Dragged up, the card grows with the finger: what is in it stays
-            // at its bottom. In the shared transition it fills its bounds.
-            val height = maxOf(natural + grow(), constraints.minHeight).coerceAtMost(
-                if (constraints.hasBoundedHeight) constraints.maxHeight else Int.MAX_VALUE,
-            )
-            val below = height - natural
+            // Listening, the voice's bars (66 dp) sit 7 dp from the bottom
+            // of the one-row card and don't make it taller.
+            val h1 = if (listening) minHeight else maxOf(minHeight, top1 + field.height + pad)
+            val h2 = top2 + field.height + pad + buttons + pad
+            val height = top + lerp(h1, h2)
             layout(width, height) {
-                attached.placeRelative(0, below)
-                val fieldY = below + top + lerp((h1 - field.height) / 2, 0)
+                attached.placeRelative(0, 0)
+                val fieldY = top + if (listening) h1 - 7.dp.roundToPx() - field.height else lerp(top1, top2)
                 field.placeRelative(lerp(x1, x2), fieldY)
-                // At one row the buttons sit in the card's middle; at two, under the text.
-                val buttonY = below + top + lerp((h1 - buttons) / 2, natural - top - pad - buttons)
+                // The buttons 16 dp from the bottom, in one row as in two.
+                val buttonY = height - pad - buttons
                 plus.placeRelative(pad, buttonY + (buttons - plus.height) / 2)
                 trailing.placeRelative(width - pad - trailing.width, buttonY + (buttons - trailing.height) / 2)
             }
         }
     }
 }
+
+/** The text field's least height (Gemini's EditText minHeight) and most (its input box's 210 dp less its 8 dp padding). */
+private val FieldMin = 48.dp
+private val FieldMax = 202.dp
 
 /** Gemini's combined button's slot (Live there): send, or the progress while sending; empty with nothing to send. */
 @Composable
@@ -1669,15 +1686,20 @@ private fun SendSlot(visible: Boolean, sending: Boolean, canSend: Boolean, onSen
                     color = colors.onSurfaceVariant, strokeWidth = 2.dp,
                 )
             }
-            else -> Surface(
-                onClick = onSend,
-                enabled = canSend,
-                shape = CircleShape,
-                color = sendFill(),
-                contentColor = colors.onPrimaryContainer,
-                modifier = Modifier.size(48.dp).graphicsLayer { alpha = if (canSend) 1f else 0.38f },
-            ) {
-                Box(contentAlignment = Alignment.Center) { Icon(GeminiIcons.Up, "Send to Prism", Modifier.size(28.dp)) }
+            // Gemini's send (assistant_robin_send_button_v2): a filled icon
+            // button, 44 dp in its 48 dp slot, in the surface container,
+            // its icon 24 dp.
+            else -> Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                Surface(
+                    onClick = onSend,
+                    enabled = canSend,
+                    shape = CircleShape,
+                    color = colors.surfaceContainer,
+                    contentColor = colors.onSurface,
+                    modifier = Modifier.size(44.dp).graphicsLayer { alpha = if (canSend) 1f else 0.38f },
+                ) {
+                    Box(contentAlignment = Alignment.Center) { Icon(GeminiIcons.Up, "Send to Prism", Modifier.size(24.dp)) }
+                }
             }
         }
     } }

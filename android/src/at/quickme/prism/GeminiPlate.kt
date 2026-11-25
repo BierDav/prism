@@ -11,8 +11,10 @@
 // something loads, a shimmer of the primary colour runs through it.
 //
 // Chips (ccki): a rounded rectangle in the same black or white with three
-// inner shadows: the primary colour softly along the edge and a thin rim at
-// the bottom.
+// inner shadows: the energy colour softly along the edge and a thin primary
+// rim at the bottom. The answer card is the same shader with Gemini's card
+// shadows (cckh.b): the energy colour along the edge and a wider, opaque
+// shadow of the fill tinted a quarter towards it.
 //
 // The shaders are Gemini's, unchanged; the colours Gemini derives from the
 // wallpaper's palette with its own algorithm are taken from Material's
@@ -154,14 +156,60 @@ internal fun Modifier.geminiPlate(
     }
 }
 
-/** A chip or card in Gemini's chip look, filled [fill], with corners of [radius]. */
-internal fun Modifier.geminiChip(fill: Color, primary: Color, dark: Boolean, radius: Dp): Modifier = drawWithCache {
+/**
+ * A chip in Gemini's chip look (cckh.a), filled [fill], with corners of
+ * [radius]: its glow in the energy colour of [primary], its bottom rim in
+ * [primary] itself.
+ */
+internal fun Modifier.geminiChip(fill: Color, primary: Color, dark: Boolean, radius: Dp): Modifier =
+    chipShaded(radius, fill) { ChipLook.chip(fill, primary, dark) }
+
+/**
+ * A card in Gemini's card look (cckh.b, its answer card): filled [fill],
+ * the energy colour of [primary] at 22 % along its inside edge (18 dp) and
+ * the fill a quarter of the way to it (24 dp, 3 dp up), no rim.
+ */
+internal fun Modifier.geminiCard(fill: Color, primary: Color, radius: Dp): Modifier =
+    chipShaded(radius, fill) { ChipLook.card(fill, primary) }
+
+private fun Modifier.chipShaded(radius: Dp, fill: Color, look: () -> ChipLook): Modifier = drawWithCache {
     val chip = if (Build.VERSION.SDK_INT >= 33) runCatching { ChipShader() }.getOrNull() else null
     val r = radius.toPx()
+    val l = look()
     onDrawBehind {
         var drawn = false
-        if (chip != null) drawIntoCanvas { drawn = chip.draw(it.nativeCanvas, size.width, size.height, r, density, fill, primary, dark) }
+        if (chip != null) drawIntoCanvas { drawn = chip.draw(it.nativeCanvas, size.width, size.height, r, density, l) }
         if (!drawn) drawRoundRect(fill, cornerRadius = CornerRadius(minOf(r, size.height / 2)))
+    }
+}
+
+/** The chip shader's fill and three inner shadows (colour, blur and y offset in dp), as cckh builds them on Android 14+. */
+private class ChipLook(
+    val fill: Color,
+    val shadows: List<Triple<Color, Float, Float>>,
+) {
+    companion object {
+        fun chip(fill: Color, primary: Color, dark: Boolean) = ChipLook(
+            fill,
+            listOf(
+                // The fill itself on Android 14+: no visible change.
+                Triple(fill, 12f, -3f),
+                Triple(energyColor(primary).copy(alpha = 0.22f), 18f, 0f),
+                Triple(primary.copy(alpha = if (dark) 0.12f else 0.06f), 3f, -3f),
+            ),
+        )
+
+        fun card(fill: Color, primary: Color): ChipLook {
+            val energy = energyColor(primary)
+            return ChipLook(
+                fill,
+                listOf(
+                    Triple(energy.copy(alpha = 0.22f), 18f, 0f),
+                    Triple(lerp(fill, energy, 0.25f), 24f, -3f),
+                    Triple(Color.Transparent, 0f, 0f),
+                ),
+            )
+        }
     }
 }
 
@@ -234,25 +282,17 @@ private class ChipShader {
     private val shader = RuntimeShader(CHIP_SHADER)
     private val paint = Paint().apply { shader = this@ChipShader.shader }
 
-    fun draw(
-        canvas: android.graphics.Canvas, w: Float, h: Float, radius: Float, density: Float,
-        fill: Color, primary: Color, dark: Boolean,
-    ): Boolean {
+    fun draw(canvas: android.graphics.Canvas, w: Float, h: Float, radius: Float, density: Float, look: ChipLook): Boolean {
         if (!canvas.isHardwareAccelerated) return false
         if (w <= 0f || h <= 0f) return true
         shader.setFloatUniform("u_resolution", w, h)
         shader.setFloatUniform("u_cornerRadius", radius)
-        shader.setColorUniform("u_bgColor", fill.toArgb())
-        // The first shadow is the fill itself on Android 14+: no visible change.
-        shader.setColorUniform("u_shadow1Color", fill.toArgb())
-        shader.setFloatUniform("u_shadow1Blur", 12f * density)
-        shader.setFloatUniform("u_shadow1OffsetY", -3f * density)
-        shader.setColorUniform("u_shadow2Color", primary.copy(alpha = 0.22f).toArgb())
-        shader.setFloatUniform("u_shadow2Blur", 18f * density)
-        shader.setFloatUniform("u_shadow2OffsetY", 0f)
-        shader.setColorUniform("u_shadow3Color", primary.copy(alpha = if (dark) 0.12f else 0.06f).toArgb())
-        shader.setFloatUniform("u_shadow3Blur", 3f * density)
-        shader.setFloatUniform("u_shadow3OffsetY", -3f * density)
+        shader.setColorUniform("u_bgColor", look.fill.toArgb())
+        look.shadows.forEachIndexed { i, (color, blur, offsetY) ->
+            shader.setColorUniform("u_shadow${i + 1}Color", color.toArgb())
+            shader.setFloatUniform("u_shadow${i + 1}Blur", blur * density)
+            shader.setFloatUniform("u_shadow${i + 1}OffsetY", offsetY * density)
+        }
         canvas.drawRect(0f, 0f, w, h, paint)
         return true
     }

@@ -1,9 +1,10 @@
 // Gemini's input card in the overlay's states, dark, as the owner's
 // screenshots show them: idle (one row, in its margins, the mic where
-// Gemini's is), typing (the card across the screen with the text above the
-// buttons), waiting for speech (the mic's disc, mid-pulse in the app),
-// listening (the voice's bars and the stop) and dragged up (the card grown
-// with the finger, short of the full-screen chat). The halo round the card is drawn as the
+// Gemini's is, the handle on it), typing (the card across the screen, 16 dp
+// from its sides, with the text above the buttons; one line and two),
+// waiting for speech (the mic's disc, mid-pulse in the app), listening (the
+// voice's bars and the stop) and dragged up (the card grown with the finger,
+// its content at its top, short of the full-screen chat). The halo round the card is drawn as the
 // overlay draws it (AssistActivity's Assist), over the live app.
 
 package at.quickme.prism.previews
@@ -25,9 +26,11 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import at.quickme.prism.AssistComposer
+import at.quickme.prism.OverlayDrag
 import at.quickme.prism.Tab
 import at.quickme.prism.VoiceInput
 import at.quickme.prism.haloScrim
@@ -59,6 +62,8 @@ internal fun listeningVoice(speaking: Boolean = true): VoiceInput {
 @Composable
 private fun ComposerSample(text: String, margin: Int, voice: VoiceInput? = null, pull: Int = 0) = Themed {
     var card by remember { mutableStateOf(Rect.Zero) }
+    val px = with(LocalDensity.current) { pull.dp.toPx() }
+    val drag = remember { OverlayDrag(px) }
     Box(Modifier.fillMaxSize()) {
         SampleHome(Tab.Alerts)
         // The overlay's two halos round the card, as Assist draws them.
@@ -78,7 +83,7 @@ private fun ComposerSample(text: String, margin: Int, voice: VoiceInput? = null,
             at.quickme.prism.GeminiColors {
                 AssistComposer(
                     text = text, onText = {}, canSend = true, sending = false, onSend = {}, animate = false,
-                    onMic = {}, voice = voice, onCard = { card = it }, initialPull = pull.dp,
+                    onMic = {}, voice = voice, onCard = { card = it }, drag = drag, onExpand = {},
                     attach = remember { at.quickme.prism.AttachActions({}, {}, {}) },
                     selectors = {},
                     modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = margin.dp).padding(bottom = 8.dp).fillMaxWidth(),
@@ -93,10 +98,15 @@ private fun ComposerSample(text: String, margin: Int, voice: VoiceInput? = null,
 @Composable
 private fun ComposerIdlePreview() = ComposerSample("", margin = 40)
 
-/** Typing: the card across the screen (8 dp margins), the text above the buttons. */
+/** Typing: the card across the screen (16 dp margins), the text above the buttons, send alone at the end. */
 @DarkScreenPreview
 @Composable
-private fun ComposerTypingPreview() = ComposerSample("Fix the stale Paperless backup on david-server", margin = 8)
+private fun ComposerTypingPreview() = ComposerSample("Fix the stale Paperless backup", margin = 16)
+
+/** Typing two lines: the card grows upward by a line, its corners 28 dp. */
+@DarkScreenPreview
+@Composable
+private fun ComposerTwoLinesPreview() = ComposerSample("Write me a short poem about the mountains in Tyrol and the lakes", margin = 16)
 
 /** Listening: the voice's bars and the stop, in the margins. */
 @DarkScreenPreview
@@ -108,7 +118,7 @@ private fun ComposerListeningPreview() = ComposerSample("", margin = 40, voice =
 @Composable
 private fun ComposerWaitingPreview() = ComposerSample("", margin = 40, voice = listeningVoice(speaking = false))
 
-/** Dragged up 56 dp, short of the 72 dp that opens the full-screen chat: the card grown with the finger. */
+/** Dragged up 56 dp, past the 48 dp that opens the full-screen chat on release: the card grown with the finger, its content at its top. */
 @DarkScreenPreview
 @Composable
 private fun ComposerDragPreview() = ComposerSample("", margin = 40, pull = 56)

@@ -28,8 +28,10 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import at.quickme.prism.AssistComposer
+import at.quickme.prism.OverlayDrag
 import at.quickme.prism.Tab
 import at.quickme.prism.assistant.AssistantTranscript
 import at.quickme.prism.assistant.FollowedAgent
@@ -84,10 +86,13 @@ private val vienna = WeatherCard(
 )
 
 @Composable
-private fun Transcript(t: Transcript, running: Boolean = false, agent: FollowedAgent? = null) = Part {
+private fun Transcript(t: Transcript, running: Boolean = false, agent: FollowedAgent? = null, open: Boolean = false) = Part {
     at.quickme.prism.GeminiColors {
         Box(Modifier.background(BottomSheetDefaults.ScrimColor).padding(12.dp)) {
-            AssistantTranscript(t, running, agent, onNew = {}, onAction = null, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 })
+            AssistantTranscript(
+                t, running, agent, onNew = {}, onAction = null, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 },
+                onOpen = if (open) ({}) else null,
+            )
         }
     }
 }
@@ -225,10 +230,39 @@ private fun AssistantPanelPreview() = OverlaySample(
     ),
 )
 
-/** Over the live app: the halo round the card and the panel, the panel above the card in Gemini's 16 dp margins. */
+/**
+ * The answer panel dragged up by its handle (60 dp): grown upward from its
+ * bottom, its content at its top and the space below it, the controls above
+ * faded out.
+ */
+@DarkScreenPreview
 @Composable
-private fun OverlaySample(t: Transcript) = Themed {
+private fun AssistantDragPreview() = OverlaySample(
+    transcript(
+        Event.Said("What is the capital of Austria?"),
+        Event.Answer("Vienna."),
+    ),
+    pull = 60,
+)
+
+/** Gemini's controls above the panel, in its chip look: "New chat" and the full screen. */
+@PartPreviews
+@Composable
+private fun AssistantChipsPreview() = Transcript(
+    transcript(Event.Said("What is the capital of Austria?"), Event.Answer("Vienna.")),
+    open = true,
+)
+
+/**
+ * Over the live app: the halo round the card and the panel, the panel above
+ * the card in Gemini's 16 dp margins with the handle on it, the composer in
+ * its own 40 dp, dragged up [pull] dp.
+ */
+@Composable
+private fun OverlaySample(t: Transcript, pull: Int = 0) = Themed {
     var card by remember { mutableStateOf(Rect.Zero) }
+    val px = with(LocalDensity.current) { pull.dp.toPx() }
+    val drag = remember { OverlayDrag(px) }
     var panel by remember { mutableStateOf(Rect.Zero) }
     Box(Modifier.fillMaxSize()) {
         SampleHome(Tab.Alerts)
@@ -252,9 +286,12 @@ private fun OverlaySample(t: Transcript) = Themed {
                 AssistComposer(
                     text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
                     onCard = { card = it },
+                    drag = drag,
+                    composerInset = 24.dp,
                     selectors = {
                         AssistantTranscript(
                             t, false, null, onNew = {}, onAction = null, onOpen = {}, now = { NOW + 75_000 },
+                            drag = drag, animate = false,
                             modifier = Modifier.fillMaxWidth().onGloballyPositioned { panel = it.boundsInRoot() },
                         )
                     },

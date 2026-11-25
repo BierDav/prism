@@ -149,7 +149,7 @@ private fun pulse(animate: Boolean): Float {
 
 /**
  * How visible the listening discs are: Gemini fades them in and out linearly
- * over motionDurationShort2 (150 ms).
+ * over motionDurationShort2 (100 ms in its GM3 floaty).
  */
 @Composable
 private fun shown(on: Boolean, animate: Boolean): Float {
@@ -162,7 +162,9 @@ private fun shown(on: Boolean, animate: Boolean): Float {
 
 /**
  * Gemini's floaty mic (the Google app's Mic, its MicPeer in the floaty's
- * mode): idle, only its 28 dp glyph in onSurface, no disc. While it listens
+ * mode): idle, only its 28 dp glyph in onSurface, no disc and no ring (the
+ * floaty sets its Lumi mic_28 icon at 28 dp, tinted colorOnSurface, and
+ * leaves the outlined button's 1 dp stroke off: bzxd, brmq.b). While it listens
  * and no one speaks yet ([pulsing]), a disc in the primary container (primary
  * fixed dim in the light) fades in behind the glyph, now onPrimaryContainer,
  * and a second disc of the same colour breathes out from under it ([pulse]).
@@ -232,5 +234,5 @@ private const val PULSE_SCALE = 1.1724f
 private const val PULSE_OUT_MS = 428
 private const val PULSE_BACK_MS = 856
 private const val PULSE_REST_MS = 166
-private const val LISTEN_FADE_MS = 150
+private const val LISTEN_FADE_MS = 100
 private val DiscDiameter = 43.dp

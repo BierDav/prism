@@ -362,8 +362,8 @@ let
 
   # The platform-independent core and the screens' pure logic on a JVM:
   # untrusted text, the metrics encoding, the hotspot token, the assistant's
-  # tool arguments, weather, Matrix events, transcript and Markdown, and its
-  # attachments (tests/).
+  # tool arguments, weather, Matrix events, transcript and Markdown, its
+  # attachments, and the overlay's drag-to-open (tests/).
   coreSources = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
@@ -608,6 +608,7 @@ in
         run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
+        run OverlayGestureTestKt
         run MetricsTestKt remote-write.bin
         python3 tests/remote_write_decode.py remote-write.bin
         touch $out

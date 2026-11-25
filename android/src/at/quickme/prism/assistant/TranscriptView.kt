@@ -1,6 +1,7 @@
 // The assistant's conversation above the composer, in Gemini's look: its
-// answer panel (GeminiPlate.kt's chip, black or white) with Gemini's controls
-// above it (New chat, full screen), the owner's words at the right in
+// answer panel (GeminiPlate.kt's card, black or white) with Gemini's controls
+// above it (New chat, full screen, GeminiPlate.kt's chips), and in the
+// overlay Gemini's drag handle on it (OverlayDrag.kt), the owner's words at the right in
 // Gemini's user bubble, the answers as simple
 // Markdown, a line per tool while it runs, and a card per tool result as
 // Gemini's action cards render them (the Google app's robin action cards:
@@ -26,6 +27,12 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,7 +69,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -132,7 +138,11 @@ import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.Transcript
 import at.quickme.prism.assistant.core.Weather
 import at.quickme.prism.assistant.core.WeatherCard
+import at.quickme.prism.OverlayDrag
+import at.quickme.prism.geminiCard
 import at.quickme.prism.geminiChip
+import at.quickme.prism.overlayDragBlowUp
+import at.quickme.prism.overlayDragGrowth
 import at.quickme.prism.shared.AgentActivity
 import at.quickme.prism.ui.PrismIcons
 import java.text.DateFormat
@@ -162,7 +172,9 @@ class FollowedAgent(
  * growing as the answer does. [transcript] grows while [running]; [agent] is
  * what the newest hand-off's agent does now. [onAction] handles what the
  * owner did on a surface (entry, A2UI action) and says why it couldn't;
- * without it the cards only show.
+ * without it the cards only show. With [drag] (the overlay), Gemini's handle
+ * sits on the panel and dragging it, or the panel once its list can't scroll
+ * further down, grows the panel and opens the full screen ([onExpand]).
  */
 @Composable
 fun AssistantTranscript(
@@ -178,6 +190,11 @@ fun AssistantTranscript(
     onOpen: (() -> Unit)? = null,
     /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
+    /** The overlay's drag-to-open; no handle without it. */
+    drag: OverlayDrag? = null,
+    /** Dragged past the threshold: the full screen. */
+    onExpand: () -> Unit = {},
+    animate: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
@@ -195,41 +212,132 @@ fun AssistantTranscript(
             delay(400)
         }
     }
+    val view = androidx.compose.ui.platform.LocalView.current
+    val scope = rememberCoroutineScope()
+    val dragState = androidx.compose.foundation.gestures.rememberDraggableState { dy -> drag?.by(dy, view) }
+    // Gemini's swipe up from the answer (ccav): taken only when it starts
+    // upward with the list already at its end; otherwise the list scrolls.
+    val fromList = remember(drag, list) {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            var taken: Boolean? = null
+
+            override fun onPreScroll(available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): Offset {
+                if (drag == null || source != androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput) return Offset.Zero
+                if (taken == null && available.y != 0f) {
+                    taken = available.y < 0f && !list.canScrollForward
+                    if (taken == true) drag.start()
+                }
+                if (taken != true) return Offset.Zero
+                drag.by(available.y, view)
+                return Offset(0f, available.y)
+            }
+
+            override suspend fun onPreFling(available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
+                val was = taken
+                taken = null
+                if (drag == null || was != true) return androidx.compose.ui.unit.Velocity.Zero
+                drag.release(scope, available.y, animate, onExpand)
+                return available
+            }
+        }
+    }
     Column(modifier) {
         // Gemini's controls: at the end, 4 dp above the panel, each button's
-        // 4 dp inset outside the panel's edge.
+        // 4 dp inset outside the panel's edge. They fade as the panel is
+        // dragged up.
         Row(
-            Modifier.fillMaxWidth().padding(bottom = 4.dp).offset(x = 4.dp),
+            Modifier.fillMaxWidth().padding(bottom = 4.dp).offset(x = 4.dp).graphicsLayer { alpha = drag?.controlsAlpha ?: 1f },
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = !running, modifier = Modifier.padding(end = 4.dp))
             if (onOpen != null) ControlButton(PrismIcons.OpenInNew, "Open full screen", onOpen)
         }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                // 12 dp to the card, with the composer's 8.
-                .padding(bottom = 4.dp)
-                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, PanelRadius)
-                .clip(RoundedCornerShape(PanelRadius))
-                .animateContentSize(tween(350, easing = PanelEasing)),
-        ) {
-            LazyColumn(
-                state = list,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth().fadingEdges(list, 48.dp),
+        // 12 dp to the card, with the composer's 8.
+        Box(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .then(if (drag != null) Modifier.overlayDragBlowUp(drag) else Modifier)
+                    .geminiCard(if (dark) Color.Black else Color.White, colors.primary, PanelRadius)
+                    .clip(RoundedCornerShape(PanelRadius))
+                    .then(
+                        if (drag == null) Modifier else Modifier
+                            .draggable(
+                                dragState, Orientation.Vertical,
+                                onDragStarted = { drag.start() },
+                                onDragStopped = { v -> drag.release(scope, v, animate, onExpand) },
+                            )
+                            .nestedScroll(fromList)
+                            // Dragged, it grows outside its own animation, 1:1 with the finger.
+                            .overlayDragGrowth(drag),
+                    )
+                    .animateContentSize(tween(350, easing = PanelEasing)),
             ) {
-                items(entries, key = { it.id }) { e ->
-                    TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now)
-                }
-                if (thinking(transcript, running)) {
-                    item(key = "thinking") { Thinking() }
+                LazyColumn(
+                    state = list,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = drag?.contentAlpha ?: 1f }.fadingEdges(list, 48.dp),
+                ) {
+                    items(entries, key = { it.id }) { e ->
+                        TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now)
+                    }
+                    if (thinking(transcript, running)) {
+                        item(key = "thinking") { Thinking() }
+                    }
                 }
             }
+            if (drag != null) DragHandle(
+                drag, dragState, animate, onExpand,
+                Modifier.align(Alignment.TopCenter).offset(y = -HandleTarget / 2),
+            )
         }
     }
+}
+
+/** The handle's touch target, centred on the panel's top edge (Gemini's 48 dp DragHandleContainer). */
+private val HandleTarget = 48.dp
+
+/**
+ * Gemini's drag handle on its answer card (assistant_robin_floaty_handle as
+ * cbpx sets it): a 32 × 2 dp bar in outlineVariant whose top is 6 dp inside
+ * the card's top edge, in a 48 dp target centred on that edge. It fades as
+ * the card blows up.
+ */
+@Composable
+private fun DragHandle(
+    drag: OverlayDrag,
+    state: androidx.compose.foundation.gestures.DraggableState,
+    animate: Boolean,
+    onExpand: () -> Unit,
+    modifier: Modifier,
+) {
+    val color = MaterialTheme.colorScheme.outlineVariant
+    val scope = rememberCoroutineScope()
+    Box(
+        modifier
+            .size(HandleTarget)
+            .semantics {
+                contentDescription = "Drag handle"
+                onClick("Open full screen") { scope.launch { drag.blowUpThen(animate, onExpand) }; true }
+            }
+            .draggable(
+                state, Orientation.Vertical,
+                onDragStarted = { drag.start() },
+                onDragStopped = { v -> drag.release(scope, v, animate, onExpand) },
+            )
+            .drawBehind {
+                val w = 32.dp.toPx()
+                val h = 2.dp.toPx()
+                drawRoundRect(
+                    color.copy(alpha = color.alpha * drag.contentAlpha),
+                    topLeft = Offset((size.width - w) / 2, size.height / 2 + 6.dp.toPx()),
+                    size = Size(w, h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx()),
+                )
+            },
+    )
 }
 
 /** Gemini's panel corners (floaty_response_background). */
@@ -257,36 +365,50 @@ private fun Modifier.fadingEdges(list: androidx.compose.foundation.lazy.LazyList
     }
 
 /**
- * Gemini's action chip above its panel: a pill in the surface colour, 36 dp
- * tall in a 48 dp touch target, the icon 18 dp, 12 dp before it and 16 dp
- * after the label.
+ * Gemini's action chip above its panel ("Minimize" there): its shader chip
+ * (GeminiPlate.kt, 100 dp corners), 36 dp tall in a 48 dp touch target, the
+ * icon 18 dp, 12 dp before it and 16 dp after the label.
  */
 @Composable
 private fun ControlChip(icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
+    val dark = colors.background.luminance() < 0.5f
     Box(modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-        Surface(
-            onClick = onClick, enabled = enabled, shape = CircleShape, color = colors.surface,
-            contentColor = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
+        Row(
+            Modifier
+                .height(36.dp)
+                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, ChipRadius)
+                .clip(CircleShape)
+                .clickable(enabled = enabled, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+                .padding(start = 12.dp, end = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(Modifier.height(36.dp).padding(start = 12.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, Modifier.size(18.dp))
-                Text(label, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
-            }
+            val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
+            Icon(icon, null, Modifier.size(18.dp), tint = tint)
+            Text(label, style = MaterialTheme.typography.bodySmall, color = tint, modifier = Modifier.padding(start = 8.dp))
         }
     }
 }
 
-/** Gemini's "open in app" above its panel: a 40 dp disc in the surface colour, in a 48 dp touch target. */
+/** Gemini's "open in app" above its panel: a 40 dp disc in its chip look, in a 48 dp touch target. */
 @Composable
 private fun ControlButton(icon: ImageVector, label: String, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val dark = colors.background.luminance() < 0.5f
     Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-        Surface(onClick = onClick, shape = CircleShape, color = colors.surface, contentColor = colors.onSurfaceVariant, modifier = Modifier.size(40.dp)) {
-            Box(contentAlignment = Alignment.Center) { Icon(icon, label, Modifier.size(24.dp)) }
-        }
+        Box(
+            Modifier
+                .size(40.dp)
+                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, ChipRadius)
+                .clip(CircleShape)
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = label, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, label, Modifier.size(24.dp), tint = colors.onSurfaceVariant) }
     }
 }
+
+/** Gemini's chips' corners (cblt: 100 dp, a pill). */
+private val ChipRadius = 100.dp
 
 /**
  * One entry of a transcript, as the overlay and the history screen show it,
