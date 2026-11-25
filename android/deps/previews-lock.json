@@ -114,34 +114,10 @@
   "sha256": "57928d6e5a6edeb2abd3770a8f95ba44dce45f3b23b7a9dc2b309c581552a78b"
  },
  {
-  "coordinate": "com.google.errorprone:error_prone_annotations:2.50.0",
-  "file": "error_prone_annotations-2.50.0.jar",
-  "url": "https://repo1.maven.org/maven2/com/google/errorprone/error_prone_annotations/2.50.0/error_prone_annotations-2.50.0.jar",
-  "sha256": "4667724877f1d37a689202da191e23efa7657c62eef93ccdac406eccfe5cdd0a"
- },
- {
-  "coordinate": "com.google.guava:failureaccess:1.0.3",
-  "file": "failureaccess-1.0.3.jar",
-  "url": "https://repo1.maven.org/maven2/com/google/guava/failureaccess/1.0.3/failureaccess-1.0.3.jar",
-  "sha256": "cbfc3906b19b8f55dd7cfd6dfe0aa4532e834250d7f080bd8d211a3e246b59cb"
- },
- {
-  "coordinate": "com.google.guava:guava:33.7.1-jre",
-  "file": "guava-33.7.1-jre.jar",
-  "url": "https://repo1.maven.org/maven2/com/google/guava/guava/33.7.1-jre/guava-33.7.1-jre.jar",
-  "sha256": "796d8e28ac64e83a47c4c5935a8fecc4682650a04bbdead738ef0f5a3a0e6c46"
- },
- {
   "coordinate": "com.google.guava:guava-testlib:18.0",
   "file": "guava-testlib-18.0.jar",
   "url": "https://repo1.maven.org/maven2/com/google/guava/guava-testlib/18.0/guava-testlib-18.0.jar",
   "sha256": "775dd917a6214ac999cfaddc9e0610bca8de39940f2ecd482e015821310906f9"
- },
- {
-  "coordinate": "com.google.j2objc:j2objc-annotations:3.1",
-  "file": "j2objc-annotations-3.1.jar",
-  "url": "https://repo1.maven.org/maven2/com/google/j2objc/j2objc-annotations/3.1/j2objc-annotations-3.1.jar",
-  "sha256": "84d3a150518485f8140ea99b8a985656749629f6433c92b80c75b36aba3b099b"
  },
  {
   "coordinate": "com.google.jimfs:jimfs:1.1",
@@ -226,12 +202,6 @@
   "file": "jakarta.xml.bind-api-2.3.2.jar",
   "url": "https://repo1.maven.org/maven2/jakarta/xml/bind/jakarta.xml.bind-api/2.3.2/jakarta.xml.bind-api-2.3.2.jar",
   "sha256": "69156304079bdeed9fc0ae3b39389f19b3cc4ba4443bc80508995394ead742ea"
- },
- {
-  "coordinate": "javax.inject:javax.inject:1",
-  "file": "javax.inject-1.jar",
-  "url": "https://repo1.maven.org/maven2/javax/inject/javax.inject/1/javax.inject-1.jar",
-  "sha256": "91c77044a50c481636c32d916fd89c9118a72195390452c81065080f957de7ff"
  },
  {
   "coordinate": "junit:junit:4.13.2",

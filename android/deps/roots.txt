@@ -42,3 +42,15 @@ io.ktor:ktor-server-sse:3.6.1
 org.jetbrains.kotlinx:kotlinx-coroutines-jdk9:1.11.0
 org.jetbrains.kotlinx:kotlinx-coroutines-reactive:1.11.0
 org.jetbrains.kotlin:kotlin-reflect:2.4.21
+
+# The overlay's camera in the + menu (AssistCamera.kt): CameraX with its
+# Camera2 backend, bound to the overlay's lifecycle, its preview shown by
+# camera-compose's viewfinder. No manifest merging here, so the Camera2
+# backend is configured in code (ProcessCameraProvider.configureInstance).
+androidx.camera:camera-camera2:1.7.0
+androidx.camera:camera-lifecycle:1.7.0
+androidx.camera:camera-compose:1.7.0
+# CameraX asks for an older coroutines-guava; this keeps it at the app's version.
+org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.11.0
+# CameraX's Guava, at the version the previews' renderer (previews.txt) has.
+com.google.guava:guava:33.7.1-jre
