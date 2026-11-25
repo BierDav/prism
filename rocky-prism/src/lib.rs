@@ -1,10 +1,13 @@
 pub mod alerts;
 pub mod client;
+#[cfg(feature = "coordinator")]
+pub mod coordinator;
 pub mod enroll;
 pub mod events;
 pub mod phase3;
 pub mod rank;
 pub mod schema;
+pub mod seal;
 pub mod types;
 pub mod weekly;
 
@@ -20,5 +23,6 @@ pub use rank::{
     selection_for_entry, usable_hours,
 };
 pub use schema::prism_schema;
+pub use seal::{RootSigner, SealStatus};
 pub use types::*;
 pub use weekly::{WeeklyActivation, account_of};
