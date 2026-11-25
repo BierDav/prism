@@ -58,9 +58,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // The coordinator that makes this worker's seals final, when configured.
     #[cfg(feature = "coordinator")]
-    let coordinator = prism_worker::coordination::link_from_env(|key| std::env::var(key).ok())
-        .await?
-        .map(Arc::new);
+    // Prism keeps serving without it: seals wait, everything else works.
+    let coordinator =
+        match prism_worker::coordination::link_from_env(|key| std::env::var(key).ok()).await {
+            Ok(link) => link.map(Arc::new),
+            Err(err) => {
+                eprintln!("prism-worker: no coordinator link, so this worker doesn't seal: {err}");
+                None
+            }
+        };
     #[cfg(feature = "coordinator")]
     let coordination = coordinator.as_ref().map(|link| link.slot());
     #[cfg(not(feature = "coordinator"))]
