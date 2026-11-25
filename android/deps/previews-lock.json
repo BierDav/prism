@@ -1,9 +1,9 @@
 [
  {
-  "coordinate": "androidx.compose.ui:ui-tooling-preview-android:1.12.0",
-  "file": "ui-tooling-preview-android-1.12.0.aar",
-  "url": "https://dl.google.com/android/maven2/androidx/compose/ui/ui-tooling-preview-android/1.12.0/ui-tooling-preview-android-1.12.0.aar",
-  "sha256": "b94bf6808e103a99b38ab58a970cf15f7b3f921dc936b0f867b0a42db517c086"
+  "coordinate": "androidx.compose.ui:ui-tooling-preview-android:1.13.0",
+  "file": "ui-tooling-preview-android-1.13.0.aar",
+  "url": "https://dl.google.com/android/maven2/androidx/compose/ui/ui-tooling-preview-android/1.13.0/ui-tooling-preview-android-1.13.0.aar",
+  "sha256": "898124443aca4ad75450b1f0ed03244a3cc340f028631eb2b827b41dd8fbe6a6"
  },
  {
   "coordinate": "app.cash.paparazzi:paparazzi:2.0.0-alpha05.1",

@@ -19,7 +19,11 @@
 }:
 let
   lib = pkgs.lib;
-  platform = "36";
+  # The platform the code compiles against (android.jar): 37.1, as Google's
+  # A2UI renderer (deps/roots.txt) asks (its AARs' minCompileSdk 37.1). The
+  # app still targets 36: a compile SDK changes no behaviour, a target does.
+  platform = "37.1";
+  targetSdk = "36";
   buildTools = "37.0.0";
   minSdk = "31";
   sdk =
@@ -294,7 +298,7 @@ let
         ${tools}/aapt2 compile --dir ${appRes} -o build/res/app.zip
         ${tools}/aapt2 link -o build/base.apk -I ${androidJar} \
           --manifest build/AndroidManifest.xml --auto-add-overlay \
-          --min-sdk-version ${minSdk} --target-sdk-version ${platform} \
+          --min-sdk-version ${minSdk} --target-sdk-version ${targetSdk} \
           --version-code ${toString versionCode} --version-name ${versionName} \
           ${
             lib.optionalString (

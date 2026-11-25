@@ -1541,7 +1541,8 @@ private fun Composer(
                             onClick = { onWave?.invoke() },
                         ),
                     )
-                } else BasicTextField(
+                } else @Suppress("DEPRECATION") // Compose 1.13 deprecates the value-based field; the composer keeps it.
+                BasicTextField(
                     value = text,
                     onValueChange = onText,
                     readOnly = sending,

@@ -346,7 +346,8 @@ private fun ConfigEditor(saved: Hotspot.Config, bands: List<String>, normal: Boo
                 singleLine = true,
                 isError = passwordError != null,
                 supportingText = passwordError?.let { { Text(it) } },
-                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                // Compose 1.13 deprecates VisualTransformation with the value-based fields.
+                visualTransformation = @Suppress("DEPRECATION") if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 trailingIcon = {
                     TextButton(onClick = { showPassword = !showPassword }) { Text(if (showPassword) "Hide" else "Show") }
