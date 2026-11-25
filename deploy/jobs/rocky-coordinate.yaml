@@ -1,0 +1,92 @@
+# One-shot: makes the prism workers seal Prism's Rocky history
+# (docs/worker.md "Sealing"). Not part of deploy/kustomization.yaml, so Argo
+# CD never runs it; apply it by hand once the workers run an image with the
+# coordinator configured, and delete it and its Secret afterwards.
+#
+# It reads the Prism root (the database's root key) from the short-lived
+# Secret prism-rocky-root and passes it, inside the cluster only, to each
+# worker for one call:
+#   1. POST /v1/rocky/trust on every worker: the worker records itself in the
+#      registry (renewing its credentials if needed) and trusts its identity.
+#   2. POST /v1/rocky/coordinate on the first worker: registers the database's
+#      domain at the public coordinator (control revision REVISION, trusting
+#      every worker's identity) and names that coordinator in the database's
+#      settings, signed by the root.
+# The workers never store the root. The Job's log shows the trusted
+# identities and the control's expiry, never the root.
+#
+# REVISION is 1 the first time. Renew before the control expires (366 days;
+# the log prints `expires`), or after adding a worker, by running it again
+# with the next revision (2, 3, ...).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-rocky-coordinate
+  namespace: monitoring
+  labels:
+    app: prism-rocky-coordinate
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: prism-rocky-coordinate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # The Secret files belong to this group (mode 0440), so the
+        # non-root user reads them.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coordinate
+          # The image the workers run (deploy/kustomization.yaml's digest).
+          image: ghcr.io/bierdav/prism-worker@sha256:REPLACE_WITH_WORKER_DIGEST
+          args:
+            - coordinate
+            - --revision
+            - "1"
+            - http://prism-worker-0.prism-worker.monitoring.svc.cluster.local.:8080
+            - http://prism-worker-1.prism-worker.monitoring.svc.cluster.local.:8080
+            - http://prism-worker-2.prism-worker.monitoring.svc.cluster.local.:8080
+          env:
+            - name: PRISM_ROOT_FILE
+              value: /secrets/root/root
+            # The admin token derives from the event key, as for `prism` in
+            # a worker pod.
+            - name: PRISM_EVENT_KEY_FILE
+              value: /secrets/events/PRISM_EVENT_KEY
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: root
+              mountPath: /secrets/root
+              readOnly: true
+            - name: events
+              mountPath: /secrets/events
+              readOnly: true
+      volumes:
+        - name: root
+          secret:
+            secretName: prism-rocky-root
+            defaultMode: 0440
+        - name: events
+          secret:
+            secretName: prism-events
+            defaultMode: 0440

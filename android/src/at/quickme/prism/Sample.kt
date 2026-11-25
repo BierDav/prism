@@ -29,6 +29,7 @@ import at.quickme.prism.shared.ModelChoice
 import at.quickme.prism.shared.ModelSettings
 import at.quickme.prism.shared.Outcome
 import at.quickme.prism.shared.Placement
+import at.quickme.prism.shared.PlacementAccountLimit
 import at.quickme.prism.shared.PlacementActions
 import at.quickme.prism.shared.PlacementEntry
 import at.quickme.prism.shared.PlacementModel
@@ -235,35 +236,35 @@ object Sample {
         return entries + missing
     }
 
+    /** A profile as the view lists it: its own [entries], then the models it doesn't hold, off. */
+    private fun sampleProfile(id: String, label: String, entries: List<PlacementEntry>) =
+        PlacementProfile(id = id, label = label, entries = fullSelectionEntries(entries), configuredEntryCount = entries.size)
+
+    /** An entry that uses profile [id] whole, as the view reports it. */
+    private fun referenceEntry(id: String, label: String, enabled: Boolean = true) = PlacementEntry(
+        instanceId = PlacementEntry.PROFILE_INSTANCE, model = id, label = label, driver = PlacementEntry.PROFILE_INSTANCE,
+        enabled = enabled, state = if (enabled) "ok" else "disabled",
+        reason = if (enabled) "Opus 5.5 · claude-david first: session window at 42%." else "Disabled.",
+    )
+
     private var placementProfiles = mutableListOf(
-        PlacementProfile(
+        sampleProfile(
             id = "coding",
             label = "Coding",
-            entries = fullSelectionEntries(listOf(
-                PlacementEntry(
-                    instanceId = "claudeAgent", model = "claude-david/claude-opus-5-5", label = "Opus 5.5 · claude-david",
-                    driver = "claudeAgent", provider = "Claude",
-                    reasoning = "high", enabled = true, sessionShareOfWeekly = 13.7,
-                    state = "ok", reason = "Session window at 42%.", runningThreads = 2,
-                ),
-                PlacementEntry(
-                    instanceId = "claudeAgent", model = "claude-1/claude-opus-5-5", label = "Opus 5.5 · claude-1",
-                    driver = "claudeAgent", provider = "Claude",
-                    reasoning = "high", enabled = true, sessionShareOfWeekly = 13.7,
-                    state = "ok", reason = "Session window at 18%.", runningThreads = 0,
-                ),
+            entries = listOf(
+                referenceEntry("anthropic", "Anthropic"),
                 PlacementEntry(
                     instanceId = "codex", model = "codex-david/gpt-6.2-sol", label = "GPT-6.2 Sol · codex-david",
                     driver = "codex", provider = "Codex",
                     reasoning = "xhigh", enabled = false,
                     state = "disabled", reason = "Disabled.", runningThreads = 0,
                 ),
-            )),
+            ),
         ),
-        PlacementProfile(
+        sampleProfile(
             id = "review",
             label = "Review",
-            entries = fullSelectionEntries(listOf(
+            entries = listOf(
                 PlacementEntry(
                     instanceId = "codex", model = "codex-david/gpt-6.2-sol", label = "GPT-6.2 Sol · codex-david",
                     driver = "codex", provider = "Codex",
@@ -276,19 +277,37 @@ object Sample {
                     reasoning = "medium", enabled = true, sessionShareOfWeekly = 13.7,
                     state = "ok", reason = "Session window at 42%.", runningThreads = 2,
                 ),
-            )),
+            ),
         ),
-        PlacementProfile(
+        sampleProfile(
             id = "minor",
             label = "Minor",
-            entries = fullSelectionEntries(listOf(
+            entries = listOf(
                 PlacementEntry(
                     instanceId = "agy-pooled", model = "agy/gemini-4-neon", label = "Gemini 4 Neon · agy",
                     driver = "antigravity", provider = "Antigravity · pooled",
                     reasoning = "", enabled = true,
                     state = "ok", reason = "Available.", runningThreads = 0,
                 ),
-            )),
+            ),
+        ),
+        sampleProfile(
+            id = "anthropic",
+            label = "Anthropic",
+            entries = listOf(
+                PlacementEntry(
+                    instanceId = "claudeAgent", model = "claude-david/claude-opus-5-5", label = "Opus 5.5 · claude-david",
+                    driver = "claudeAgent", provider = "Claude",
+                    reasoning = "high", enabled = true, sessionShareOfWeekly = 13.7,
+                    state = "ok", reason = "Session window at 42%.", runningThreads = 2,
+                ),
+                PlacementEntry(
+                    instanceId = "claudeAgent", model = "claude-1/claude-opus-5-5", label = "Opus 5.5 · claude-1",
+                    driver = "claudeAgent", provider = "Claude",
+                    reasoning = "high", enabled = true, sessionShareOfWeekly = 13.7,
+                    state = "over_threshold", reason = "Held back: keeps 30% of the 5-hour window (62% used of 70%).", runningThreads = 0,
+                ),
+            ),
         ),
     )
 
@@ -299,6 +318,10 @@ object Sample {
         switchAtPercent = 95.0,
         weeklySlackSessions = 3.0,
         roleProfiles = mapOf("review" to "review"),
+        accountLimits = mapOf(
+            "claude-1" to PlacementAccountLimit.keeping(30, 10, PlacementAccountLimit.formatRfc3339(now() + 2 * 86400 + 5 * 3600)),
+            "codex-david" to PlacementAccountLimit.keeping(null, 20, PlacementAccountLimit.formatRfc3339(now() - 3600)),
+        ),
     )
 
     internal fun placement(): Placement = Placement(
@@ -503,6 +526,9 @@ object Sample {
                         val mod = o["model"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val known = placementModels.firstOrNull { it.instanceId == inst && it.model == mod }
                         val enabled = o["enabled"]?.jsonPrimitive?.booleanOrNull ?: true
+                        if (inst == PlacementEntry.PROFILE_INSTANCE) {
+                            return@map referenceEntry(mod, placementProfiles.firstOrNull { it.id == mod }?.displayLabel ?: mod, enabled)
+                        }
                         PlacementEntry(
                             instanceId = inst,
                             model = mod,
@@ -516,7 +542,14 @@ object Sample {
                             reason = if (enabled) "Available." else "Disabled.",
                         )
                     }.orEmpty()
-                    val updated = PlacementProfile(id = id, label = label, entries = fullSelectionEntries(entries))
+                    val cycle = entries.filter { it.isProfileReference }.firstOrNull { it.model == id || placement().reaches(it.model, id) }
+                    if (cycle != null) {
+                        return PrismResponse(400, buildJsonObject {
+                            put("error", "${cycle.displayLabel} already uses this profile.")
+                            put("code", "invalid")
+                        }.toString())
+                    }
+                    val updated = sampleProfile(id, label, entries)
                     val idx = placementProfiles.indexOfFirst { it.id == id }
                     if (idx >= 0) placementProfiles[idx] = updated else placementProfiles.add(updated)
                     encode(placement())
@@ -527,6 +560,7 @@ object Sample {
                         if (id == alertFixProfile) add("alert fixes")
                         if (id == textGenerationProfile) add("text generation")
                         placementPolicy.roleProfiles.filterValues { it == id }.keys.forEach { add("role $it") }
+                        placementProfiles.filter { p -> id in placement().referencedProfiles(p.id) }.forEach { add("profile ${it.displayLabel}") }
                     }
                     if (usedBy.isNotEmpty()) {
                         return PrismResponse(409, buildJsonObject {
@@ -568,7 +602,19 @@ object Sample {
                     encode(placement())
                 }
                 r.method == "PUT" && path == "/v1/placement/policy" -> {
-                    body?.let { placementPolicy = PrismClient.json.decodeFromString(PlacementPolicy.serializer(), it.toString()) }
+                    body?.let {
+                        placementPolicy = PrismClient.json.decodeFromString(PlacementPolicy.serializer(), it.toString())
+                            .copy(accountLimits = placementPolicy.accountLimits)
+                    }
+                    encode(placement())
+                }
+                path.startsWith("/v1/placement/account-limits/") && (r.method == "PUT" || r.method == "DELETE") -> {
+                    val account = java.net.URLDecoder.decode(path.removePrefix("/v1/placement/account-limits/"), "UTF-8")
+                    val limits = placementPolicy.accountLimits
+                    placementPolicy = placementPolicy.copy(
+                        accountLimits = if (r.method == "DELETE") limits - account
+                        else limits + (account to PrismClient.json.decodeFromString(PlacementAccountLimit.serializer(), body.toString())),
+                    )
                     encode(placement())
                 }
                 r.method == "POST" && (path.endsWith("/dismiss") || path.endsWith("/resolve")) -> {

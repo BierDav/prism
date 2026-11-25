@@ -9,8 +9,19 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - worker.yaml
+# The public Rocky coordinator's trust bundle (https://rocky.quickme.at/
+# bundle.json, pinned here): the workers' seals become final there
+# (docs/worker.md "Sealing"). Once the database names this coordinator it
+# can never name another, so this file changes only with a new database.
+# jobs/ is not listed: the rollout Job is applied by hand.
+configMapGenerator:
+  - name: prism-rocky-coordinator
+    files:
+      - bundle.json=rocky-coordinator-bundle.json
+    options:
+      disableNameSuffixHash: true
 images:
   - name: prism-worker
     newName: ghcr.io/bierdav/prism-worker
-    newTag: 8493bc6ef056732cc60322822551d2da3d67936a-45604858705
-    digest: sha256:d70494e87964f18587c9b724dad58e26a7ad78f0aab56856804e6185a0f84565
+    newTag: 4a39ff387da2b77e26948f6aa08fc40ab6e84b9c-45624636106
+    digest: sha256:2b71544e7f0b9c55490ef38752760ad5c8d33e3cdcc2df889918508ffd6bbc2e

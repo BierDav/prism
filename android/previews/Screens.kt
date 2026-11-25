@@ -14,6 +14,7 @@ import at.quickme.prism.HotspotContent
 import at.quickme.prism.HotspotState
 import at.quickme.prism.NetbirdContent
 import at.quickme.prism.PlacementActionsContent
+import at.quickme.prism.PlacementLimitsContent
 import at.quickme.prism.PlacementProfileContent
 import at.quickme.prism.Sample
 import at.quickme.prism.shell.AdbState
@@ -92,20 +93,52 @@ private fun HotspotPreview() = Themed {
     )
 }
 
-/** One placement profile: full-selection model list with provider icons, reasoning chips and switches. */
+/** One placement profile: the entries it holds (another profile, a model with a reasoning chip), switches, Add model. */
 @ScreenPreviews
 @Composable
 private fun PlacementProfilePreview() = Themed {
     val placement = remember { Sample.placement() }
     PlacementProfileContent(
         profile = placement.profiles.first(),
-        models = placement.models,
+        placement = placement,
         loading = false,
         saving = false,
         error = null,
         onBack = {},
         onReload = {},
         onSaveProfile = { _, _, _ -> },
+        onDeleteProfile = {},
+    )
+}
+
+/** The profile a profile uses: two Claude accounts, one held back by an account limit. */
+@ScreenPreviews
+@Composable
+private fun PlacementProfileNestedPreview() = Themed {
+    val placement = remember { Sample.placement() }
+    PlacementProfileContent(
+        profile = placement.profiles.first { it.id == "anthropic" },
+        placement = placement,
+        loading = false,
+        saving = false,
+        error = null,
+        onBack = {},
+        onReload = {},
+        onSaveProfile = { _, _, _ -> },
+    )
+}
+
+/** Account limits: one active (with its end), one that ended, and Add limit. */
+@ScreenPreviews
+@Composable
+private fun PlacementLimitsPreview() = Themed {
+    PlacementLimitsContent(
+        placement = remember { Sample.placement() },
+        saving = false,
+        error = null,
+        onBack = {},
+        onReload = {},
+        onSetLimit = { _, _ -> },
     )
 }
 

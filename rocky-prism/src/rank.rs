@@ -1,12 +1,12 @@
 use crate::types::{
     PlacementAccountLimit, PlacementActiveHours, PlacementEntryDecision, PlacementEntryInput,
     PlacementEntryRow, PlacementHostModel, PlacementLoad, PlacementMoveTarget, PlacementOption,
-    PlacementPolicy, PlacementProfileDecision, PlacementSample, PlacementSelection,
-    PlacementWindow,
+    PlacementPolicy, PlacementProfileDecision, PlacementProfileRow, PlacementSample,
+    PlacementSelection, PlacementWindow,
 };
 use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PLACEMENT_SESSION_HOURS: f64 = 5.0;
 pub const PLACEMENT_BURN_WINDOW_SECS: i64 = 45 * 60;
@@ -16,6 +16,88 @@ pub const PLACEMENT_MAX_WEEKLY_RESET_SECS: i64 = 8 * 24 * 60 * 60;
 
 pub fn vienna_tz() -> Tz {
     chrono_tz::Europe::Vienna
+}
+
+/// The instance id of an entry that names another profile (`model` is the
+/// profile's id), as T3's Profiles provider selects a profile.
+pub const PROFILE_ENTRY_INSTANCE: &str = "placement";
+
+/// Whether an entry names another profile instead of a model.
+pub fn is_profile_entry(instance_id: &str) -> bool {
+    instance_id == PROFILE_ENTRY_INSTANCE
+}
+
+/// Each profile with its profile entries replaced by the entries of the
+/// profiles they name, recursively, at their position: what ranking, moves
+/// and T3 see. A disabled reference adds nothing, a referenced profile adds
+/// only its enabled entries, a model already listed earlier is not listed
+/// again, and a reference back into a profile being expanded (a cycle, which
+/// saving refuses) or to a missing profile adds nothing.
+pub fn expand_profile_references(profiles: &[PlacementProfileRow]) -> Vec<PlacementProfileRow> {
+    let by_id: BTreeMap<&str, &PlacementProfileRow> =
+        profiles.iter().map(|p| (p.id.as_str(), p)).collect();
+    fn expand<'a>(
+        profile: &'a PlacementProfileRow,
+        by_id: &BTreeMap<&str, &'a PlacementProfileRow>,
+        visiting: &mut Vec<&'a str>,
+        only_enabled: bool,
+        out: &mut Vec<PlacementEntryRow>,
+    ) {
+        visiting.push(&profile.id);
+        for e in &profile.entries {
+            if only_enabled && !e.enabled {
+                continue;
+            }
+            if is_profile_entry(&e.instance_id) {
+                if let Some(inner) = by_id.get(e.model.as_str())
+                    && e.enabled
+                    && !visiting.contains(&inner.id.as_str())
+                {
+                    expand(inner, by_id, visiting, true, out);
+                }
+                continue;
+            }
+            if !out
+                .iter()
+                .any(|kept| kept.instance_id == e.instance_id && kept.model == e.model)
+            {
+                out.push(e.clone());
+            }
+        }
+        visiting.pop();
+    }
+    profiles
+        .iter()
+        .map(|p| {
+            let mut entries = Vec::new();
+            expand(p, &by_id, &mut Vec::new(), false, &mut entries);
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.profile_id = p.id.clone();
+                e.position = i as i32;
+            }
+            PlacementProfileRow {
+                entries,
+                ..p.clone()
+            }
+        })
+        .collect()
+}
+
+/// The profiles `id` names directly or through other profiles.
+pub fn referenced_profiles(profiles: &[PlacementProfileRow], id: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![id.to_string()];
+    while let Some(next) = todo.pop() {
+        let Some(p) = profiles.iter().find(|p| p.id == next) else {
+            continue;
+        };
+        for e in &p.entries {
+            if is_profile_entry(&e.instance_id) && seen.insert(e.model.clone()) {
+                todo.push(e.model.clone());
+            }
+        }
+    }
+    seen
 }
 
 pub fn model_key(instance_id: &str, model: &str) -> String {

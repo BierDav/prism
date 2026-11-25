@@ -193,6 +193,13 @@ object PrismIcons {
         fill(0.85f) { roundRect(9.2f, 11f, 14.8f, 18.8f, 0.8f) }
     }
 
+    /** A profile used inside another profile: stacked layers. */
+    val Layers = icon("Layers") {
+        stroke { moveTo(12f, 3.5f); lineTo(21f, 8f); lineTo(12f, 12.5f); lineTo(3f, 8f); close() }
+        stroke { moveTo(3f, 12f); lineTo(12f, 16.5f); lineTo(21f, 12f) }
+        stroke { moveTo(3f, 16f); lineTo(12f, 20.5f); lineTo(21f, 16f) }
+    }
+
     val Clock = icon("Clock") {
         stroke { circle(12f, 12f, 9f) }
         stroke { moveTo(12f, 7f); lineTo(12f, 12f); lineTo(15.2f, 14f) }

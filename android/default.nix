@@ -232,8 +232,8 @@ let
       javaSources=$(find src build/gen -name '*.java')
       # The app's sources with shared/'s (commonMain, jvmMain) in one module.
       ${shared.kotlincArgs.jvm} build/kotlin.args $(find src -name '*.kt') $javaSources
-      # The app and shared/ are one module: more than kotlinc's default 512 MB heap.
-      JAVA_OPTS="-Xmx3g -Xms256m" kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
+      # kotlinc's default heap (512 MB) no longer holds the app with Compose.
+      JAVA_OPTS="-Xmx3g -Xms256m -Xss4m" kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
         -Xplugin=${kotlin}/lib/compose-compiler-plugin.jar \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3Api \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi \
@@ -501,7 +501,7 @@ let
       app=${classes}/jvm/kotlin.jar:${classes}/jvm/java.jar
       layoutlib=$(find ${previewLibraries}/jars -name 'layoutlib-16*.jar')
       compose() {
-        kotlinc -no-reflect -no-stdlib -jvm-target 17 -Werror \
+        JAVA_OPTS="-Xmx3g -Xss4m" kotlinc -no-reflect -no-stdlib -jvm-target 17 -Werror \
           -Xplugin=${kotlin}/lib/compose-compiler-plugin.jar \
           -opt-in=androidx.compose.material3.ExperimentalMaterial3Api \
           -opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi \

@@ -191,6 +191,15 @@ spec:
               value: /secrets/rocky/$(PRISM_WORKER_NODE)
             - name: PRISM_WORKER_PEERS_FILE
               value: /secrets/rocky/PEERS
+            # Sealing (docs/worker.md "Sealing"): the coordinator that makes
+            # this worker's seals final, the public one at rocky.quickme.at,
+            # reached over iroh through its relay (HTTPS egress only).
+            - name: PRISM_ROCKY_COORDINATOR_BUNDLE_FILE
+              value: /coordinator/bundle.json
+            - name: PRISM_ROCKY_COORDINATOR_ROOT
+              value: bd3c36e83a5773e81eb46d8863edb80b5712c882dcc0163bc21f73db978a6bf0
+            - name: PRISM_ROCKY_COORDINATOR_RELAY
+              value: https://rocky-relay.quickme.at
           ports:
             - name: rocky
               containerPort: 7411
@@ -237,6 +246,9 @@ spec:
             - name: rocky
               mountPath: /secrets/rocky
               readOnly: true
+            - name: coordinator
+              mountPath: /coordinator
+              readOnly: true
             - name: config
               mountPath: /config
               readOnly: true
@@ -265,6 +277,9 @@ spec:
         - name: config
           configMap:
             name: prism-config
+        - name: coordinator
+          configMap:
+            name: prism-rocky-coordinator
         - name: t3-token
           secret:
             secretName: alerting-t3
