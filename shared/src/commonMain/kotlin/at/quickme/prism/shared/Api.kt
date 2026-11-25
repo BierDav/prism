@@ -416,6 +416,54 @@ data class Placement(
     val effectiveAlertFixProfile: String get() = actions.alertFix.ifEmpty { alertFixProfile }
     /** The profile text generation uses, or null when none. */
     val effectiveTextGenerationProfile: String? get() = actions.textGeneration?.takeIf { it.isNotEmpty() }
+
+    /** The gateway accounts the hosts' models run on (`claude-alex` for `claude-alex/claude-opus-5-5`),
+     *  sorted, for temporary account limits; profile references don't count. */
+    val accounts: List<String>
+        get() = models.asSequence()
+            .filter { it.instanceId != PlacementEntry.PROFILE_INSTANCE && '/' in it.model }
+            .map { it.model.substringBefore('/') }
+            .filter { it.isNotEmpty() }
+            .distinct().sorted().toList()
+
+    /** The profiles [profileId] names as entries, directly. */
+    fun referencedProfiles(profileId: String): List<String> =
+        profiles.firstOrNull { it.id == profileId }?.configuredEntries.orEmpty()
+            .filter { it.isProfileReference }.map { it.model }
+
+    /** [from] uses [to]: it is [to], or one of its entries references it, directly or through other profiles. */
+    fun reaches(from: String, to: String): Boolean {
+        val seen = mutableSetOf<String>()
+        val queue = ArrayDeque(listOf(from))
+        while (queue.isNotEmpty()) {
+            val id = queue.removeFirst()
+            if (id == to) return true
+            if (seen.add(id)) queue.addAll(referencedProfiles(id))
+        }
+        return false
+    }
+
+    /** The profiles [profileId] can take as an entry: not itself, not one it holds already, and none
+     *  that uses it (that would be a cycle, which the server refuses). */
+    fun referenceCandidates(profileId: String, held: List<PlacementEntry>): List<PlacementProfile> {
+        val taken = held.filter { it.isProfileReference }.map { it.model }.toSet()
+        return profiles.filter { it.id != profileId && it.id !in taken && !reaches(it.id, profileId) }
+    }
+
+    /** What keeps [profileId] from being deleted: the actions, roles and profiles that use it. */
+    fun profileUsedBy(profileId: String): List<String> = buildList {
+        if (profileId == effectiveAlertFixProfile) add("Alert fixes")
+        if (profileId == effectiveTextGenerationProfile) add("Text generation")
+        policy.roleProfiles.filterValues { it == profileId }.keys.sorted().forEach { role ->
+            add("Delegated agents (${role.replaceFirstChar { it.uppercase() }})")
+        }
+        profiles.filter { it.id != profileId && profileId in referencedProfiles(it.id) }.forEach {
+            add("the profile ${it.displayLabel}")
+        }
+    }
+
+    /** The label of profile [id], or [id] when there is none. */
+    fun profileLabel(id: String): String = profiles.firstOrNull { it.id == id }?.displayLabel ?: id
 }
 
 @Serializable
@@ -437,7 +485,11 @@ data class PlacementProfile(
     val displayLabel: String get() = label.ifEmpty { id }
 }
 
-/** One model entry in a placement profile, with its live ranking state when reported. */
+/**
+ * One entry in a placement profile, with its live ranking state when reported:
+ * a model, or another profile ([isProfileReference]: instance `placement`,
+ * [model] the profile's id), which ranks as that profile's enabled entries.
+ */
 @Serializable
 data class PlacementEntry(
     val instanceId: String = "",
@@ -454,8 +506,29 @@ data class PlacementEntry(
     val reason: String = "",
     val runningThreads: Int = 0,
 ) {
+    /** It names another profile, not a model. */
+    val isProfileReference: Boolean get() = instanceId == PROFILE_INSTANCE
     val displayLabel: String get() = label.ifEmpty { model.substringAfterLast('/').ifEmpty { model } }
-    val displayProvider: String get() = provider.ifEmpty { instanceId }
+    val displayProvider: String get() = if (isProfileReference) "Profile" else provider.ifEmpty { instanceId }
+    /** The same model or profile as [other], whatever its settings. */
+    fun sameTarget(other: PlacementEntry): Boolean = instanceId == other.instanceId && model == other.model
+
+    companion object {
+        /** The instance of an entry that names a profile. */
+        const val PROFILE_INSTANCE = "placement"
+
+        /** An entry that ranks as [profile]'s enabled entries. */
+        fun reference(profile: PlacementProfile, enabled: Boolean = true): PlacementEntry = PlacementEntry(
+            instanceId = PROFILE_INSTANCE, model = profile.id, label = profile.displayLabel,
+            driver = PROFILE_INSTANCE, enabled = enabled,
+        )
+
+        /** A new entry for [model], switched on, at its default reasoning. */
+        fun of(model: PlacementModel): PlacementEntry = PlacementEntry(
+            instanceId = model.instanceId, model = model.model, label = model.label,
+            driver = model.driver, provider = model.provider, enabled = true,
+        )
+    }
 }
 
 /** A model reported by at least one host in the last day. */
@@ -487,7 +560,102 @@ data class PlacementPolicy(
     val weeklySlackSessions: Double = 3.0,
     val activeHours: PlacementActiveHours? = null,
     val roleProfiles: Map<String, String> = emptyMap(),
+    /** The second weekly threshold; null: the server's default (1.5). Kept so saving the policy keeps it. */
+    val weeklyMoveSlackSessions: Double? = null,
+    /** Temporary limits by gateway account (`claude-alex`). Read only here: set them with
+     *  [PrismClient.setAccountLimit]; saving the policy leaves them alone. */
+    val accountLimits: Map<String, PlacementAccountLimit> = emptyMap(),
 )
+
+/**
+ * A temporary limit on one gateway account: placement counts its 5-hour
+ * window as full at [sessionPercent] used and its weekly window at
+ * [weeklyPercent] (1–100, null: no limit on that window), until [until]
+ * (RFC 3339, "" for no end). "Keep 30% of the session" is `sessionPercent: 70`.
+ */
+@Serializable
+data class PlacementAccountLimit(
+    val sessionPercent: Double? = null,
+    val weeklyPercent: Double? = null,
+    val until: String = "",
+) {
+    /** The share of the 5-hour window held back, in whole percent, or null. */
+    val sessionKept: Int? get() = sessionPercent?.let { kept(it) }
+    /** The share of the week held back, in whole percent, or null. */
+    val weeklyKept: Int? get() = weeklyPercent?.let { kept(it) }
+
+    /** When it ends, in Unix seconds, or null without an end (or one that can't be read). */
+    val untilEpochSeconds: Long? get() = until.takeIf { it.isNotBlank() }?.let { parseRfc3339(it) }
+
+    /** Its end has passed at [now] (Unix seconds): placement no longer applies it. */
+    fun ended(now: Long): Boolean = untilEpochSeconds?.let { it <= now } ?: false
+
+    /** "Keeps 30% of the 5-hour window and 10% of the week". */
+    val summary: String
+        get() = listOfNotNull(
+            sessionKept?.let { "$it% of the 5-hour window" },
+            weeklyKept?.let { "$it% of the week" },
+        ).joinToString(" and ").let { if (it.isEmpty()) "No limit" else "Keeps $it" }
+
+    companion object {
+        /** The limit that keeps [sessionKept] and [weeklyKept] percent (0–99, null: none) until [until]. */
+        fun keeping(sessionKept: Int?, weeklyKept: Int?, until: String = ""): PlacementAccountLimit =
+            PlacementAccountLimit(
+                sessionPercent = sessionKept?.let { (100 - it.coerceIn(0, 99)).toDouble() },
+                weeklyPercent = weeklyKept?.let { (100 - it.coerceIn(0, 99)).toDouble() },
+                until = until,
+            )
+
+        private fun kept(percent: Double): Int = (100 - percent).let { kotlin.math.round(it).toInt() }.coerceIn(0, 100)
+
+        /** Unix seconds for `2026-11-28T08:00:00Z`, `…+01:00` or with fractions; null when it isn't one. */
+        fun parseRfc3339(text: String): Long? {
+            val m = Regex("""(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?\s*([Zz]|[+-]\d{2}:?\d{2})?""")
+                .matchEntire(text.trim()) ?: return null
+            val (y, mo, d, h, mi) = m.destructured
+            val sec = m.groupValues[6].ifEmpty { "0" }.toLong()
+            val zone = m.groupValues[7]
+            val offset = if (zone.isEmpty() || zone.equals("Z", ignoreCase = true)) 0L else {
+                val digits = zone.drop(1).replace(":", "")
+                val sign = if (zone[0] == '-') -1 else 1
+                sign * (digits.take(2).toLong() * 3600 + digits.drop(2).toLong() * 60)
+            }
+            return daysFromCivil(y.toLong(), mo.toLong(), d.toLong()) * 86400 +
+                h.toLong() * 3600 + mi.toLong() * 60 + sec - offset
+        }
+
+        /** `2026-11-28T08:00:00Z` for Unix seconds [epoch]. */
+        fun formatRfc3339(epoch: Long): String {
+            val days = epoch.floorDiv(86400L)
+            val rest = epoch - days * 86400
+            val (y, m, d) = civilFromDays(days)
+            fun two(n: Long) = n.toString().padStart(2, '0')
+            return "${y.toString().padStart(4, '0')}-${two(m)}-${two(d)}T${two(rest / 3600)}:${two(rest % 3600 / 60)}:${two(rest % 60)}Z"
+        }
+
+        // Howard Hinnant's days_from_civil / civil_from_days.
+        private fun daysFromCivil(y0: Long, m: Long, d: Long): Long {
+            val y = if (m <= 2) y0 - 1 else y0
+            val era = y.floorDiv(400L)
+            val yoe = y - era * 400
+            val doy = (153 * (if (m > 2) m - 3 else m + 9) + 2) / 5 + d - 1
+            val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+            return era * 146097 + doe - 719468
+        }
+
+        private fun civilFromDays(z0: Long): Triple<Long, Long, Long> {
+            val z = z0 + 719468
+            val era = z.floorDiv(146097L)
+            val doe = z - era * 146097
+            val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+            val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+            val mp = (5 * doy + 2) / 153
+            val d = doy - (153 * mp + 2) / 5 + 1
+            val m = if (mp < 10) mp + 3 else mp - 9
+            return Triple(yoe + era * 400 + (if (m <= 2) 1 else 0), m, d)
+        }
+    }
+}
 
 @Serializable
 data class PlacementActiveHours(

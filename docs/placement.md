@@ -419,3 +419,30 @@ a launch on `{"instanceId": "placement", "model": "<id>"}` does, after
 checking that the machine's T3 lists the profile. T3 picks the profile's
 account. Launches that name a model are unchanged. `/v1/settings/model`
 stays for the Mac's composer.
+
+### In the apps
+
+Both apps edit the same things the same way (Android: Phone tab ›
+Placement; macOS: the Profiles panel). The shared module (`shared/`'s
+`Api.kt`) has the rules they share: `configuredEntries`,
+`referenceCandidates`, `profileUsedBy` and `accounts`.
+
+- A profile's page lists only the entries it holds (`configuredEntries`,
+  hidden models left out but kept when saving), each with its switch, its
+  reasoning level, reorder (Android: hold and drag) and remove (Android:
+  hold without moving, or the entry's sheet). Add model offers the models
+  it doesn't hold (not hidden ones) and the other profiles.
+- A profile entry is `{"instanceId": "placement", "model": "<profile id>"}`
+  ("Profile · Anthropic", with its own icon and no reasoning). The add menu
+  leaves out the profile itself, the ones it holds, and every profile that
+  uses it, directly or through others (that would be a cycle; the server
+  refuses one with `400`). A profile another profile uses can't be deleted:
+  the apps say which ones use it, as for actions and roles.
+- Account limits (Android: Phone tab › Account limits; macOS: under the
+  profiles) list `policy.accountLimits` with their end ("Ended …" once it
+  passed), and add, edit and remove them with
+  `PUT`/`DELETE /v1/placement/account-limits/{account}`. The owner enters
+  the share to **keep** ("Keep 30% of the 5-hour window"), the apps send
+  `sessionPercent: 70`. The accounts offered are the prefixes before `/` of
+  `models` (`claude-alex` of `claude-alex/claude-opus-5-5`). Saving the
+  policy never sends `accountLimits`.

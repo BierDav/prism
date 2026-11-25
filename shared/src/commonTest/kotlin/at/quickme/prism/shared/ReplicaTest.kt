@@ -44,6 +44,12 @@ suspend fun replicaTests(directory: String) {
     check(ordered.profiles.map { it.id } == listOf("night", "default")) { "order: ${ordered.profiles.map { it.id }}" }
     val policy = replica.setPlacementPolicy(seeded.policy.copy(switchAtPercent = 80.0)).policy
     check(policy.switchAtPercent == 80.0) { "policy: $policy" }
+    val limited = replica.setAccountLimit("claude-alex", PlacementAccountLimit.keeping(30, 10, "2026-11-28T08:00:00Z")).policy
+    check(limited.accountLimits["claude-alex"] == PlacementAccountLimit(70.0, 90.0, "2026-11-28T08:00:00Z")) { "account limit: $limited" }
+    check(replica.setPlacementPolicy(limited.copy(weeklySlackSessions = limited.weeklySlackSessions)).policy.accountLimits.keys == setOf("claude-alex")) {
+        "saving the policy dropped the account limits"
+    }
+    check(replica.clearAccountLimit("claude-alex").policy.accountLimits.isEmpty()) { "account limit not cleared" }
 
     val refused = try {
         replica.savePlacementProfile("Not Valid", "x", emptyList())

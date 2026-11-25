@@ -594,7 +594,9 @@ the T3 host sync endpoint (`POST /v1/placement/sync` on the machine event API).
   `accountLimits`).
 - `PUT /v1/placement/account-limits/{account}` `{"sessionPercent": 70,
   "weeklyPercent": 90, "until": "2026-11-28T08:00:00Z"}` sets an account's
-  temporary limit (`docs/placement.md`); `DELETE` removes it.
+  temporary limit (`docs/placement.md`); `DELETE` removes it. In the
+  shared client: `setAccountLimit` and `clearAccountLimit` (the replica's
+  `PrismReplica` has both too).
 
 Each mutation returns the same object as `GET /v1/placement` and publishes
 `placement.changed`.

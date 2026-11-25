@@ -1,9 +1,12 @@
 // Long-press-then-drag reorderable column that coexists with vertical page
-// scrolling. Releasing a long press without dragging notifies onLongPressRelease.
+// scrolling. Releasing a long press without dragging notifies onLongPressRelease
+// instead of the row's own click (a clickable row would otherwise take that
+// release as a tap).
 
 package at.quickme.prism.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,10 +21,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -51,6 +57,7 @@ fun <T> ReorderableColumn(
     var targetIndex by remember { mutableIntStateOf(-1) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     var didDrag by remember { mutableStateOf(false) }
+    val longPressRelease by rememberUpdatedState(onLongPressRelease)
 
     fun computeTarget(from: Int, offsetY: Float): Int {
         var idx = from
@@ -102,6 +109,27 @@ fun <T> ReorderableColumn(
                             translationY = if (isDragging) dragOffsetY else animatedShift
                             shadowElevation = if (isDragging) dragElevationPx else 0f
                         }
+                        // A long press released where it started: take the release in the
+                        // Initial pass, before the row's clickable (a child) sees it as a tap.
+                        // The drag detector below then sees it consumed and cancels.
+                        .pointerInput(items, enabled) {
+                            if (!enabled) return@pointerInput
+                            awaitEachGesture {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (event.changes.none { it.changedToUpIgnoreConsumed() }) continue
+                                    val release = longPressRelease
+                                    if (release != null && draggingIndex == index && !didDrag) {
+                                        event.changes.forEach { it.consume() }
+                                        draggingIndex = -1
+                                        targetIndex = -1
+                                        dragOffsetY = 0f
+                                        release(index)
+                                    }
+                                    break
+                                }
+                            }
+                        }
                         .pointerInput(items, enabled) {
                             if (!enabled) return@pointerInput
                             detectDragGesturesAfterLongPress(
@@ -135,7 +163,7 @@ fun <T> ReorderableColumn(
                                     if (dragged && from >= 0 && to >= 0 && from != to) {
                                         onReorder(from, to)
                                     } else if (!dragged && from >= 0) {
-                                        onLongPressRelease?.invoke(from)
+                                        longPressRelease?.invoke(from)
                                     }
                                 },
                                 onDragCancel = {

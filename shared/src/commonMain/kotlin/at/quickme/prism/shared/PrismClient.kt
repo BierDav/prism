@@ -298,13 +298,29 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
         return decode(send("PUT", "/v1/placement/actions", body), Placement.serializer())
     }
 
-    /** Updates the placement policy. */
+    /** Updates the placement policy; its [PlacementPolicy.accountLimits] are not sent (the server keeps its own). */
     @Throws(Exception::class)
     suspend fun setPlacementPolicy(policy: PlacementPolicy): Placement =
         decode(
-            send("PUT", "/v1/placement/policy", json.encodeToJsonElement(PlacementPolicy.serializer(), policy)),
+            send("PUT", "/v1/placement/policy", json.encodeToJsonElement(PlacementPolicy.serializer(), policy.copy(accountLimits = emptyMap()))),
             Placement.serializer(),
         )
+
+    /** Sets [account]'s temporary limit (PUT /v1/placement/account-limits/{account}). */
+    @Throws(Exception::class)
+    suspend fun setAccountLimit(account: String, limit: PlacementAccountLimit): Placement =
+        decode(
+            send(
+                "PUT", "/v1/placement/account-limits/${T3Links.encode(account)}",
+                json.encodeToJsonElement(PlacementAccountLimit.serializer(), limit),
+            ),
+            Placement.serializer(),
+        )
+
+    /** Removes [account]'s temporary limit. */
+    @Throws(Exception::class)
+    suspend fun clearAccountLimit(account: String): Placement =
+        decode(send("DELETE", "/v1/placement/account-limits/${T3Links.encode(account)}"), Placement.serializer())
 
     // --- The exchange ---
 
