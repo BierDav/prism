@@ -1,10 +1,10 @@
-//! The phone assistant's conversations: saved whole, written by the row,
-//! read back in order, listed newest first, deleted; and a replica of the
-//! first schema taking the new tables.
+//! The phone assistant's conversations: saved whole by revision, written by
+//! the row, read back in order, listed newest first, refused when stale or
+//! deleted; and a replica of the first schema taking the new tables.
 
 use rocky_prism::{
-    ASSISTANT_MAX_BODY_BYTES, AssistantConversationRow, AssistantEntry, PrismClient, PrismError,
-    SCHEMA_VERSION, prism_schema,
+    ASSISTANT_DELETED, ASSISTANT_MAX_BODY_BYTES, ASSISTANT_STALE, AssistantConversationRow,
+    AssistantEntry, PrismClient, PrismError, SCHEMA_VERSION, prism_schema,
 };
 
 async fn open() -> (tempfile::TempDir, PrismClient) {
@@ -22,6 +22,7 @@ fn row(id: &str, title: &str, at: i64) -> AssistantConversationRow {
         title: title.into(),
         created_at: at,
         updated_at: at,
+        revision: 0,
     }
 }
 
@@ -36,12 +37,20 @@ fn strings(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
+fn conflict(result: Result<i64, PrismError>) -> String {
+    match result {
+        Err(PrismError::Conflict(m)) => m,
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+}
+
 #[tokio::test]
-async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
+async fn a_conversation_is_saved_by_revision_and_read_back_in_order() {
     let (_dir, client) = open().await;
-    let written = client
+    let first = client
         .save_assistant_conversation(
             row("c-1", "  Weather\nin Vienna? ", 100),
+            0,
             vec![
                 entry("e0", r#"{"type":"user","text":"Weather?"}"#),
                 entry("tool:1", r#"{"type":"step"}"#),
@@ -50,11 +59,12 @@ async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
         )
         .await
         .expect("save");
-    assert_eq!(written, 5, "two entries, two messages, the conversation");
+    assert_eq!(first, 1);
 
     let c = client.assistant_conversation("c-1").await.expect("read");
     assert_eq!(c.conversation.title, "Weather in Vienna?");
     assert_eq!(c.conversation.device, "david-pixel");
+    assert_eq!(c.conversation.revision, 1);
     assert_eq!(
         c.entries
             .iter()
@@ -64,27 +74,29 @@ async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
     );
     assert_eq!(c.history, strings(&["m1", "m2"]));
 
-    // Saved again unchanged: nothing is written.
+    // Saved again unchanged: still revision 1.
     let again = client
         .save_assistant_conversation(
             row("c-1", "Weather in Vienna?", 100),
+            1,
             c.entries.clone(),
             c.history.clone(),
         )
         .await
         .expect("save again");
-    assert_eq!(again, 0);
+    assert_eq!(again, 1);
 
     // A tool's line became its card, an answer came, the oldest message was
-    // dropped and two were added: only those rows are written. Another
-    // device continuing it doesn't change who started it.
-    let written = client
+    // dropped and two were added. Another device continuing it doesn't
+    // change who started it.
+    let second = client
         .save_assistant_conversation(
             AssistantConversationRow {
                 device: "david-mb".into(),
                 created_at: 999,
                 ..row("c-1", "Weather in Vienna?", 200)
             },
+            1,
             vec![
                 entry("e0", r#"{"type":"user","text":"Weather?"}"#),
                 entry("tool:1", r#"{"type":"card"}"#),
@@ -94,10 +106,7 @@ async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
         )
         .await
         .expect("save more");
-    assert_eq!(
-        written, 6,
-        "a delete, an update, an insert, two messages, the conversation"
-    );
+    assert_eq!(second, 2);
     let c = client.assistant_conversation("c-1").await.expect("read");
     assert_eq!(c.entries[1].body, r#"{"type":"card"}"#);
     assert_eq!(c.entries[2].entry_id, "e1");
@@ -115,6 +124,7 @@ async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
     client
         .save_assistant_conversation(
             row("c-1", "Weather in Vienna?", 300),
+            2,
             c.entries.clone(),
             strings(&["m2", "m3", "m5"]),
         )
@@ -122,14 +132,44 @@ async fn a_conversation_is_saved_by_the_row_and_read_back_in_order() {
         .expect("save after a stop");
     let c = client.assistant_conversation("c-1").await.expect("read");
     assert_eq!(c.history, strings(&["m2", "m3", "m5"]));
+    assert_eq!(c.conversation.revision, 3);
 }
 
+/// Two sessions that loaded the same revision: the second save is refused
+/// instead of writing over the first.
 #[tokio::test]
-async fn conversations_list_newest_first_and_delete_whole() {
+async fn a_save_on_an_old_revision_is_refused() {
+    let (_dir, client) = open().await;
+    let save = |base, text: &'static str| {
+        client.save_assistant_conversation(
+            row("c-1", "x", 1),
+            base,
+            vec![entry("e0", text)],
+            strings(&[text]),
+        )
+    };
+    assert_eq!(save(0, "a").await.expect("first"), 1);
+    assert_eq!(conflict(save(0, "b").await), ASSISTANT_STALE);
+    assert_eq!(save(1, "c").await.expect("on the latest"), 2);
+    assert_eq!(conflict(save(1, "d").await), ASSISTANT_STALE);
+    let c = client.assistant_conversation("c-1").await.expect("read");
+    assert_eq!(c.history, strings(&["c"]));
+}
+
+/// A deleted conversation stays deleted: its tombstone refuses later saves
+/// (a session still running, another device), also of a conversation this
+/// replica never had.
+#[tokio::test]
+async fn a_deleted_conversation_refuses_saves() {
     let (_dir, client) = open().await;
     for (id, at) in [("c-old", 100), ("c-new", 300), ("c-mid", 200)] {
         client
-            .save_assistant_conversation(row(id, id, at), vec![entry("e0", "{}")], strings(&["m"]))
+            .save_assistant_conversation(
+                row(id, id, at),
+                0,
+                vec![entry("e0", "{}")],
+                strings(&["m"]),
+            )
             .await
             .expect("save");
     }
@@ -148,7 +188,7 @@ async fn conversations_list_newest_first_and_delete_whole() {
     );
 
     client
-        .delete_assistant_conversation("c-mid")
+        .delete_assistant_conversation("c-mid", "david-pixel", 400)
         .await
         .expect("delete");
     assert_eq!(
@@ -159,13 +199,34 @@ async fn conversations_list_newest_first_and_delete_whole() {
         client.assistant_conversation("c-mid").await,
         Err(PrismError::NotFound)
     ));
-    // Saved again, it starts empty: nothing of it was left behind.
+    for base in [0, 1] {
+        assert_eq!(
+            conflict(
+                client
+                    .save_assistant_conversation(row("c-mid", "back", 500), base, vec![], vec![])
+                    .await
+            ),
+            ASSISTANT_DELETED
+        );
+    }
+
+    // Deleted before it was ever stored here (an outbox's delete).
     client
-        .save_assistant_conversation(row("c-mid", "again", 400), vec![], vec![])
+        .delete_assistant_conversation("c-never", "david-pixel", 400)
         .await
-        .expect("save");
-    let c = client.assistant_conversation("c-mid").await.expect("read");
-    assert!(c.entries.is_empty() && c.history.is_empty());
+        .expect("delete unknown");
+    assert_eq!(
+        conflict(
+            client
+                .save_assistant_conversation(row("c-never", "x", 1), 0, vec![], vec![])
+                .await
+        ),
+        ASSISTANT_DELETED
+    );
+    assert_eq!(
+        ids(client.list_assistant_conversations(50).await.expect("list")),
+        ["c-new", "c-old"]
+    );
 }
 
 #[tokio::test]
@@ -177,12 +238,22 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     let entries: Vec<_> = (0..60).map(|i| entry(&format!("e{i}"), &big)).collect();
     let history: Vec<_> = (0..60).map(|i| format!("{i:03}{}", &big[3..])).collect();
     client
-        .save_assistant_conversation(row("c-big", "big", 1), entries.clone(), history.clone())
+        .save_assistant_conversation(row("c-big", "big", 1), 0, entries.clone(), history.clone())
         .await
         .expect("save big");
     let c = client.assistant_conversation("c-big").await.expect("read");
     assert_eq!(c.entries.len(), 60);
     assert_eq!(c.history, history);
+
+    // No limit on how long a conversation gets: 3000 entries.
+    let many: Vec<_> = (0..3000).map(|i| entry(&format!("e{i}"), "{}")).collect();
+    client
+        .save_assistant_conversation(row("c-long", "long", 1), 0, many, vec![])
+        .await
+        .expect("save a long conversation");
+    let c = client.assistant_conversation("c-long").await.expect("read");
+    assert_eq!(c.entries.len(), 3000);
+    assert_eq!(c.entries[2999].entry_id, "e2999");
 
     let too_big = "x".repeat(ASSISTANT_MAX_BODY_BYTES + 1);
     for (entries, history) in [
@@ -192,14 +263,14 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     ] {
         assert!(matches!(
             client
-                .save_assistant_conversation(row("c-x", "x", 1), entries, history)
+                .save_assistant_conversation(row("c-x", "x", 1), 0, entries, history)
                 .await,
             Err(PrismError::InvalidInput(_))
         ));
     }
     assert!(matches!(
         client
-            .save_assistant_conversation(row("not an id", "x", 1), vec![], vec![])
+            .save_assistant_conversation(row("not an id", "x", 1), 0, vec![], vec![])
             .await,
         Err(PrismError::InvalidInput(_))
     ));
@@ -230,6 +301,7 @@ async fn a_replica_of_the_first_schema_takes_the_assistants_tables() {
     client
         .save_assistant_conversation(
             row("c-1", "hi", 1),
+            0,
             vec![entry("e0", "{}")],
             strings(&["m"]),
         )

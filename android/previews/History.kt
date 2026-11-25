@@ -6,6 +6,7 @@ package at.quickme.prism.previews
 
 import androidx.compose.runtime.Composable
 import at.quickme.prism.assistant.HistoryChat
+import at.quickme.prism.assistant.HistoryItem
 import at.quickme.prism.assistant.HistoryList
 import at.quickme.prism.assistant.core.DayForecast
 import at.quickme.prism.assistant.core.Event
@@ -13,10 +14,25 @@ import at.quickme.prism.assistant.core.HourForecast
 import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.Transcript
 import at.quickme.prism.assistant.core.WeatherCard
-import at.quickme.prism.assistant.sampleHistory
+import at.quickme.prism.shared.AssistantConversation
 
 /** 24 Nov 2026, 18:15 in Vienna, in Unix seconds. */
 private const val NOW_S = 1_795_540_500L
+
+/** Chats from today back to October: one begun on the Mac, one refused by the replica. */
+private fun sampleHistory(now: Long): List<HistoryItem> {
+    fun c(id: String, title: String, ago: Long, device: String = "david-pixel") =
+        HistoryItem(AssistantConversation(id, device, title, now - ago - 600, now - ago))
+    return listOf(
+        c("c-1", "What's the weather in Vienna tonight?", 20 * 60),
+        c("c-2", "Text Anna that I'm running ten minutes late", 3 * 3600).copy(waiting = true),
+        c("c-3", "Why is the backup on david-mm failing?", 26 * 3600, device = "david-mb"),
+        c("c-4", "Set an alarm for 6:30 on weekdays", 3 * 86400),
+        c("c-5", "Summarize the Matrix room Team from today", 4 * 86400),
+        c("c-6", "Deploy the new Prism worker to the cluster", 40 * 86400)
+            .copy(waiting = true, problem = "Changed on another device since; this copy stays on the phone."),
+    )
+}
 
 /** The chats, newest first and by day. */
 @ScreenPreviews
@@ -54,7 +70,7 @@ private fun HistoryChatPreview() = Themed {
         Event.Answer("Around **-1°** at 7:00 with drizzle later; a warm coat and an umbrella."),
     ).fold(Transcript()) { acc, e -> acc.after(e) }
     HistoryChat(
-        transcript = t, running = false, loading = false, error = null, configured = true,
+        transcript = t, running = false, loading = false, error = null, configured = true, canSend = true,
         text = "Remind me at 7 to take the umbrella", onText = {}, onSend = {}, onEdit = { _, _ -> null },
         onNew = {}, onDelete = {}, onBack = {}, now = { NOW_S * 1000 },
     )

@@ -319,27 +319,32 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
         decode(send("GET", "/v1/assistant/conversations/${T3Links.encode(id)}"), StoredConversation.serializer())
 
     /**
-     * Stores conversation [id] as it is now; only what changed is written, so
-     * the same call again after a failure is safe. Each entry's and message's
-     * JSON is at most 16 KiB.
+     * Stores conversation [id] as it is now, as the revision after [revision]
+     * (0 for a new one), and returns the committed revision. Only what changed
+     * is written, and a save cut short is never seen, so the same call again
+     * after a failure is safe. Each entry's and message's JSON is at most
+     * 16 KiB. Fails with 409 (`conflict`) when the conversation moved on since
+     * [revision], 410 (`gone`) once it was deleted.
      */
     @Throws(Exception::class)
     suspend fun saveAssistantConversation(
         id: String,
+        revision: Long,
         title: String,
         createdAt: Long,
         updatedAt: Long,
         entries: List<StoredEntry>,
         history: List<String>,
-    ): AssistantConversation {
+    ): Long {
         val body = buildJsonObject {
+            put("revision", revision)
             put("title", title)
             put("createdAt", createdAt)
             put("updatedAt", updatedAt)
             put("entries", JsonArray(entries.map { e -> buildJsonObject { put("id", e.id); put("body", e.body) } }))
             put("history", JsonArray(history.map { JsonPrimitive(it) }))
         }
-        return decode(send("PUT", "/v1/assistant/conversations/${T3Links.encode(id)}", body), ConversationAnswer.serializer()).conversation
+        return decode(send("PUT", "/v1/assistant/conversations/${T3Links.encode(id)}", body), ConversationAnswer.serializer()).conversation.revision
     }
 
     /** Deletes conversation [id] everywhere. */

@@ -448,7 +448,9 @@ private fun Assist(
     // The on-device assistant (assistant/): it answers and acts on the phone,
     // and hands computer work to a T3 agent, which the overlay then follows.
     // Without its key, requests start a T3 agent directly, as before.
-    val session = remember { AssistantSession(context, capture) }
+    // Shared with the history screen when it holds the same conversation.
+    val session = remember { AssistantSession.forOverlay(context, capture) }
+    DisposableEffect(session) { onDispose { session.detach() } }
     // The transcript entry of the hand-off whose agent the overlay follows.
     var handoffEntry by remember { mutableStateOf(session.transcript.latestHandoff()?.first) }
     val keyboard = LocalSoftwareKeyboardController.current

@@ -3,22 +3,32 @@
 //! reach every replica.
 //!
 //! A conversation is a row with its title and times, one row per transcript
-//! entry, and one row per message of the model's history. Bodies are the
-//! app's JSON, opaque here. Rows stay small: Rocky refuses an intent frame
-//! over 128 KiB, and a SQL value's bytes are CBOR integers there (about two
-//! bytes per byte), so a body holds at most [`ASSISTANT_MAX_BODY_BYTES`] and
-//! one transaction at most [`ASSISTANT_BATCH_BYTES`] of bodies.
+//! entry (by position), and one row per message of the model's history (by
+//! sequence number). Bodies are the app's JSON, opaque here. Rows stay
+//! small: Rocky refuses an intent frame over 128 KiB, and a SQL value's bytes
+//! are CBOR integers there (about two bytes per byte), so a body holds at
+//! most [`ASSISTANT_MAX_BODY_BYTES`] and one transaction at most
+//! [`ASSISTANT_BATCH_BYTES`] of bodies.
 //!
-//! The app saves a conversation whole, as often as it likes:
-//! [`PrismClient::save_assistant_conversation`] writes only the rows that
-//! changed, so a save that failed (the replica busy or closed) is simply made
-//! again later.
+//! **Revisions.** A save takes several transactions, and a reader must never
+//! see half of one. Every entry and message row carries the revision that
+//! wrote it, and the conversation's row names the committed revision with
+//! how many entries and which messages it has. A save writes its new rows
+//! under the next revision, then commits it in the conversation's row (one
+//! statement), and only then deletes the rows it replaced. Readers take, per
+//! position, the newest row up to the committed revision, so rows of a save
+//! cut short are invisible, and the next save deletes them first.
+//!
+//! A save names the revision it builds on; when the conversation moved on
+//! since (another save, another device) it is refused, as is any save of a
+//! deleted conversation: a delete leaves a tombstone row behind, which
+//! replicates like any other.
 
 use crate::client::{PrismClient, storage_err};
 use crate::types::PrismError;
 use rocky_sdk::{Row, SqlValue, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The largest body of one entry or message, in bytes.
 pub const ASSISTANT_MAX_BODY_BYTES: usize = 16 * 1024;
@@ -30,9 +40,11 @@ const ASSISTANT_BATCH_STATEMENTS: usize = 200;
 const MAX_ID_BYTES: usize = 100;
 /// The longest title, in characters.
 pub const ASSISTANT_TITLE_CHARS: usize = 120;
-/// Entries and messages one conversation keeps at most.
-const MAX_ENTRIES: usize = 2000;
-const MAX_HISTORY: usize = 500;
+/// Why a save of a deleted conversation is refused (`PrismError::Conflict`).
+pub const ASSISTANT_DELETED: &str = "This conversation was deleted.";
+/// Why a save that doesn't build on the committed revision is refused.
+pub const ASSISTANT_STALE: &str =
+    "This conversation changed since it was loaded (on another device?).";
 
 /// A conversation as the history lists it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -43,6 +55,8 @@ pub struct AssistantConversationRow {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The committed revision, which the next save builds on; 0 before the first.
+    pub revision: i64,
 }
 
 /// A transcript entry: its ID in the transcript and its JSON.
@@ -52,8 +66,8 @@ pub struct AssistantEntry {
     pub body: String,
 }
 
-/// A whole conversation: its row, its entries in order, and the model's
-/// history (each message's JSON) in order.
+/// A whole conversation at its committed revision: its row, its entries in
+/// order, and the model's history (each message's JSON) in order.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AssistantConversation {
     pub conversation: AssistantConversationRow,
@@ -61,34 +75,57 @@ pub struct AssistantConversation {
     pub history: Vec<String>,
 }
 
+/// The committed state of a conversation's row.
+#[derive(Clone, Debug)]
+struct Head {
+    row: AssistantConversationRow,
+    rid: SqlValue,
+    entry_count: i64,
+    history_from: i64,
+    history_to: i64,
+}
+
+enum Found {
+    Nothing,
+    Deleted,
+    Live(Head),
+}
+
+/// A stored entry or message row.
+struct Stored {
+    id: SqlValue,
+    /// The entry's position, or the message's sequence number.
+    order: i64,
+    revision: i64,
+    entry_id: String,
+    body: String,
+}
+
 /// One statement of a save.
 enum Op {
     Delete(&'static str, SqlValue),
     InsertEntry {
+        position: i64,
+        revision: i64,
         entry_id: String,
-        position: i64,
-        body: String,
-    },
-    UpdateEntry {
-        id: SqlValue,
-        position: i64,
         body: String,
     },
     InsertHistory {
         seq: i64,
+        revision: i64,
         body: String,
     },
-    Conversation(AssistantConversationRow, Option<SqlValue>),
+    Commit(Box<Head>, bool),
+    Tombstone(AssistantConversationRow),
+    MarkDeleted,
 }
 
 impl Op {
     fn bytes(&self) -> usize {
         match self {
-            Op::InsertEntry { body, .. }
-            | Op::UpdateEntry { body, .. }
-            | Op::InsertHistory { body, .. } => body.len(),
-            Op::Conversation(row, _) => row.title.len(),
-            Op::Delete(..) => 0,
+            Op::InsertEntry { body, .. } | Op::InsertHistory { body, .. } => body.len(),
+            Op::Commit(head, _) => head.row.title.len(),
+            _ => 0,
         }
     }
 }
@@ -117,8 +154,8 @@ fn clean_title(title: &str) -> String {
 /// `stored[start..start + matched] == new[..matched]`, the longest such run
 /// (the latest of equals). The history loses messages at its start (the app
 /// keeps the newest) and those of a run stopped halfway at its end, and gains
-/// new ones at its end; what lies outside the run is deleted, what follows it
-/// in `new` is inserted. `(stored.len(), 0)` when nothing continues.
+/// new ones at its end; what lies outside the run goes, what follows it in
+/// `new` is written. `(stored.len(), 0)` when nothing continues.
 pub fn align_history(stored: &[&str], new: &[&str]) -> (usize, usize) {
     let mut best = (stored.len(), 0);
     for start in 0..stored.len() {
@@ -134,6 +171,25 @@ pub fn align_history(stored: &[&str], new: &[&str]) -> (usize, usize) {
     best
 }
 
+/// The rows a reader sees at `committed`: per position in `from..to`, the
+/// row with the highest revision up to it (of equals, the first, which is
+/// the smallest Rocky id). Indexes into `rows`, by position.
+fn visible(rows: &[Stored], from: i64, to: i64, committed: i64) -> BTreeMap<i64, usize> {
+    let mut out: BTreeMap<i64, usize> = BTreeMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.order < from || r.order >= to || r.revision > committed {
+            continue;
+        }
+        match out.get(&r.order) {
+            Some(&j) if rows[j].revision >= r.revision => {}
+            _ => {
+                out.insert(r.order, i);
+            }
+        }
+    }
+    out
+}
+
 fn col_str(row: &Row, col: &str) -> String {
     row.get::<String>(col).unwrap_or_default()
 }
@@ -142,26 +198,50 @@ fn col_i64(row: &Row, col: &str) -> i64 {
     row.get::<i64>(col).unwrap_or(0)
 }
 
-fn conversation_row(r: &Row) -> AssistantConversationRow {
-    AssistantConversationRow {
-        conversation_id: col_str(r, "conversation_id"),
-        device: col_str(r, "device"),
-        title: col_str(r, "title"),
-        created_at: col_i64(r, "created_at"),
-        updated_at: col_i64(r, "updated_at"),
+/// The conversation rows of one ID, in Rocky id order: deleted if any says
+/// so, else the one with the highest revision (of equals, the first).
+fn head_of(rows: Vec<(Head, bool)>) -> Found {
+    if rows.iter().any(|(_, deleted)| *deleted) {
+        return Found::Deleted;
     }
+    let mut best: Option<Head> = None;
+    for (head, _) in rows {
+        if best
+            .as_ref()
+            .is_none_or(|b| head.row.revision > b.row.revision)
+        {
+            best = Some(head);
+        }
+    }
+    best.map_or(Found::Nothing, Found::Live)
 }
 
-/// A stored entry or message with its Rocky id.
-struct Stored {
-    id: SqlValue,
-    key: String,
-    order: i64,
-    body: String,
+const HEAD_COLUMNS: &str = "id, conversation_id, device, title, created_at, updated_at, \
+     revision, entry_count, history_from, history_to, deleted";
+
+fn head_row(r: &Row) -> Result<(Head, bool), PrismError> {
+    Ok((
+        Head {
+            row: AssistantConversationRow {
+                conversation_id: col_str(r, "conversation_id"),
+                device: col_str(r, "device"),
+                title: col_str(r, "title"),
+                created_at: col_i64(r, "created_at"),
+                updated_at: col_i64(r, "updated_at"),
+                revision: col_i64(r, "revision"),
+            },
+            rid: r.get::<SqlValue>("id").map_err(storage_err)?,
+            entry_count: col_i64(r, "entry_count"),
+            history_from: col_i64(r, "history_from"),
+            history_to: col_i64(r, "history_to"),
+        },
+        col_i64(r, "deleted") != 0,
+    ))
 }
 
 impl PrismClient {
-    /// The conversations, the most recently updated first, at most `limit`.
+    /// The conversations, the most recently updated first, at most `limit`;
+    /// deleted ones are left out.
     pub async fn list_assistant_conversations(
         &self,
         limit: usize,
@@ -169,80 +249,83 @@ impl PrismClient {
         let mut rows = self
             .db
             .query(
-                "SELECT conversation_id, device, title, created_at, updated_at \
-                 FROM assistant_conversations ORDER BY updated_at DESC, id ASC",
+                &format!("SELECT {HEAD_COLUMNS} FROM assistant_conversations ORDER BY id ASC"),
                 params![],
             )
             .await
             .map_err(storage_err)?;
-        let mut seen = std::collections::BTreeSet::new();
-        let mut out = Vec::new();
+        let mut by_id: BTreeMap<String, Vec<(Head, bool)>> = BTreeMap::new();
         while let Some(r) = rows.next().await.map_err(storage_err)? {
-            let row = conversation_row(&r);
-            // Two devices may each have written a row: the newest counts.
-            if seen.insert(row.conversation_id.clone()) {
-                out.push(row);
-                if out.len() >= limit {
-                    break;
-                }
-            }
+            let (head, deleted) = head_row(&r)?;
+            by_id
+                .entry(head.row.conversation_id.clone())
+                .or_default()
+                .push((head, deleted));
         }
+        let mut out: Vec<AssistantConversationRow> = by_id
+            .into_values()
+            .filter_map(|rows| match head_of(rows) {
+                Found::Live(head) => Some(head.row),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.conversation_id.cmp(&b.conversation_id))
+        });
+        out.truncate(limit);
         Ok(out)
     }
 
-    /// Conversation `id` with its entries and history, or `NotFound`.
+    /// Conversation `id` at its committed revision, or `NotFound` (also once deleted).
     pub async fn assistant_conversation(
         &self,
         id: &str,
     ) -> Result<AssistantConversation, PrismError> {
-        let (conversation, _) = self
-            .assistant_conversation_row(id)
-            .await?
-            .ok_or(PrismError::NotFound)?;
-        let mut entries: Vec<Stored> = self
-            .stored_entries(id)
-            .await?
-            .into_values()
-            .flat_map(|rows| rows.into_iter().next())
-            .collect();
-        entries.sort_by(|a, b| a.order.cmp(&b.order).then(a.key.cmp(&b.key)));
-        let history = self.stored_history(id).await?;
+        let Found::Live(head) = self.assistant_head(id).await? else {
+            return Err(PrismError::NotFound);
+        };
+        let committed = head.row.revision;
+        let entries = self.assistant_rows("assistant_entries", id).await?;
+        let history = self.assistant_rows("assistant_history", id).await?;
         Ok(AssistantConversation {
-            conversation,
-            entries: entries
-                .into_iter()
-                .map(|e| AssistantEntry {
-                    entry_id: e.key,
-                    body: e.body,
+            entries: visible(&entries, 0, head.entry_count, committed)
+                .into_values()
+                .map(|i| AssistantEntry {
+                    entry_id: entries[i].entry_id.clone(),
+                    body: entries[i].body.clone(),
                 })
                 .collect(),
-            history: history.into_iter().map(|m| m.body).collect(),
+            history: visible(&history, head.history_from, head.history_to, committed)
+                .into_values()
+                .map(|i| history[i].body.clone())
+                .collect(),
+            conversation: head.row,
         })
     }
 
-    /// Stores conversation `conversation` as it is now: `entries` in order
-    /// and the model's `history` in order. Only what changed since the last
-    /// save is written, in transactions of at most [`ASSISTANT_BATCH_BYTES`]:
-    /// changed and new entries, the history's new messages (and those it
-    /// dropped deleted), then the conversation's row. A conversation saved
-    /// for the first time keeps `device` and `created_at`; later saves keep
-    /// the first ones. Returns how many statements it wrote.
+    /// Stores conversation `conversation` as it is now, `entries` and the
+    /// model's `history` in order, as the revision after `base` (0 for a new
+    /// conversation). Only what changed is written: new rows under the next
+    /// revision, then the commit, then the replaced rows deleted (see the
+    /// module). A save of a deleted conversation is refused with
+    /// [`ASSISTANT_DELETED`], one whose `base` isn't the committed revision
+    /// with [`ASSISTANT_STALE`]. The first save keeps `device` and
+    /// `created_at`. Returns the committed revision, `base` when nothing
+    /// changed.
     pub async fn save_assistant_conversation(
         &self,
         conversation: AssistantConversationRow,
+        base: i64,
         entries: Vec<AssistantEntry>,
         history: Vec<String>,
-    ) -> Result<usize, PrismError> {
+    ) -> Result<i64, PrismError> {
         let id = conversation.conversation_id.clone();
         if !is_valid_conversation_id(&id) {
             return Err(PrismError::InvalidInput(
                 "A conversation's ID is 1 to 100 letters, digits or -_.:".into(),
             ));
-        }
-        if entries.len() > MAX_ENTRIES || history.len() > MAX_HISTORY {
-            return Err(PrismError::InvalidInput(format!(
-                "A conversation keeps at most {MAX_ENTRIES} entries and {MAX_HISTORY} messages."
-            )));
         }
         let too_big = entries
             .iter()
@@ -254,7 +337,7 @@ impl PrismClient {
                 "An entry or message is at most {ASSISTANT_MAX_BODY_BYTES} bytes."
             )));
         }
-        let mut ids = std::collections::BTreeSet::new();
+        let mut ids = BTreeSet::new();
         if let Some(e) = entries
             .iter()
             .find(|e| e.entry_id.is_empty() || !ids.insert(e.entry_id.as_str()))
@@ -266,117 +349,171 @@ impl PrismClient {
         }
 
         let _guard = self.assistant_lock.lock().await;
-        let mut deletes = Vec::new();
-        let mut writes = Vec::new();
+        let head = match self.assistant_head(&id).await? {
+            Found::Deleted => return Err(PrismError::Conflict(ASSISTANT_DELETED.into())),
+            Found::Nothing => None,
+            Found::Live(head) => Some(head),
+        };
+        let committed = head.as_ref().map_or(0, |h| h.row.revision);
+        if base != committed {
+            return Err(PrismError::Conflict(ASSISTANT_STALE.into()));
+        }
+        let revision = committed + 1;
+        let stored_entries = self.assistant_rows("assistant_entries", &id).await?;
+        let stored_history = self.assistant_rows("assistant_history", &id).await?;
+        let (count, from, to) = head
+            .as_ref()
+            .map_or((0, 0, 0), |h| (h.entry_count, h.history_from, h.history_to));
 
-        // Entries, by their ID: duplicates (two devices wrote one) and
-        // entries no longer there go; changed ones are rewritten.
-        let mut stored = self.stored_entries(&id).await?;
-        for (position, entry) in entries.into_iter().enumerate() {
+        // Rows of saves cut short, which no reader sees: they go first.
+        let mut garbage = Vec::new();
+        for (table, rows) in [
+            ("assistant_entries", &stored_entries),
+            ("assistant_history", &stored_history),
+        ] {
+            garbage.extend(
+                rows.iter()
+                    .filter(|r| r.revision > committed)
+                    .map(|r| Op::Delete(table, r.id.clone())),
+            );
+        }
+
+        // Entries: those changed at their position are written again.
+        let mut writes = Vec::new();
+        let mut kept_entries = BTreeSet::new();
+        let shown = visible(&stored_entries, 0, count, committed);
+        for (position, entry) in entries.iter().enumerate() {
             let position = position as i64;
-            match stored.remove(&entry.entry_id) {
-                Some(mut rows) => {
-                    let first = rows.remove(0);
-                    deletes.extend(
-                        rows.into_iter()
-                            .map(|r| Op::Delete("assistant_entries", r.id)),
-                    );
-                    if first.order != position || first.body != entry.body {
-                        writes.push(Op::UpdateEntry {
-                            id: first.id,
-                            position,
-                            body: entry.body,
-                        });
-                    }
+            match shown.get(&position) {
+                Some(&i)
+                    if stored_entries[i].entry_id == entry.entry_id
+                        && stored_entries[i].body == entry.body =>
+                {
+                    kept_entries.insert(i);
                 }
-                None => writes.push(Op::InsertEntry {
-                    entry_id: entry.entry_id,
+                _ => writes.push(Op::InsertEntry {
                     position,
-                    body: entry.body,
+                    revision,
+                    entry_id: entry.entry_id.clone(),
+                    body: entry.body.clone(),
                 }),
             }
         }
-        deletes.extend(
-            stored
-                .into_values()
-                .flatten()
-                .map(|r| Op::Delete("assistant_entries", r.id)),
-        );
 
-        // The history: what continues the stored messages stays.
-        let stored = self.stored_history(&id).await?;
-        let bodies: Vec<&str> = stored.iter().map(|m| m.body.as_str()).collect();
+        // The history: what continues the committed messages stays where it is.
+        let old: Vec<(i64, usize)> = visible(&stored_history, from, to, committed)
+            .into_iter()
+            .collect();
+        let bodies: Vec<&str> = old
+            .iter()
+            .map(|&(_, i)| stored_history[i].body.as_str())
+            .collect();
         let new: Vec<&str> = history.iter().map(String::as_str).collect();
-        let (start, matched) = align_history(&bodies, &new);
-        let mut next = if matched > 0 {
-            stored[start + matched - 1].order + 1
-        } else {
-            stored.iter().map(|m| m.order + 1).max().unwrap_or(0)
-        };
-        for (i, m) in stored.iter().enumerate() {
-            if i < start || i >= start + matched {
-                deletes.push(Op::Delete("assistant_history", m.id.clone()));
-            }
+        let (start, mut matched) = align_history(&bodies, &new);
+        let contiguous = old[start.min(old.len())..start.min(old.len()) + matched]
+            .windows(2)
+            .all(|w| w[1].0 == w[0].0 + 1);
+        if !contiguous {
+            matched = 0;
         }
-        for body in &history[matched..] {
+        let new_from = if matched > 0 { old[start].0 } else { to };
+        let new_to = new_from + history.len() as i64;
+        let kept_history: BTreeSet<usize> = old
+            [start.min(old.len())..start.min(old.len()) + matched]
+            .iter()
+            .map(|&(_, i)| i)
+            .collect();
+        for (j, body) in history.iter().enumerate().skip(matched) {
             writes.push(Op::InsertHistory {
-                seq: next,
+                seq: new_from + j as i64,
+                revision,
                 body: body.clone(),
             });
-            next += 1;
         }
 
-        // The conversation's row, last: it lists once its rows are there.
-        let existing = self.assistant_conversation_row(&id).await?;
-        let row = AssistantConversationRow {
-            title: clean_title(&conversation.title),
-            ..match &existing {
-                Some((first, _)) => AssistantConversationRow {
-                    updated_at: conversation.updated_at,
-                    ..first.clone()
-                },
-                None => conversation.clone(),
+        let title = clean_title(&conversation.title);
+        let unchanged = head.as_ref().is_some_and(|h| {
+            writes.is_empty()
+                && h.entry_count == entries.len() as i64
+                && (h.history_from, h.history_to) == (new_from, new_to)
+                && h.row.title == title
+        });
+        if unchanged {
+            self.run_assistant_ops(&id, garbage).await?;
+            return Ok(committed);
+        }
+
+        // The commit, then what it replaced.
+        let commit = Head {
+            row: AssistantConversationRow {
+                title,
+                revision,
+                updated_at: conversation.updated_at,
+                ..head
+                    .as_ref()
+                    .map_or(conversation.clone(), |h| h.row.clone())
+            },
+            rid: head.as_ref().map_or(SqlValue::Null, |h| h.rid.clone()),
+            entry_count: entries.len() as i64,
+            history_from: new_from,
+            history_to: new_to,
+        };
+        let mut replaced = Vec::new();
+        for (i, r) in stored_entries.iter().enumerate() {
+            if r.revision <= committed && !kept_entries.contains(&i) {
+                replaced.push(Op::Delete("assistant_entries", r.id.clone()));
             }
-        };
-        let changed = match &existing {
-            Some((old, _)) => *old != row,
-            None => true,
-        };
-        if changed || !deletes.is_empty() || !writes.is_empty() {
-            writes.push(Op::Conversation(row, existing.map(|(_, rid)| rid)));
         }
-
-        // Deletes first, so a save cut short never leaves two messages at
-        // one place; the next save finishes it.
-        let ops: Vec<Op> = deletes.into_iter().chain(writes).collect();
-        let count = ops.len();
+        for (i, r) in stored_history.iter().enumerate() {
+            if r.revision <= committed && !kept_history.contains(&i) {
+                replaced.push(Op::Delete("assistant_history", r.id.clone()));
+            }
+        }
+        let ops = garbage
+            .into_iter()
+            .chain(writes)
+            .chain([Op::Commit(Box::new(commit), head.is_some())])
+            .collect();
         self.run_assistant_ops(&id, ops).await?;
-        Ok(count)
+        // Committed: what it replaced is invisible now, and a cleanup cut
+        // short is finished by the next save, so its failure is no failure
+        // of this save (whose retry would find its base gone).
+        let _ = self.run_assistant_ops(&id, replaced).await;
+        Ok(revision)
     }
 
-    /// Deletes conversation `id` with its entries and history.
-    pub async fn delete_assistant_conversation(&self, id: &str) -> Result<(), PrismError> {
+    /// Deletes conversation `id` everywhere: its row becomes a tombstone (one
+    /// is written if this replica has none, so a save from elsewhere is
+    /// refused too), then its entries and history go.
+    pub async fn delete_assistant_conversation(
+        &self,
+        id: &str,
+        device: &str,
+        now: i64,
+    ) -> Result<(), PrismError> {
+        if !is_valid_conversation_id(id) {
+            return Err(PrismError::InvalidInput(
+                "A conversation's ID is 1 to 100 letters, digits or -_.:".into(),
+            ));
+        }
         let _guard = self.assistant_lock.lock().await;
-        let mut ops = Vec::new();
-        for table in [
-            "assistant_conversations",
-            "assistant_entries",
-            "assistant_history",
-        ] {
-            let mut rows = self
-                .db
-                .query(
-                    &format!("SELECT id FROM {table} WHERE conversation_id = ?"),
-                    params![id],
-                )
-                .await
-                .map_err(storage_err)?;
-            while let Some(r) = rows.next().await.map_err(storage_err)? {
-                ops.push(Op::Delete(
-                    table,
-                    r.get::<SqlValue>("id").map_err(storage_err)?,
-                ));
-            }
+        let mut ops = vec![match self.assistant_head(id).await? {
+            Found::Nothing => Op::Tombstone(AssistantConversationRow {
+                conversation_id: id.into(),
+                device: device.into(),
+                created_at: now,
+                updated_at: now,
+                ..AssistantConversationRow::default()
+            }),
+            _ => Op::MarkDeleted,
+        }];
+        for table in ["assistant_entries", "assistant_history"] {
+            ops.extend(
+                self.assistant_rows(table, id)
+                    .await?
+                    .into_iter()
+                    .map(|r| Op::Delete(table, r.id)),
+            );
         }
         self.run_assistant_ops(id, ops).await
     }
@@ -410,8 +547,9 @@ impl PrismClient {
                         .await
                 }
                 Op::InsertEntry {
-                    entry_id,
                     position,
+                    revision,
+                    entry_id,
                     body,
                 } => {
                     let rid = tx
@@ -419,54 +557,93 @@ impl PrismClient {
                         .await
                         .map_err(storage_err)?;
                     tx.execute(
-                        "INSERT INTO assistant_entries (id, conversation_id, entry_id, position, body) \
-                         VALUES (?, ?, ?, ?, ?)",
-                        params![rid, id, entry_id, position, body],
+                        "INSERT INTO assistant_entries \
+                         (id, conversation_id, position, revision, entry_id, body) \
+                         VALUES (?, ?, ?, ?, ?, ?)",
+                        params![rid, id, position, revision, entry_id, body],
                     )
                     .await
                 }
-                Op::UpdateEntry { id: rid, position, body } => {
-                    tx.execute(
-                        "UPDATE assistant_entries SET position = ?, body = ? WHERE id = ?",
-                        params![position, body, rid],
-                    )
-                    .await
-                }
-                Op::InsertHistory { seq, body } => {
+                Op::InsertHistory {
+                    seq,
+                    revision,
+                    body,
+                } => {
                     let rid = tx
                         .next_id("assistant_history", vec![])
                         .await
                         .map_err(storage_err)?;
                     tx.execute(
-                        "INSERT INTO assistant_history (id, conversation_id, seq, body) VALUES (?, ?, ?, ?)",
-                        params![rid, id, seq, body],
+                        "INSERT INTO assistant_history (id, conversation_id, seq, revision, body) \
+                         VALUES (?, ?, ?, ?, ?)",
+                        params![rid, id, seq, revision, body],
                     )
                     .await
                 }
-                Op::Conversation(row, Some(rid)) => {
+                Op::Commit(head, true) => {
                     tx.execute(
-                        "UPDATE assistant_conversations SET title = ?, updated_at = ? WHERE id = ?",
-                        params![row.title, row.updated_at, rid],
+                        "UPDATE assistant_conversations SET title = ?, updated_at = ?, revision = ?, \
+                         entry_count = ?, history_from = ?, history_to = ? WHERE id = ?",
+                        params![
+                            head.row.title,
+                            head.row.updated_at,
+                            head.row.revision,
+                            head.entry_count,
+                            head.history_from,
+                            head.history_to,
+                            head.rid
+                        ],
                     )
                     .await
                 }
-                Op::Conversation(row, None) => {
+                Op::Commit(head, false) => {
                     let rid = tx
                         .next_id("assistant_conversations", vec![])
                         .await
                         .map_err(storage_err)?;
                     tx.execute(
                         "INSERT INTO assistant_conversations \
-                         (id, conversation_id, device, title, created_at, updated_at) \
-                         VALUES (?, ?, ?, ?, ?, ?)",
+                         (id, conversation_id, device, title, created_at, updated_at, revision, \
+                          entry_count, history_from, history_to) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            rid,
+                            head.row.conversation_id,
+                            head.row.device,
+                            head.row.title,
+                            head.row.created_at,
+                            head.row.updated_at,
+                            head.row.revision,
+                            head.entry_count,
+                            head.history_from,
+                            head.history_to
+                        ],
+                    )
+                    .await
+                }
+                Op::Tombstone(row) => {
+                    let rid = tx
+                        .next_id("assistant_conversations", vec![])
+                        .await
+                        .map_err(storage_err)?;
+                    tx.execute(
+                        "INSERT INTO assistant_conversations \
+                         (id, conversation_id, device, title, created_at, updated_at, deleted) \
+                         VALUES (?, ?, ?, '', ?, ?, 1)",
                         params![
                             rid,
                             row.conversation_id,
                             row.device,
-                            row.title,
                             row.created_at,
                             row.updated_at
                         ],
+                    )
+                    .await
+                }
+                Op::MarkDeleted => {
+                    tx.execute(
+                        "UPDATE assistant_conversations SET deleted = 1 WHERE conversation_id = ?",
+                        params![id],
                     )
                     .await
                 }
@@ -477,61 +654,38 @@ impl PrismClient {
         Ok(())
     }
 
-    /// The newest row of conversation `id`, with its Rocky id.
-    async fn assistant_conversation_row(
-        &self,
-        id: &str,
-    ) -> Result<Option<(AssistantConversationRow, SqlValue)>, PrismError> {
+    async fn assistant_head(&self, id: &str) -> Result<Found, PrismError> {
         let mut rows = self
             .db
             .query(
-                "SELECT id, conversation_id, device, title, created_at, updated_at \
-                 FROM assistant_conversations WHERE conversation_id = ? \
-                 ORDER BY updated_at DESC, id ASC LIMIT 1",
+                &format!(
+                    "SELECT {HEAD_COLUMNS} FROM assistant_conversations \
+                     WHERE conversation_id = ? ORDER BY id ASC"
+                ),
                 params![id],
             )
             .await
             .map_err(storage_err)?;
-        match rows.next().await.map_err(storage_err)? {
-            Some(r) => Ok(Some((
-                conversation_row(&r),
-                r.get::<SqlValue>("id").map_err(storage_err)?,
-            ))),
-            None => Ok(None),
-        }
-    }
-
-    /// Conversation `id`'s entry rows by entry ID, the oldest Rocky row first.
-    async fn stored_entries(&self, id: &str) -> Result<BTreeMap<String, Vec<Stored>>, PrismError> {
-        let mut rows = self
-            .db
-            .query(
-                "SELECT id, entry_id, position, body FROM assistant_entries \
-                 WHERE conversation_id = ? ORDER BY id ASC",
-                params![id],
-            )
-            .await
-            .map_err(storage_err)?;
-        let mut out: BTreeMap<String, Vec<Stored>> = BTreeMap::new();
+        let mut all = Vec::new();
         while let Some(r) = rows.next().await.map_err(storage_err)? {
-            let key = col_str(&r, "entry_id");
-            out.entry(key.clone()).or_default().push(Stored {
-                id: r.get::<SqlValue>("id").map_err(storage_err)?,
-                key,
-                order: col_i64(&r, "position"),
-                body: col_str(&r, "body"),
-            });
+            all.push(head_row(&r)?);
         }
-        Ok(out)
+        Ok(head_of(all))
     }
 
-    /// Conversation `id`'s history rows in order.
-    async fn stored_history(&self, id: &str) -> Result<Vec<Stored>, PrismError> {
+    /// Every row of conversation `id` in `table`, in Rocky id order.
+    async fn assistant_rows(&self, table: &str, id: &str) -> Result<Vec<Stored>, PrismError> {
+        let (order, entry_id) = match table {
+            "assistant_entries" => ("position", "entry_id"),
+            _ => ("seq", "''"),
+        };
         let mut rows = self
             .db
             .query(
-                "SELECT id, seq, body FROM assistant_history \
-                 WHERE conversation_id = ? ORDER BY seq ASC, id ASC",
+                &format!(
+                    "SELECT id, {order} AS ord, revision, {entry_id} AS entry_id, body \
+                     FROM {table} WHERE conversation_id = ? ORDER BY id ASC"
+                ),
                 params![id],
             )
             .await
@@ -540,8 +694,9 @@ impl PrismClient {
         while let Some(r) = rows.next().await.map_err(storage_err)? {
             out.push(Stored {
                 id: r.get::<SqlValue>("id").map_err(storage_err)?,
-                key: String::new(),
-                order: col_i64(&r, "seq"),
+                order: col_i64(&r, "ord"),
+                revision: col_i64(&r, "revision"),
+                entry_id: col_str(&r, "entry_id"),
                 body: col_str(&r, "body"),
             });
         }
@@ -576,6 +731,115 @@ mod tests {
             align_history(&s(&["a", "b", "a", "b"]), &s(&["a", "b", "c"])),
             (2, 2)
         );
+    }
+
+    #[test]
+    fn readers_see_the_newest_row_up_to_the_committed_revision() {
+        let row = |order, revision, body: &str| Stored {
+            id: SqlValue::Null,
+            order,
+            revision,
+            entry_id: String::new(),
+            body: body.into(),
+        };
+        let rows = [
+            row(0, 1, "a"),
+            row(1, 1, "b"),
+            row(1, 2, "b2"),
+            row(2, 3, "uncommitted"),
+            row(5, 1, "outside"),
+        ];
+        let seen: Vec<&str> = visible(&rows, 0, 3, 2)
+            .into_values()
+            .map(|i| rows[i].body.as_str())
+            .collect();
+        assert_eq!(seen, ["a", "b2"]);
+    }
+
+    /// A save cut short after writing some rows of its revision (Rocky busy,
+    /// the app gone): readers keep seeing the committed revision, and the
+    /// next save on it clears those rows instead of mixing them in.
+    #[tokio::test]
+    async fn a_save_cut_short_is_never_seen_and_the_next_save_clears_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = PrismClient::open_or_create(dir.path().join("db").display().to_string(), None)
+            .await
+            .expect("open");
+        let e = |id: &str, body: &str| AssistantEntry {
+            entry_id: id.into(),
+            body: body.into(),
+        };
+        let row = AssistantConversationRow {
+            conversation_id: "c-1".into(),
+            device: "david-pixel".into(),
+            title: "t".into(),
+            created_at: 1,
+            updated_at: 1,
+            revision: 0,
+        };
+        let saved = client
+            .save_assistant_conversation(
+                row.clone(),
+                0,
+                vec![e("e0", "a"), e("e1", "b")],
+                vec!["m1".into(), "m2".into()],
+            )
+            .await
+            .expect("save");
+        assert_eq!(saved, 1);
+
+        // What revision 2 wrote before it was cut short: rows, no commit.
+        client
+            .run_assistant_ops(
+                "c-1",
+                vec![
+                    Op::InsertEntry {
+                        position: 1,
+                        revision: 2,
+                        entry_id: "e1".into(),
+                        body: "b2".into(),
+                    },
+                    Op::InsertEntry {
+                        position: 2,
+                        revision: 2,
+                        entry_id: "e2".into(),
+                        body: "c".into(),
+                    },
+                    Op::InsertHistory {
+                        seq: 2,
+                        revision: 2,
+                        body: "m3".into(),
+                    },
+                ],
+            )
+            .await
+            .expect("half a save");
+        let c = client.assistant_conversation("c-1").await.expect("read");
+        let bodies = |c: &AssistantConversation| {
+            c.entries.iter().map(|e| e.body.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(bodies(&c), ["a", "b"]);
+        assert_eq!(c.history, ["m1", "m2"]);
+        assert_eq!(c.conversation.revision, 1);
+
+        // The next save builds on revision 1 and owns revision 2.
+        let saved = client
+            .save_assistant_conversation(
+                row,
+                1,
+                vec![e("e0", "a"), e("e1", "b"), e("e9", "z")],
+                vec!["m1".into(), "m2".into(), "m9".into()],
+            )
+            .await
+            .expect("save on 1");
+        assert_eq!(saved, 2);
+        let c = client.assistant_conversation("c-1").await.expect("read");
+        assert_eq!(bodies(&c), ["a", "b", "z"]);
+        assert_eq!(c.history, ["m1", "m2", "m9"]);
+        // Nothing of the cut-short save is left behind.
+        let rows = |table| client.assistant_rows(table, "c-1");
+        assert_eq!(rows("assistant_entries").await.expect("rows").len(), 3);
+        assert_eq!(rows("assistant_history").await.expect("rows").len(), 3);
     }
 
     #[test]

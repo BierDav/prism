@@ -463,30 +463,60 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
         )
         .table(
             // The phone assistant's conversations (rocky-prism/src/assistant.rs):
-            // one row per conversation, rewritten as it goes on.
+            // one row per conversation, naming its committed revision, how
+            // many entries it has and which messages (`history_from` up to
+            // `history_to`); `deleted` makes it a tombstone that refuses saves.
             Table::replayed("assistant_conversations")
                 .column(Column::new("conversation_id", Affinity::Text).required())
                 .column(Column::new("device", Affinity::Text).required())
                 .column(Column::new("title", Affinity::Text).required().default(""))
                 .column(Column::new("created_at", Affinity::Integer).required())
-                .column(Column::new("updated_at", Affinity::Integer).required()),
+                .column(Column::new("updated_at", Affinity::Integer).required())
+                .column(
+                    Column::new("revision", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("entry_count", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("history_from", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("history_to", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("deleted", Affinity::Integer)
+                        .required()
+                        .default(false),
+                ),
         )
         .table(
             // What a conversation shows, one row per transcript entry (the
             // owner's words, an answer, a tool's line or card) as the app's
-            // JSON, in `position` order. Never image or file bytes.
+            // JSON, by `position`, written under `revision`. Never image or
+            // file bytes.
             Table::replayed("assistant_entries")
                 .column(Column::new("conversation_id", Affinity::Text).required())
-                .column(Column::new("entry_id", Affinity::Text).required())
                 .column(Column::new("position", Affinity::Integer).required())
+                .column(Column::new("revision", Affinity::Integer).required())
+                .column(Column::new("entry_id", Affinity::Text).required())
                 .column(Column::new("body", Affinity::Text).required()),
         )
         .table(
             // The model's history that continues a conversation, one row per
-            // message as the app's JSON, in `seq` order.
+            // message as the app's JSON, by `seq`, written under `revision`.
             Table::replayed("assistant_history")
                 .column(Column::new("conversation_id", Affinity::Text).required())
                 .column(Column::new("seq", Affinity::Integer).required())
+                .column(Column::new("revision", Affinity::Integer).required())
                 .column(Column::new("body", Affinity::Text).required()),
         )
         .build()

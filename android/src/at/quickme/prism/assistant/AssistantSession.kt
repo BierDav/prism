@@ -4,8 +4,10 @@
 // tool results included) is kept on the phone for the overlay's resume
 // window, so reopening within ten minutes continues it. Every conversation
 // is also stored in Rocky (ConversationStore), where the history screen
-// (AssistHistory.kt) lists it, opens it and continues it with a session of
-// its own; "New chat" starts another and keeps this one.
+// (AssistHistory.kt) lists it, opens it and continues it; "New chat" starts
+// another and keeps this one. One session holds a conversation at a time in
+// this process (live): the overlay and the history screen share it, so two
+// never write over each other, and a turn goes on when its screen is left.
 //
 // Without assistant_api_key it isn't configured, and the overlay starts T3
 // agents directly, as before the assistant.
@@ -38,19 +40,24 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 class AssistantSession(
-    private val context: Context,
-    private val capture: ScreenCapture = ScreenCapture.None,
+    context: Context,
+    capture: ScreenCapture = ScreenCapture.None,
     /** Continue the overlay's conversation of the resume window; false: a new one. */
     resume: Boolean = true,
 ) {
     private val app = context.applicationContext
     private val memory = AssistantMemory(app)
+    /** The screen the phone's tools act from, and how they see the screen ([attach]). */
+    private var context: Context = context
+    private var capture: ScreenCapture = capture
+    private var attached = 0
 
     /** Whether the assistant can run: the gateway has a key. */
     val configured: Boolean get() = Settings.assistantApiKey(app).isNotEmpty()
@@ -66,10 +73,17 @@ class AssistantSession(
     var conversationId: String = (if (resume) memory.conversation() else null) ?: Conversations.newId()
         private set
     private var createdAt: Long = (if (resume) memory.createdAt() else 0L).takeIf { it > 0 } ?: nowSeconds()
+    /** The stored revision it was loaded at, which its first save builds on (ConversationStore keeps the later ones). */
+    private var revision = 0L
 
     private var history: List<Message> = if (resume) memory.history() else emptyList()
     private var notes = ArrayList<String>()
     private var storing: Job? = null
+    private var turn: Job? = null
+
+    init {
+        hold(null)
+    }
 
     /** The T3 agent the overlay follows (its ID and title), for the model's context. */
     var followed: () -> Pair<String, String>? = { null }
@@ -109,28 +123,36 @@ class AssistantSession(
     suspend fun send(text: String, attachments: List<AssistAttachment> = emptyList()) {
         if (running) return
         running = true
+        turn = currentCoroutineContext()[Job]
+        // The conversation this turn belongs to: once it is deleted
+        // ([dropDeleted]), nothing of the turn reaches the next one.
+        val mine = conversationId
         val note = notes.joinToString(" ")
         notes.clear()
         val harness = harness()
         try {
-            history = harness.run(
+            val result = harness.run(
                 history, text, attachments,
-                emit = { e -> withContext(Dispatchers.Main) { apply(e) } },
-                saved = { history = it; save() },
+                emit = { e -> withContext(Dispatchers.Main) { if (conversationId == mine) apply(e) } },
+                saved = { if (conversationId == mine) { history = it; save() } },
                 note = note,
             )
+            if (conversationId == mine) history = result
         } catch (e: CancellationException) {
-            transcript = transcript.settled()
+            if (conversationId == mine) transcript = transcript.settled()
             throw e
         } catch (e: Exception) {
             // Never the exception itself: a gateway's error body can echo what it was sent.
             val problem = problem(e)
             Log.w(TAG, "assistant turn failed (${e.javaClass.simpleName})")
-            transcript = transcript.settled().after(Event.Failed(problem))
+            if (conversationId == mine) transcript = transcript.settled().after(Event.Failed(problem))
         } finally {
             running = false
-            save()
-            store(now = true)
+            turn = null
+            if (conversationId == mine) {
+                save()
+                store(now = true)
+            }
             harness.close()
         }
     }
@@ -185,23 +207,73 @@ class AssistantSession(
     /** A new conversation; this one stays stored. */
     fun clear() {
         store(now = true)
+        val old = conversationId
         transcript = Transcript()
         history = emptyList()
         notes.clear()
         conversationId = Conversations.newId()
         createdAt = nowSeconds()
+        revision = 0
         memory.forget()
+        hold(old)
     }
 
     /** Continues stored conversation [s] (the history screen opened it). */
     fun open(s: ConversationSnapshot) {
         if (running) return
         store(now = true)
+        val old = conversationId
         conversationId = s.id
         createdAt = s.createdAt
+        revision = s.revision
         transcript = Conversations.transcript(s.entries.map { it.id to it.body })
         history = Harness.decodeEach(s.history)
         notes.clear()
+        hold(old)
+    }
+
+    /**
+     * A screen uses this session: the phone's tools act from [c] and see the
+     * screen through [capture] until it [detach]es.
+     */
+    fun attach(c: Context, capture: ScreenCapture = ScreenCapture.None) {
+        context = c
+        this.capture = capture
+        attached++
+    }
+
+    /** The screen is gone; once no screen uses it, the tools act from the app. */
+    fun detach() {
+        attached = (attached - 1).coerceAtLeast(0)
+        if (attached > 0) return
+        context = app
+        capture = ScreenCapture.None
+        onHandoff = { _, _ -> }
+        followed = { null }
+    }
+
+    /** This conversation was deleted: its turn stops and nothing of it is kept; a new one begins. */
+    private fun dropDeleted() {
+        storing?.cancel()
+        turn?.cancel()
+        val old = conversationId
+        transcript = Transcript()
+        history = emptyList()
+        notes.clear()
+        conversationId = Conversations.newId()
+        createdAt = nowSeconds()
+        revision = 0
+        memory.forget(old)
+        hold(old)
+    }
+
+    /** Takes [conversationId] in the registry, leaving [old]. */
+    private fun hold(old: String?) = synchronized(live) {
+        if (old != null && live[old] === this) live.remove(old)
+        live[conversationId] = this
+        // Sessions no screen uses and that don't run make way, the oldest first.
+        val idle = live.entries.filter { (_, s) -> s.attached == 0 && !s.running && s !== this }
+        idle.take((live.size - LIVE_SESSIONS).coerceAtLeast(0)).forEach { live.remove(it.key) }
     }
 
     private fun save() {
@@ -216,13 +288,14 @@ class AssistantSession(
     private fun store(now: Boolean = false) {
         storing?.cancel()
         if (transcript.isEmpty) return
+        val id = conversationId
         if (now) {
             ConversationStore.save(app, snapshot())
             return
         }
         storing = storeScope.launch {
             delay(STORE_AFTER_MS)
-            ConversationStore.save(app, snapshot())
+            if (conversationId == id) ConversationStore.save(app, snapshot())
         }
     }
 
@@ -232,6 +305,7 @@ class AssistantSession(
         title = Conversations.title(transcript).orEmpty(),
         createdAt = createdAt,
         updatedAt = nowSeconds(),
+        revision = revision,
         entries = Conversations.entryRows(transcript).map { (id, body) -> StoredEntry(id, body) },
         history = Conversations.historyRows(Harness.encodeEach(history)),
     )
@@ -246,11 +320,29 @@ class AssistantSession(
         }
     }
 
-    private companion object {
-        const val TAG = "PrismAssistant"
-        const val STORE_AFTER_MS = 1500L
+    companion object {
+        private const val TAG = "PrismAssistant"
+        private const val STORE_AFTER_MS = 1500L
+        /** Sessions kept for their conversation when no screen uses them. */
+        private const val LIVE_SESSIONS = 8
         /** Outlives the overlay, so its last save still goes out. */
-        val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        private val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        /** The session holding each conversation in this process. */
+        private val live = LinkedHashMap<String, AssistantSession>()
+
+        /** The session holding conversation [id] now, if one does. */
+        fun live(id: String): AssistantSession? = synchronized(live) { live[id] }
+
+        /** The overlay's session: the one holding its conversation already (the history screen's), or one resuming it. */
+        fun forOverlay(c: Context, capture: ScreenCapture): AssistantSession {
+            val s = AssistantMemory(c).conversation()?.let(::live) ?: AssistantSession(c, capture)
+            return s.also { it.attach(c, capture) }
+        }
+
+        /** Conversation [id] was deleted: a session holding it lets it go. */
+        internal fun deleted(id: String) {
+            live(id)?.dropDeleted()
+        }
     }
 }
 

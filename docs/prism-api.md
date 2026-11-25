@@ -728,27 +728,34 @@ The phone's assistant keeps every conversation in the replica, so it outlives
 the app and reaches the other devices (the history screen,
 `android/src/.../assistant/AssistHistory.kt`). These routes are only on the
 device (`Replica.call`); the workers serve none of them. Times are Unix
-seconds. A conversation is `{"id", "device", "title", "createdAt", "updatedAt"}`;
-`device` is the one it was started on.
+seconds. A conversation is `{"id", "device", "title", "createdAt",
+"updatedAt", "revision"}`; `device` is the one it was started on, `revision`
+the committed one.
 
 - `GET /v1/assistant/conversations?limit=N` returns
   `{"conversations": [...]}`, every device's, the most recently updated first
-  (`limit` 1 to 500, default 500).
+  (`limit` 1 to 500, default 500); deleted ones are left out.
 - `GET /v1/assistant/conversations/{id}` returns `{"conversation", "entries":
-  [{"id", "body"}], "history": ["…"]}`, or `404`. `entries` are the
-  transcript's entries in order and `history` the model's messages in order,
-  each the app's own JSON as a string.
+  [{"id", "body"}], "history": ["…"]}` at the committed revision, or `404`
+  (also once deleted). `entries` are the transcript's entries in order and
+  `history` the model's messages in order, each the app's own JSON as a
+  string.
 - `PUT /v1/assistant/conversations/{id}` stores the conversation as it is
-  now: `{"title", "createdAt", "updatedAt", "entries", "history"}` in those
-  shapes. It writes only the rows that changed (an entry by its ID; the
-  history where it continues the stored one, dropping what it no longer
-  has), so the same `PUT` again after a failure is safe, and returns
-  `{"conversation"}`. The calling device started it if it is new. An ID is 1
-  to 100 letters, digits or `-_.:`; each entry's and message's JSON is at
-  most 16 KiB (`400` otherwise): the app cuts long texts and never stores
-  image or file bytes, only their names.
+  now: `{"revision", "title", "createdAt", "updatedAt", "entries",
+  "history"}`, where `revision` is the committed one it builds on (0 for a
+  new conversation). It returns `{"conversation": {"id", "revision"}}` with
+  the new committed revision (the same when nothing changed). It writes only
+  the rows that changed, under the new revision, and commits it last, so a
+  save cut short is never read and the same `PUT` again is safe. `409`
+  (`conflict`) when the conversation moved on since `revision` (another
+  device saved it), `410` (`gone`) once it was deleted. The calling device
+  started it if it is new. An ID is 1 to 100 letters, digits or `-_.:`; each
+  entry's and message's JSON is at most 16 KiB (`400` otherwise): the app
+  cuts long texts and never stores image or file bytes, only their names.
+  A conversation may have any number of entries.
 - `DELETE /v1/assistant/conversations/{id}` deletes it with its rows and
-  returns `{"ok": true}`.
+  leaves a tombstone, which refuses every later save of that ID; it returns
+  `{"ok": true}`, also for an ID the replica never had.
 
 ## Health
 
