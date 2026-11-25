@@ -100,6 +100,12 @@ window       floor(unix seconds / 30)
 differs from the hotspot's (`51 52 28 f6`), so the phone's hotspot scan
 doesn't wake for it.
 
+macOS gives all apps' advertisers one advertisement with room for a single
+128-bit UUID (others go to Apple's hashed overflow area, which Android can't
+match). So the call's advertisement steps aside while the hotspot's request
+or release advertises: while the Mac has no network (it asks for the
+hotspot, and the TCP link then has it) or for a release's 30 s.
+
 During the call, while it has no Bluetooth link, the phone scans with a
 filter on the prefix, takes an advertisement whose tag checks out for one of
 the windows `w-2 .. w+1` around its clock, and opens an L2CAP channel to that

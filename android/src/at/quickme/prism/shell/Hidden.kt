@@ -246,13 +246,17 @@ internal object Hidden {
      * system context or a package context of it takes the application
      * context, the system's ("android"), and services that check the
      * caller's package refuse it for uid 2000 ("Package android does not
-     * belong to 2000"): TelephonyRegistry, Telecom, the tethering module.
+     * belong to 2000"): TelephonyRegistry, Telecom, the tethering module,
+     * Bluetooth.
      */
     fun shellContext(base: Context): Context = object : ContextWrapper(base) {
         override fun getOpPackageName(): String = SHELL_PACKAGE
         override fun getPackageName(): String = SHELL_PACKAGE
         override fun getAttributionTag(): String? = null
         override fun getApplicationContext(): Context = this
+        // Bluetooth's managers take the caller from here.
+        override fun getAttributionSource(): AttributionSource =
+            AttributionSource.Builder(Process.myUid()).setPackageName(SHELL_PACKAGE).build()
     }
 
     const val SHELL_PACKAGE = "com.android.shell"

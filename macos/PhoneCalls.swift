@@ -1,17 +1,23 @@
-// The phone's calls on this Mac (docs/calls.md): Prism listens on TCP port
-// 47470 for the phone's call bridge (the Android app's shell/CallBridge.kt),
-// which connects while a call rings or goes on. It checks the phone's proof
-// (HMAC with K = HMAC-SHA256(hotspot key, "prism-call/v1")), proves itself,
-// then follows the call's state, and sends the owner's answer, decline,
-// hang-up and moves. While the call's audio is on the Mac, CallAudio plays
-// the caller through the speakers and sends the microphone, with macOS's
-// voice processing (echo cancellation), as 16 kHz 16-bit mono PCM in 20 ms
-// frames.
+// The phone's calls on this Mac (docs/calls.md, "The connection (v2)"): the
+// phone's call bridge (the Android app's shell/CallBridge.kt) links to Prism
+// while a call rings or goes on, over Bluetooth LE when it can and TCP port
+// 47470 otherwise. For Bluetooth, Prism publishes an L2CAP channel and
+// advertises it (a service UUID with the PSM and a tag from the call key and
+// the 30 s window), and the bridge opens it; for TCP Prism listens. Both
+// links run the same connection: Prism says hello, checks the phone's proof
+// (HMAC with K = HMAC-SHA256(hotspot key, "prism-call/v2")), proves itself,
+// and from there every frame is AES-256-GCM, a key for each direction. It
+// follows the call's state and sends the owner's answer, decline, hang-up
+// and moves. The newest authenticated link wins. While the call's audio is
+// on the Mac, CallAudio plays the caller through the speakers and sends the
+// microphone, with macOS's voice processing (echo cancellation), as 16 kHz
+// 16-bit mono in 20 ms frames: IMA ADPCM over Bluetooth, PCM over TCP.
 //
 // CallPanel.swift shows it all.
 
 import AppKit
 import AVFoundation
+import CoreBluetooth
 import CryptoKit
 import Foundation
 import Network
@@ -19,7 +25,9 @@ import Network
 @MainActor
 final class PhoneCalls: ObservableObject {
     nonisolated static let port: UInt16 = 47470
-    nonisolated static let label = "prism-call/v1"
+    nonisolated static let label = "prism-call/v2"
+    /// The label of the bridge's Bluetooth service UUIDs (keyed with K).
+    nonisolated static let bluetoothLabel = "prism-call-ble/v1"
 
     enum State: String { case ringing, active, ended }
 
@@ -52,7 +60,14 @@ final class PhoneCalls: ObservableObject {
     private let keyFile: String?
     private let queue = DispatchQueue(label: "prism.calls")
     private var listener: NWListener?
+    private var bluetooth: CallBluetooth?
+    /// Whether the hotspot's request or release advertises (Hotspot.swift):
+    /// the call's advertisement steps aside meanwhile (CallBluetooth).
+    var hotspotAdvertising: () -> Bool = { false }
     private var link: CallConnection?
+    /// The link the microphone's frames go to, read on the audio thread: the
+    /// call's audio moves with the link.
+    private nonisolated let audioLink = AudioLink()
     /// Connections still in their handshake (nothing else holds them).
     private var candidates: [CallConnection] = []
     private var audio: CallAudio?
@@ -73,6 +88,13 @@ final class PhoneCalls: ObservableObject {
             log("calls: \(problem!)")
             return
         }
+        let bluetooth = CallBluetooth(
+            key: { [weak self] in self?.key().map { Self.callKey($0) } },
+            yields: { [weak self] in self?.hotspotAdvertising() ?? false }
+        )
+        bluetooth.onChannel = { [weak self] transport in self?.accept(transport) }
+        bluetooth.start()
+        self.bluetooth = bluetooth
         do {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
@@ -82,7 +104,7 @@ final class PhoneCalls: ObservableObject {
             tcp.keepaliveCount = 3
             let listener = try NWListener(using: NWParameters(tls: nil, tcp: tcp), on: NWEndpoint.Port(rawValue: Self.port)!)
             listener.newConnectionHandler = { [weak self] connection in
-                Task { @MainActor in self?.accept(connection) }
+                Task { @MainActor in self?.accept(TCPTransport(connection)) }
             }
             listener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in self?.listenerChanged(state) }
@@ -110,6 +132,11 @@ final class PhoneCalls: ObservableObject {
 
     // MARK: - Commands
 
+    /// The hotspot started or stopped advertising.
+    func hotspotChanged() {
+        bluetooth?.refresh()
+    }
+
     func answer() { send(["type": "answer"]) }
     func decline() { send(["type": "decline"]) }
     func hangUp() { send(["type": "hangup"]) }
@@ -127,12 +154,12 @@ final class PhoneCalls: ObservableObject {
 
     // MARK: - The connection
 
-    private func accept(_ connection: NWConnection) {
+    private func accept(_ transport: CallTransport) {
         guard let key = key().map({ Self.callKey($0) }) else {
-            connection.cancel()
+            transport.cancel("no key")
             return
         }
-        let candidate = CallConnection(connection: connection, key: key, queue: queue)
+        let candidate = CallConnection(transport: transport, key: key, queue: queue)
         candidate.onReady = { [weak self, weak candidate] in
             guard let self, let candidate else { return }
             Task { @MainActor in self.ready(candidate) }
@@ -145,7 +172,6 @@ final class PhoneCalls: ObservableObject {
             }
         }
         candidate.onAudio = { [weak self, weak candidate] frame in
-            // On the connection's queue: straight to the player.
             guard let self, let candidate else { return }
             Task { @MainActor in
                 if self.link === candidate { self.audio?.play(frame) }
@@ -162,18 +188,22 @@ final class PhoneCalls: ObservableObject {
         candidate.start()
     }
 
-    /// A phone that proved itself: it replaces any earlier connection.
+    /// A phone that proved itself: it replaces any earlier connection, and
+    /// the call's audio moves to it.
     private func ready(_ candidate: CallConnection) {
         candidates.removeAll { $0 === candidate }
-        if let old = link, old !== candidate { old.cancel() }
+        let old = link
         link = candidate
+        audioLink.link = candidate
+        if let old, old !== candidate { old.cancel("replaced by a newer link") }
         connected = true
         clearTask?.cancel()
-        log("calls: the phone connected (\(candidate.peer))")
+        log("calls: the phone connected over \(candidate.transport.bluetooth ? "Bluetooth" : "TCP") (\(candidate.peer))\(old != nil && old !== candidate ? ", replacing the earlier link" : "")")
     }
 
     private func closed(_ reason: String) {
         link = nil
+        audioLink.link = nil
         connected = false
         log("calls: the phone's connection closed (\(reason))")
         stopAudio()
@@ -243,9 +273,10 @@ final class PhoneCalls: ObservableObject {
     // MARK: - The audio
 
     private func startAudio() {
-        guard audio == nil, let link else { return }
-        let audio = CallAudio { [weak link] frame in
-            link?.send(type: CallConnection.audioFrame, payload: frame)
+        guard audio == nil, link != nil else { return }
+        let audioLink = self.audioLink
+        let audio = CallAudio { frame in
+            audioLink.link?.sendAudio(frame)
         }
         audio.muted = muted
         self.audio = audio
@@ -283,7 +314,7 @@ final class PhoneCalls: ObservableObject {
         return SymmetricKey(data: bytes)
     }
 
-    /// K = HMAC-SHA256(hotspot key, "prism-call/v1").
+    /// K = HMAC-SHA256(hotspot key, "prism-call/v2").
     nonisolated static func callKey(_ hotspotKey: SymmetricKey) -> SymmetricKey {
         SymmetricKey(data: Data(HMAC<SHA256>.authenticationCode(for: Data(label.utf8), using: hotspotKey)))
     }
@@ -298,18 +329,98 @@ final class PhoneCalls: ObservableObject {
         Data(HMAC<SHA256>.authenticationCode(for: Data("mac".utf8) + phoneNonce + macNonce, using: k))
     }
 
-    /// docs/calls.md's vector: hotspot key 00..1f, nm 16 x a1, np 16 x b2.
+    /// A direction's AES-256-GCM key: HMAC(K, "phone->mac" || nm || np) or
+    /// HMAC(K, "mac->phone" || nm || np).
+    nonisolated static func directionKey(_ k: SymmetricKey, toMac: Bool, macNonce: Data, phoneNonce: Data) -> SymmetricKey {
+        let label = toMac ? "phone->mac" : "mac->phone"
+        return SymmetricKey(data: Data(HMAC<SHA256>.authenticationCode(for: Data(label.utf8) + macNonce + phoneNonce, using: k)))
+    }
+
+    /// The nonce of a direction's frame `counter`: 4 zero bytes, then u64be.
+    nonisolated static func frameNonce(_ counter: UInt64) -> AES.GCM.Nonce {
+        var bytes = Data(count: 4)
+        withUnsafeBytes(of: counter.bigEndian) { bytes.append(contentsOf: $0) }
+        return try! AES.GCM.Nonce(data: bytes)
+    }
+
+    /// An encrypted frame's payload: ciphertext || 16-byte tag, the type byte
+    /// as additional data.
+    nonisolated static func seal(_ plaintext: Data, type: UInt8, counter: UInt64, key: SymmetricKey) -> Data {
+        let box = try! AES.GCM.seal(plaintext, using: key, nonce: frameNonce(counter), authenticating: Data([type]))
+        var payload = Data(capacity: plaintext.count + 16)
+        payload.append(box.ciphertext)
+        payload.append(box.tag)
+        return payload
+    }
+
+    /// The plaintext of an encrypted frame's payload, nil if it doesn't decrypt.
+    nonisolated static func open(_ payload: Data, type: UInt8, counter: UInt64, key: SymmetricKey) -> Data? {
+        guard payload.count >= 16 else { return nil }
+        let payload = Data(payload)
+        guard let box = try? AES.GCM.SealedBox(nonce: frameNonce(counter), ciphertext: payload.dropLast(16), tag: payload.suffix(16)) else { return nil }
+        return try? AES.GCM.open(box, using: key, authenticating: Data([type]))
+    }
+
+    /// The call's Bluetooth prefix (the hotspot's is 51 52 28 f6).
+    nonisolated static let bluetoothPrefix: [UInt8] = [0x51, 0x52, 0x28, 0xf7]
+
+    /// The Mac's Bluetooth service UUID for `window` and the channel's `psm`:
+    /// 51 52 28 f7, the PSM (u16be), then
+    /// HMAC-SHA256(K, "prism-call-ble/v1" || u64be(window) || u16be(PSM))[0..10].
+    nonisolated static func bluetoothUUID(callKey: SymmetricKey, window: UInt64, psm: UInt16) -> CBUUID {
+        let psmBytes = Data([UInt8(psm >> 8), UInt8(psm & 0xff)])
+        var message = Data(bluetoothLabel.utf8)
+        withUnsafeBytes(of: window.bigEndian) { message.append(contentsOf: $0) }
+        message.append(psmBytes)
+        let tag = HMAC<SHA256>.authenticationCode(for: message, using: callKey)
+        return CBUUID(data: Data(bluetoothPrefix) + psmBytes + Data(tag).prefix(10))
+    }
+
+    /// docs/calls.md's vectors: hotspot key 00..1f, nm 16 x a1, np 16 x b2;
+    /// the ADPCM frames of a 440 Hz sine.
     nonisolated static func selfTest() -> Bool {
         let k = callKey(SymmetricKey(data: Data(0..<32)))
         let nm = Data(repeating: 0xa1, count: 16), np = Data(repeating: 0xb2, count: 16)
+        let toMac = directionKey(k, toMac: true, macNonce: nm, phoneNonce: np)
+        let toPhone = directionKey(k, toMac: false, macNonce: nm, phoneNonce: np)
+        let answer = Data(#"{"type":"answer"}"#.utf8)
+        let macFrame = seal(answer, type: CallConnection.message, counter: 0, key: toPhone)
+        let phoneFrame = seal(answer, type: CallConnection.message, counter: 1, key: toMac)
+        let hex: (Data) -> String = { $0.map { String(format: "%02x", $0) }.joined() }
+        let sha: (Data) -> Data = { Data(SHA256.hash(data: $0)) }
+
+        // 640 samples of round(8000 sin(2π 440 i / 16000)), two frames from predictor 0, index 0.
+        var pcm = Data(capacity: 1280)
+        for i in 0..<640 {
+            let sample = Int16((8000 * sin(2 * Double.pi * 440 * Double(i) / 16000)).rounded())
+            withUnsafeBytes(of: sample.littleEndian) { pcm.append(contentsOf: $0) }
+        }
+        var state = IMAADPCM.State()
+        let frame0 = IMAADPCM.encode(pcm.prefix(640), state: &state)
+        let frame1 = IMAADPCM.encode(pcm.suffix(640), state: &state)
+        let decoded1 = IMAADPCM.decode(frame1) ?? Data()
+
         let results = [
-            (k.withUnsafeBytes { Data($0) }, "770eb5e989c18d4fbd66609b94934b6e218999c822a3477313a8e726c356b864", "call key"),
-            (phoneProof(k, macNonce: nm, phoneNonce: np), "16ceaf00645894bb0710f4daccb787f733b3b4c7b58433e4d46ec61bd67362d7", "call phone proof"),
-            (macProof(k, phoneNonce: np, macNonce: nm), "967350dc16f4d14828d8320272b3a6e9446f932f9265667dbfa2750445d08321", "call Mac proof"),
+            (hex(k.withUnsafeBytes { Data($0) }), "851c91dae3b20db650e63a523064dbf9e605f57b3c7f0e1125b239ed9c0e47f7", "call key"),
+            (hex(phoneProof(k, macNonce: nm, phoneNonce: np)), "6d2840f6c2b6cb1bb98a9d9eea1e3580a827eadceea38372c3463c54a60ea3ef", "call phone proof"),
+            (hex(macProof(k, phoneNonce: np, macNonce: nm)), "0b26ccd7c0ed51269b5108d93ec61edf7ff01d2a29849ea842944800e3b263a7", "call Mac proof"),
+            (hex(toMac.withUnsafeBytes { Data($0) }), "3c7eca885cb1f3c6ab0dcadbd210d4b07f7bb61e4469ca63319807b53023a43c", "call phone → Mac key"),
+            (hex(toPhone.withUnsafeBytes { Data($0) }), "e217c291c386519a354b1495f052bfa3ee077d449a732034e729b15ed389e0a1", "call Mac → phone key"),
+            (hex(macFrame), "1460883d130b6181c25fdaf6e9590c9ab3944501a65af93501ef0fa7e62e2e8b85", "call Mac → phone frame 0"),
+            (hex(phoneFrame), "82c2303e6af04e6dbef747805e1be4ecdecd0470cdb1f26aac9213a56f64603c11", "call phone → Mac frame 1"),
+            (open(phoneFrame, type: CallConnection.message, counter: 1, key: toMac).map { String(decoding: $0, as: UTF8.self) } ?? "nil",
+             #"{"type":"answer"}"#, "call phone → Mac frame 1 decrypted"),
+            (open(phoneFrame, type: CallConnection.message, counter: 0, key: toMac) == nil ? "rejected" : "accepted",
+             "rejected", "call frame with the wrong number"),
+            (bluetoothUUID(callKey: k, window: 59_999_999, psm: 0x0080).uuidString.lowercased(), "515228f7-0080-8c3b-e48f-5aa7d078035d", "call Bluetooth UUID"),
+            (hex(frame0.prefix(12)), "0000000070777777378898aa", "ADPCM frame 0 head"),
+            (hex(sha(frame0)), "e17b4bcf8c19563fdf44bfc80c0d852b8051669c7df1d8fa9b57eb7510953e96", "ADPCM frame 0"),
+            (hex(frame1.prefix(12)), "5be132002163433443333212", "ADPCM frame 1 head"),
+            (hex(sha(frame1)), "48e4a988cd7299c7a31c0549af4343cad970723df63ee885bb4a3a3fa3b84010", "ADPCM frame 1"),
+            (hex(sha(decoded1)), "a1a915d51880d90d3115543ac3943552faf742a4a52d73a4f528513dbbb9cee6", "ADPCM frame 1 decoded"),
         ].map { value, expected, name in
-            let hex = value.map { String(format: "%02x", $0) }.joined()
-            let passed = hex == expected
-            print(passed ? "self-test passed: \(name) for the test vector" : "self-test FAILED: \(name) \(hex), expected \(expected)")
+            let passed = value == expected
+            print(passed ? "self-test passed: \(name) for the test vector" : "self-test FAILED: \(name) \(value), expected \(expected)")
             return passed
         }
         return results.allSatisfy { $0 }
@@ -320,139 +431,775 @@ final class PhoneCalls: ObservableObject {
     }
 }
 
+/// The link the call's audio goes to, set on the main actor and read on the
+/// audio thread.
+final class AudioLink: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var _link: CallConnection?
+
+    var link: CallConnection? {
+        get { lock.withLock { _link } }
+        set { lock.withLock { _link = newValue } }
+    }
+}
+
 // MARK: - The connection
 
-/// One TCP connection from the phone: the handshake, then frames (type,
-/// u16be length, payload). Its callbacks run on the connection's queue.
+/// A byte stream to the phone: TCP or a Bluetooth LE L2CAP channel.
+protocol CallTransport: AnyObject, Sendable {
+    /// Who it is, for the log.
+    var peer: String { get }
+    /// A Bluetooth link: audio goes as ADPCM.
+    var bluetooth: Bool { get }
+    /// Bytes written but not yet sent.
+    var backlog: Int { get }
+    /// Starts it; `ready`, `received` and `closed` run on `queue`, and
+    /// `closed` once, whatever ends it (`cancel` included).
+    func start(queue: DispatchQueue, ready: @escaping () -> Void, received: @escaping (Data) -> Void, closed: @escaping (String) -> Void)
+    func write(_ data: Data)
+    func cancel(_ reason: String)
+}
+
+/// One link from the phone, over any transport: the handshake, then
+/// encrypted frames (type, u16be length, payload). Its callbacks run on its
+/// queue, and so does everything it does.
 final class CallConnection: @unchecked Sendable {
     static let hello: UInt8 = 1
     static let auth: UInt8 = 2
     static let message: UInt8 = 3
-    static let audioFrame: UInt8 = 4
+    static let audioPCM: UInt8 = 4
+    static let audioADPCM: UInt8 = 5
     static let maxPayload = 16 * 1024
+    static let pcmBytes = 640
+    /// How far audio may fall behind before frames are dropped (200 ms).
+    static let maxAudioBehind = 10
 
     var onReady: (() -> Void)?
     var onMessage: ((Data) -> Void)?
+    /// 20 ms of PCM, whichever way it came.
     var onAudio: ((Data) -> Void)?
     var onClose: ((String) -> Void)?
 
-    let peer: String
-    private let connection: NWConnection
+    let transport: CallTransport
+    var peer: String { transport.peer }
     private let key: SymmetricKey
     private let queue: DispatchQueue
     private let macNonce: Data
     private var authenticated = false
     private var closed = false
+    private var buffer = Data()
+    private var sendKey: SymmetricKey?
+    private var receiveKey: SymmetricKey?
+    private var sent: UInt64 = 0
+    private var received: UInt64 = 0
+    private var encoder = IMAADPCM.State()
 
-    init(connection: NWConnection, key: SymmetricKey, queue: DispatchQueue) {
-        self.connection = connection
+    init(transport: CallTransport, key: SymmetricKey, queue: DispatchQueue) {
+        self.transport = transport
         self.key = key
         self.queue = queue
         var nonce = Data(count: 16)
         _ = nonce.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
         macNonce = nonce
-        peer = "\(connection.endpoint)"
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.send(type: Self.hello, payload: self.macNonce)
-                self.receive()
-            case .failed(let error):
-                self.close("failed: \(error.localizedDescription)")
-            case .cancelled:
-                self.close("cancelled")
-            default:
-                break
-            }
-        }
-        connection.start(queue: queue)
+        transport.start(
+            queue: queue,
+            ready: { [weak self] in
+                guard let self else { return }
+                self.write(type: Self.hello, payload: self.macNonce)
+            },
+            received: { [weak self] data in self?.receive(data) },
+            closed: { [weak self] reason in self?.close(reason) })
         // A peer that doesn't prove itself in 5 s is dropped.
         queue.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, !self.authenticated, !self.closed else { return }
-            self.cancel()
+            self.close("no proof in 5 s")
         }
     }
 
+    /// Sends an encrypted frame (after the handshake; dropped before).
     func send(type: UInt8, payload: Data) {
-        var frame = Data([type, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)])
-        frame.append(payload)
-        connection.send(content: frame, completion: .contentProcessed { [weak self] error in
-            if let error { self?.close("send: \(error.localizedDescription)") }
-        })
+        queue.async { [self] in
+            guard authenticated, !closed else { return }
+            sendSealed(type: type, payload: payload)
+        }
     }
 
-    func cancel() {
-        connection.cancel()
+    /// Sends 20 ms of the microphone's PCM: ADPCM over Bluetooth, PCM over
+    /// TCP. Dropped while the link is more than 200 ms behind.
+    func sendAudio(_ pcm: Data) {
+        queue.async { [self] in
+            guard authenticated, !closed else { return }
+            let type: UInt8, payload: Data
+            if transport.bluetooth {
+                // Encoded even when dropped, so the encoder follows the signal.
+                type = Self.audioADPCM
+                payload = IMAADPCM.encode(pcm, state: &encoder)
+            } else {
+                type = Self.audioPCM
+                payload = pcm
+            }
+            guard transport.backlog <= Self.maxAudioBehind * (payload.count + 19) else { return }
+            sendSealed(type: type, payload: payload)
+        }
+    }
+
+    func cancel(_ reason: String) {
+        queue.async { [self] in close(reason) }
     }
 
     private func close(_ reason: String) {
         guard !closed else { return }
         closed = true
-        connection.cancel()
+        transport.cancel(reason)
         onClose?(reason)
     }
 
-    private func receive() {
-        connection.receive(minimumIncompleteLength: 3, maximumLength: 3) { [weak self] header, _, done, error in
-            guard let self else { return }
-            guard let header, header.count == 3, error == nil else {
-                self.close(error.map { "receive: \($0.localizedDescription)" } ?? (done ? "the phone closed it" : "short read"))
-                return
-            }
-            let bytes = [UInt8](header)
-            let type = bytes[0]
-            let length = Int(bytes[1]) << 8 | Int(bytes[2])
+    private func sendSealed(type: UInt8, payload: Data) {
+        guard let sendKey else { return }
+        let sealed = PhoneCalls.seal(payload, type: type, counter: sent, key: sendKey)
+        sent += 1
+        write(type: type, payload: sealed)
+    }
+
+    private func write(type: UInt8, payload: Data) {
+        guard payload.count <= Self.maxPayload else { return }
+        var frame = Data([type, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)])
+        frame.append(payload)
+        transport.write(frame)
+    }
+
+    /// Bytes from the transport, cut into frames.
+    private func receive(_ data: Data) {
+        guard !closed else { return }
+        buffer.append(data)
+        while buffer.count >= 3, !closed {
+            let start = buffer.startIndex
+            let type = buffer[start]
+            let length = Int(buffer[start + 1]) << 8 | Int(buffer[start + 2])
             guard length <= Self.maxPayload else {
-                self.close("frame too long: \(length)")
+                close("frame too long: \(length)")
                 return
             }
-            if length == 0 {
-                self.frame(type: type, payload: Data())
-                return
-            }
-            self.connection.receive(minimumIncompleteLength: length, maximumLength: length) { payload, _, _, error in
-                guard let payload, payload.count == length, error == nil else {
-                    self.close(error.map { "receive: \($0.localizedDescription)" } ?? "short read")
-                    return
-                }
-                self.frame(type: type, payload: payload)
-            }
+            guard buffer.count >= 3 + length else { break }
+            let payload = Data(buffer[(start + 3)..<(start + 3 + length)])
+            buffer = Data(buffer[(start + 3 + length)...])
+            frame(type: type, payload: payload)
         }
     }
 
     private func frame(type: UInt8, payload: Data) {
-        if !authenticated {
+        guard authenticated else {
             guard type == Self.auth, payload.count == 48 else {
                 close("no proof from the phone")
                 return
             }
-            let phoneNonce = payload.prefix(16)
-            let proof = payload.suffix(32)
-            let expected = PhoneCalls.phoneProof(key, macNonce: macNonce, phoneNonce: Data(phoneNonce))
-            guard constantTimeEqual(Data(proof), expected) else {
+            let phoneNonce = Data(payload.prefix(16))
+            let proof = Data(payload.suffix(32))
+            let expected = PhoneCalls.phoneProof(key, macNonce: macNonce, phoneNonce: phoneNonce)
+            guard constantTimeEqual(proof, expected) else {
                 close("a wrong proof")
                 return
             }
             authenticated = true
-            send(type: Self.auth, payload: PhoneCalls.macProof(key, phoneNonce: Data(phoneNonce), macNonce: macNonce))
+            write(type: Self.auth, payload: PhoneCalls.macProof(key, phoneNonce: phoneNonce, macNonce: macNonce))
+            sendKey = PhoneCalls.directionKey(key, toMac: false, macNonce: macNonce, phoneNonce: phoneNonce)
+            receiveKey = PhoneCalls.directionKey(key, toMac: true, macNonce: macNonce, phoneNonce: phoneNonce)
             onReady?()
-        } else {
-            switch type {
-            case Self.message: onMessage?(payload)
-            case Self.audioFrame: onAudio?(payload)
-            default: break
-            }
+            return
         }
-        receive()
+        guard type != Self.hello, type != Self.auth else {
+            close("a handshake frame after the handshake")
+            return
+        }
+        // Every frame after the handshake is encrypted and counts, a type
+        // this side doesn't know too.
+        guard let receiveKey, let plain = PhoneCalls.open(payload, type: type, counter: received, key: receiveKey) else {
+            close("a frame that doesn't decrypt")
+            return
+        }
+        received += 1
+        switch type {
+        case Self.message:
+            onMessage?(plain)
+        case Self.audioPCM:
+            onAudio?(plain)
+        case Self.audioADPCM:
+            if let pcm = IMAADPCM.decode(plain) { onAudio?(pcm) }
+        default:
+            break
+        }
     }
 
     private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
         return zip(a, b).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
+    }
+}
+
+/// A TCP connection from the phone.
+final class TCPTransport: CallTransport, @unchecked Sendable {
+    let peer: String
+    let bluetooth = false
+    private let connection: NWConnection
+    private let lock = NSLock()
+    private var _backlog = 0
+    private var finished = false
+    private var closed: ((String) -> Void)?
+
+    init(_ connection: NWConnection) {
+        self.connection = connection
+        peer = "\(connection.endpoint)"
+    }
+
+    var backlog: Int { lock.withLock { _backlog } }
+
+    func start(queue: DispatchQueue, ready: @escaping () -> Void, received: @escaping (Data) -> Void, closed: @escaping (String) -> Void) {
+        self.closed = closed
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                ready()
+                self.receive(received)
+            case .failed(let error):
+                self.finish("failed: \(error.localizedDescription)")
+            case .cancelled:
+                self.finish("cancelled")
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func receive(_ received: @escaping (Data) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, done, error in
+            guard let self else { return }
+            if let data, !data.isEmpty { received(data) }
+            if let error {
+                self.finish("receive: \(error.localizedDescription)")
+            } else if done {
+                self.finish("the phone closed it")
+            } else {
+                self.receive(received)
+            }
+        }
+    }
+
+    func write(_ data: Data) {
+        let count = data.count
+        lock.withLock { _backlog += count }
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            self.lock.withLock { self._backlog -= count }
+            if let error { self.finish("send: \(error.localizedDescription)") }
+        })
+    }
+
+    func cancel(_ reason: String) {
+        finish(reason)
+    }
+
+    private func finish(_ reason: String) {
+        let first: Bool = lock.withLock {
+            defer { finished = true }
+            return !finished
+        }
+        guard first else { return }
+        connection.cancel()
+        closed?(reason)
+        closed = nil
+    }
+}
+
+/// An L2CAP channel to the phone. Its streams run on a thread of their own
+/// (a run loop); what they read goes to the connection's queue.
+final class L2CAPTransport: NSObject, CallTransport, StreamDelegate, @unchecked Sendable {
+    let peer: String
+    let bluetooth = true
+    /// Called on the main queue once it's closed, with why.
+    var onFinished: ((String) -> Void)? {
+        get { lock.withLock { _onFinished } }
+        set { lock.withLock { _onFinished = newValue } }
+    }
+
+    private let input: InputStream
+    private let output: OutputStream
+    /// What keeps the channel open while it's held (the CBL2CAPChannel).
+    private let owner: AnyObject?
+    private let lock = NSLock()
+    private var _onFinished: ((String) -> Void)?
+    private var outgoing = Data()
+    private var finished = false
+    private var runLoop: CFRunLoop?
+    private var queue: DispatchQueue?
+    private var received: ((Data) -> Void)?
+    private var closed: ((String) -> Void)?
+    /// On the stream thread only.
+    private var stopped = false
+
+    init(input: InputStream, output: OutputStream, owner: AnyObject?, peer: String) {
+        self.input = input
+        self.output = output
+        self.owner = owner
+        self.peer = peer
+    }
+
+    /// The channel's streams; nil if it has none.
+    convenience init?(channel: CBL2CAPChannel, peer: String) {
+        guard let input = channel.inputStream, let output = channel.outputStream else { return nil }
+        self.init(input: input, output: output, owner: channel, peer: peer)
+    }
+
+    var backlog: Int { lock.withLock { outgoing.count } }
+
+    func start(queue: DispatchQueue, ready: @escaping () -> Void, received: @escaping (Data) -> Void, closed: @escaping (String) -> Void) {
+        lock.withLock {
+            self.queue = queue
+            self.received = received
+            self.closed = closed
+        }
+        let thread = Thread { [self] in run(ready: ready) }
+        thread.name = "prism.calls.l2cap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+    }
+
+    private func run(ready: @escaping () -> Void) {
+        let loop = RunLoop.current
+        // Cancelled before the thread got here: nothing to run.
+        let cancelled: Bool = lock.withLock {
+            runLoop = CFRunLoopGetCurrent()
+            return finished
+        }
+        guard !cancelled else { return }
+        // Keeps the run loop running whatever the streams do.
+        loop.add(NSMachPort(), forMode: .default)
+        for stream in [input, output] as [Stream] {
+            stream.delegate = self
+            stream.schedule(in: loop, forMode: .default)
+            stream.open()
+        }
+        queue?.async(execute: ready)
+        while !stopped {
+            _ = loop.run(mode: .default, before: .distantFuture)
+        }
+        for stream in [input, output] as [Stream] {
+            stream.delegate = nil
+            stream.remove(from: loop, forMode: .default)
+            stream.close()
+        }
+    }
+
+    func write(_ data: Data) {
+        let loop: CFRunLoop? = lock.withLock {
+            guard !finished else { return nil }
+            outgoing.append(data)
+            return runLoop
+        }
+        guard let loop else { return }
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.defaultMode.rawValue) { [self] in flush() }
+        CFRunLoopWakeUp(loop)
+    }
+
+    /// On the stream thread: as much of `outgoing` as the stream takes.
+    private func flush() {
+        while output.hasSpaceAvailable {
+            let chunk: Data = lock.withLock { outgoing.prefix(4096) }
+            guard !chunk.isEmpty else { return }
+            let written = chunk.withUnsafeBytes { output.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: chunk.count) }
+            guard written > 0 else {
+                if written < 0 { finish("write: \(output.streamError?.localizedDescription ?? "failed")") }
+                return
+            }
+            lock.withLock { outgoing = Data(outgoing.dropFirst(written)) }
+        }
+    }
+
+    func stream(_ stream: Stream, handle event: Stream.Event) {
+        switch event {
+        case .hasBytesAvailable:
+            guard let input = stream as? InputStream else { return }
+            var data = Data()
+            var bytes = [UInt8](repeating: 0, count: 4096)
+            while input.hasBytesAvailable {
+                let count = input.read(&bytes, maxLength: bytes.count)
+                if count > 0 {
+                    data.append(contentsOf: bytes[0..<count])
+                } else {
+                    if count < 0 { finish("read: \(input.streamError?.localizedDescription ?? "failed")") }
+                    break
+                }
+            }
+            if !data.isEmpty, let queue, let received {
+                queue.async { received(data) }
+            }
+        case .hasSpaceAvailable:
+            flush()
+        case .endEncountered:
+            finish("the phone closed the channel")
+        case .errorOccurred:
+            finish("stream error: \(stream.streamError?.localizedDescription ?? "unknown")")
+        default:
+            break
+        }
+    }
+
+    func cancel(_ reason: String) {
+        finish(reason)
+    }
+
+    private func finish(_ reason: String) {
+        let (first, loop, closed, onFinished): (Bool, CFRunLoop?, ((String) -> Void)?, ((String) -> Void)?) = lock.withLock {
+            guard !finished else { return (false, nil, nil, nil) }
+            finished = true
+            outgoing = Data()
+            defer {
+                self.closed = nil
+                self._onFinished = nil
+            }
+            return (true, runLoop, self.closed, self._onFinished)
+        }
+        guard first else { return }
+        if let loop {
+            CFRunLoopPerformBlock(loop, CFRunLoopMode.defaultMode.rawValue) { [self] in
+                stopped = true
+                CFRunLoopStop(loop)
+            }
+            CFRunLoopWakeUp(loop)
+        }
+        if let closed { (queue ?? .main).async { closed(reason) } }
+        if let onFinished { DispatchQueue.main.async { onFinished(reason) } }
+    }
+}
+
+// MARK: - Bluetooth
+
+/// The Mac's side of the Bluetooth link (docs/calls.md, "Bluetooth"): while
+/// calls are set up (there's a key) and Bluetooth is on, it publishes an LE
+/// L2CAP channel without Bluetooth encryption and advertises it as one
+/// service UUID, the call's prefix, the PSM and a tag over the 30 s window,
+/// new at every window. The phone scans for it during a call and opens the
+/// channel; each channel that opens is handed over as a transport, and the
+/// Mac says hello first as over TCP.
+///
+/// It has its own peripheral manager, apart from the hotspot's
+/// (Hotspot.swift), but macOS gives all apps' advertisers one advertisement
+/// with room for one 128-bit UUID (the rest go to Apple's hashed overflow
+/// area, which Android can't match), held by the advertiser that registered
+/// first. So it stops advertising while the hotspot's request or release
+/// advertises (`yields`): that's while the Mac has no network, or for the
+/// 30 s of a release, when the call's TCP link has the hotspot anyway.
+@MainActor
+final class CallBluetooth: NSObject {
+    /// A channel to hand to a connection.
+    var onChannel: ((L2CAPTransport) -> Void)?
+
+    private let key: () -> SymmetricKey?
+    private let yields: () -> Bool
+    private var manager: CBPeripheralManager?
+    /// The published channel's PSM.
+    private var psm: CBL2CAPPSM?
+    /// A channel was asked for and not yet published.
+    private var publishing = false
+    /// A PSM published before Bluetooth went off, unpublished once it's back.
+    private var stalePSM: CBL2CAPPSM?
+    private var advertisedUUID: CBUUID?
+    /// Whether the log says it advertises (logged when that changes).
+    private var advertisingLogged = false
+    private var lastAdvertisingError: String?
+    private var windowTimer: Timer?
+    private var stateLogged: CBManagerState?
+    /// The channels the phone opened and their transports, until they close.
+    private var channels: [ObjectIdentifier: L2CAPTransport] = [:]
+
+    /// `key`: the call key K, nil while there's none (calls aren't set up).
+    /// `yields`: whether the hotspot advertises, and this mustn't.
+    init(key: @escaping () -> SymmetricKey?, yields: @escaping () -> Bool) {
+        self.key = key
+        self.yields = yields
+        super.init()
+    }
+
+    /// Something `update` depends on changed (the hotspot's advertising).
+    func refresh() {
+        update()
+    }
+
+    func start() {
+        guard manager == nil else { return }
+        manager = CBPeripheralManager(delegate: self, queue: .main)
+    }
+
+    /// Brings the channel and the advertisement in line with the key and
+    /// Bluetooth's state, and comes back at the next window.
+    private func update() {
+        windowTimer?.invalidate()
+        windowTimer = nil
+        guard let manager, manager.state == .poweredOn else { return }
+        if let stale = stalePSM {
+            stalePSM = nil
+            manager.unpublishL2CAPChannel(stale)
+        }
+        let now = Date().timeIntervalSince1970
+        let window = UInt64(now / Hotspot.window)
+        let next = Double(window + 1) * Hotspot.window - now
+        windowTimer = Timer.scheduledTimer(withTimeInterval: next + 0.05, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.update() }
+        }
+        guard let key = key() else {
+            // No key: calls aren't set up. Checked again at the next window,
+            // since a key may come on activation.
+            stopAdvertising(reason: "no call key")
+            if let psm {
+                self.psm = nil
+                manager.unpublishL2CAPChannel(psm)
+                log("calls: unpublished the Bluetooth L2CAP channel (PSM \(psm)): no call key")
+            }
+            return
+        }
+        guard let psm else {
+            if !publishing {
+                publishing = true
+                manager.publishL2CAPChannel(withEncryption: false)
+            }
+            return
+        }
+        if yields() {
+            stopAdvertising(reason: "the hotspot's advertisement has the slot")
+            return
+        }
+        let uuid = PhoneCalls.bluetoothUUID(callKey: key, window: window, psm: psm)
+        guard uuid != advertisedUUID else { return }
+        manager.stopAdvertising()
+        manager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [uuid]])
+        advertisedUUID = uuid
+    }
+
+    private func stopAdvertising(reason: String) {
+        guard advertisedUUID != nil else { return }
+        manager?.stopAdvertising()
+        advertisedUUID = nil
+        if advertisingLogged {
+            advertisingLogged = false
+            log("calls: stopped advertising over Bluetooth (\(reason))")
+        }
+    }
+
+    private func published(_ psm: CBL2CAPPSM, error: Error?) {
+        publishing = false
+        guard manager?.state == .poweredOn else { return }
+        if let error {
+            // Tried again at the next window.
+            log("calls: publishing the Bluetooth L2CAP channel failed: \(error.localizedDescription)")
+            return
+        }
+        self.psm = psm
+        log("calls: published the Bluetooth L2CAP channel, PSM \(psm)")
+        update()
+    }
+
+    private func startedAdvertising(error: Error?) {
+        if let error {
+            let text = error.localizedDescription
+            // Tried again at the next window (a new UUID).
+            advertisedUUID = nil
+            advertisingLogged = false
+            if text != lastAdvertisingError {
+                lastAdvertisingError = text
+                log("calls: advertising over Bluetooth failed: \(text)")
+            }
+            return
+        }
+        lastAdvertisingError = nil
+        guard !advertisingLogged else { return }
+        advertisingLogged = true
+        log("calls: advertising over Bluetooth (PSM \(psm.map { "\($0)" } ?? "?"), a new service UUID every \(Int(Hotspot.window)) s)")
+    }
+
+    private func opened(_ channel: CBL2CAPChannel?, error: Error?) {
+        guard let channel, error == nil else {
+            log("calls: a Bluetooth L2CAP channel didn't open: \(error?.localizedDescription ?? "no channel")")
+            return
+        }
+        let peer = "Bluetooth \(channel.peer.identifier.uuidString.prefix(8)), PSM \(channel.psm)"
+        guard let transport = L2CAPTransport(channel: channel, peer: peer) else {
+            log("calls: the Bluetooth L2CAP channel from \(peer) has no streams")
+            return
+        }
+        log("calls: the phone opened the Bluetooth L2CAP channel (\(peer))")
+        let id = ObjectIdentifier(transport)
+        channels[id] = transport
+        transport.onFinished = { [weak self] reason in
+            MainActor.assumeIsolated {
+                guard let self, self.channels.removeValue(forKey: id) != nil else { return }
+                self.log("calls: Bluetooth link to the phone closed (\(reason))")
+            }
+        }
+        onChannel?(transport)
+    }
+
+    private func closeChannels(_ reason: String) {
+        let open = channels
+        channels = [:]
+        for transport in open.values {
+            transport.onFinished = nil
+            transport.cancel(reason)
+            log("calls: Bluetooth link to the phone closed (\(reason))")
+        }
+    }
+
+    private func stateChanged(_ state: CBManagerState) {
+        if state == .poweredOn {
+            stateLogged = nil
+            update()
+            return
+        }
+        // The channel and the advertisement are gone with the radio; both
+        // come again once it's back.
+        windowTimer?.invalidate()
+        windowTimer = nil
+        if let psm { stalePSM = psm }
+        psm = nil
+        publishing = false
+        advertisedUUID = nil
+        if advertisingLogged {
+            advertisingLogged = false
+            log("calls: stopped advertising over Bluetooth (Bluetooth is \(Self.describe(state)))")
+        }
+        closeChannels("Bluetooth is \(Self.describe(state))")
+        if state != .unknown, state != .resetting, stateLogged != state {
+            stateLogged = state
+            log("calls: Bluetooth is \(Self.describe(state)); calls link over the network only")
+        }
+    }
+
+    private static func describe(_ state: CBManagerState) -> String {
+        switch state {
+        case .poweredOff: "off"
+        case .unauthorized: "not allowed for Prism (System Settings → Privacy & Security → Bluetooth)"
+        case .unsupported: "not supported on this Mac"
+        case .resetting: "resetting"
+        default: "not ready"
+        }
+    }
+
+    private func log(_ text: String) {
+        Hotspot.log(text)
+    }
+}
+
+extension CallBluetooth: CBPeripheralManagerDelegate {
+    nonisolated func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        let state = peripheral.state
+        MainActor.assumeIsolated { stateChanged(state) }
+    }
+
+    nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, didPublishL2CAPChannel PSM: CBL2CAPPSM, error: Error?) {
+        MainActor.assumeIsolated { published(PSM, error: error) }
+    }
+
+    nonisolated func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        MainActor.assumeIsolated { startedAdvertising(error: error) }
+    }
+
+    nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        MainActor.assumeIsolated { opened(channel, error: error) }
+    }
+}
+
+// MARK: - ADPCM
+
+/// IMA ADPCM as docs/calls.md has it: a frame is the encoder's state before
+/// its first sample (predictor i16le, step index u8, a zero byte), then the
+/// 4-bit codes, the even sample in the low nibble.
+enum IMAADPCM {
+    struct State {
+        var predictor: Int = 0
+        var index: Int = 0
+    }
+
+    static let steps: [Int] = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+        253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+        1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+        3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+        12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    ]
+    static let indexTable = [-1, -1, -1, -1, 2, 4, 6, 8]
+
+    /// Encodes PCM (i16le samples) from `state`, which it advances.
+    static func encode(_ pcm: Data, state: inout State) -> Data {
+        let samples = pcm.count / 2
+        var out = Data(capacity: 4 + (samples + 1) / 2)
+        let head = UInt16(bitPattern: Int16(state.predictor))
+        out.append(contentsOf: [UInt8(head & 0xff), UInt8(head >> 8), UInt8(state.index), 0])
+        var predictor = state.predictor, index = state.index
+        var low: UInt8 = 0
+        pcm.withUnsafeBytes { raw in
+            for i in 0..<samples {
+                let sample = Int(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: 2 * i, as: Int16.self)))
+                let step = steps[index]
+                var diff = sample - predictor
+                var code = 0
+                if diff < 0 {
+                    code = 8
+                    diff = -diff
+                }
+                var delta = step >> 3
+                if diff >= step {
+                    code |= 4
+                    diff -= step
+                    delta += step
+                }
+                if diff >= step >> 1 {
+                    code |= 2
+                    diff -= step >> 1
+                    delta += step >> 1
+                }
+                if diff >= step >> 2 {
+                    code |= 1
+                    delta += step >> 2
+                }
+                predictor = min(32767, max(-32768, code & 8 != 0 ? predictor - delta : predictor + delta))
+                index = min(88, max(0, index + indexTable[code & 7]))
+                if i % 2 == 0 {
+                    low = UInt8(code)
+                } else {
+                    out.append(low | UInt8(code) << 4)
+                }
+            }
+        }
+        if samples % 2 == 1 { out.append(low) }
+        state = State(predictor: predictor, index: index)
+        return out
+    }
+
+    /// Decodes a frame to PCM (i16le), nil if it isn't one.
+    static func decode(_ frame: Data) -> Data? {
+        let bytes = [UInt8](frame)
+        guard bytes.count >= 4, bytes[2] <= 88 else { return nil }
+        var predictor = Int(Int16(bitPattern: UInt16(bytes[0]) | UInt16(bytes[1]) << 8))
+        var index = Int(bytes[2])
+        var out = Data(capacity: (bytes.count - 4) * 4)
+        for byte in bytes[4...] {
+            for code in [Int(byte & 0x0f), Int(byte >> 4)] {
+                let step = steps[index]
+                var delta = step >> 3
+                if code & 4 != 0 { delta += step }
+                if code & 2 != 0 { delta += step >> 1 }
+                if code & 1 != 0 { delta += step >> 2 }
+                predictor = min(32767, max(-32768, code & 8 != 0 ? predictor - delta : predictor + delta))
+                index = min(88, max(0, index + indexTable[code & 7]))
+                let sample = UInt16(bitPattern: Int16(predictor))
+                out.append(contentsOf: [UInt8(sample & 0xff), UInt8(sample >> 8)])
+            }
+        }
+        return out
     }
 }
 

@@ -11,14 +11,17 @@
 // data, and exits (dataDuringCalls()); Calls.kt runs it when it starts
 // following calls, and the bridge again at each call.
 //
-// It connects to the Mac (core/CallLink.kt): at HOST (its NetBird name), and
-// at once directly at every device on the phone's own networks (its
+// It links to the Mac (core/CallLink.kt, docs/calls.md v2) over Bluetooth LE
+// first: the Mac advertises an L2CAP channel, and the bridge scans for it and
+// connects, so neither needs a network, and a call on a SIM without data (or
+// a data switch to one out of quota) doesn't matter. At the same time, while
+// there is no Bluetooth link, it connects over TCP: at HOST (its NetBird
+// name), and directly at every device on the phone's own networks (its
 // hotspot from the tethering module's clients, its hotspot and Wi-Fi from the
-// kernel's ARP table), since a cellular call on one
-// SIM stops mobile data on the other and with it NetBird's path, while a Mac
-// on the phone's hotspot is one hop away. The handshake tells the Mac from
-// anything else listening there; the first that passes wins and the others
-// close before theirs. It tells the Mac the call's state,
+// kernel's ARP table). The handshake tells the Mac from anything else
+// listening there; the first that passes wins and the others close before
+// theirs. A Bluetooth link replaces a TCP one; every frame after the
+// handshake is encrypted, and audio goes as ADPCM over Bluetooth. It tells the Mac the call's state,
 // number and contact name, answers, declines and ends the call when the Mac
 // says so, and while the call is on the Mac carries its audio both ways with
 // Android's call audio interception (AudioManager's
@@ -40,6 +43,14 @@
 
 package at.quickme.prism.shell
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -49,6 +60,7 @@ import android.net.TetheringManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelUuid
 import android.os.PowerManager
 import android.os.Process
 import android.provider.ContactsContract
@@ -63,11 +75,14 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.lang.reflect.Proxy
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -87,6 +102,9 @@ object CallBridge {
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val RETRY_MS = 2_000L
 
+    /** A call on the Mac waits this long for another link before its audio goes back to the phone. */
+    private const val LINK_GRACE_MS = 5_000L
+
     /** The longest call it serves (the wake lock's limit). */
     private const val MAX_CALL_MS = 6 * 3600_000L
 
@@ -95,6 +113,7 @@ object CallBridge {
     private lateinit var telephony: TelephonyManager
     private lateinit var telecom: TelecomManager
     private lateinit var audio: AudioManager
+    private lateinit var shell: Context
     private lateinit var key: ByteArray
     private lateinit var host: String
     private var port = CallLink.PORT
@@ -139,7 +158,7 @@ object CallBridge {
         context = Hidden.packageContext(Hidden.systemContext(), "com.android.shell", Process.SHELL_UID)
         // As com.android.shell: on the system's context, telephony calls as
         // "android", which TelephonyRegistry refuses for uid 2000.
-        val shell = Hidden.shellContext(context)
+        shell = Hidden.shellContext(context)
         telephony = Hidden.manager(TelephonyManager::class.java, shell)
         telecom = Hidden.manager(TelecomManager::class.java, shell)
         audio = Hidden.manager(AudioManager::class.java, shell)
@@ -167,6 +186,7 @@ object CallBridge {
         for ((tm, listener) in listeners) tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
         audio.addOnModeChangedListener(modes) { mode -> main.post { modeChanged(mode) } }
         followHotspot()
+        Thread(::bluetoothLoop, "call-bluetooth").start()
         Thread(::connectLoop, "call-link").start()
         Log.i(TAG, "bridging the call to $host:$port")
         Looper.loop()
@@ -337,6 +357,7 @@ object CallBridge {
         ended = true
         Log.i(TAG, "the call ended")
         stopAudio()
+        stopScan()
         sendState()
         sender.execute { link.getAndSet(null)?.close() }
         main.postDelayed({
@@ -439,7 +460,7 @@ object CallBridge {
                         if (running) main.post { if (pipe === this@Pipe) lost("the call's audio stopped ($n)") }
                         return@Thread
                     }
-                    if (n > 0) link.get()?.send(CallLink.AUDIO, buf, 0, n)
+                    if (n > 0) link.get()?.sendAudio(buf, n)
                 }
             }, "call-downlink")
             threads += Thread({
@@ -491,14 +512,34 @@ object CallBridge {
 
     // --- The connection ---
 
-    private class Link(val socket: Socket) {
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
-        private val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+    /**
+     * A connection to the Mac, over TCP or Bluetooth: frames, encrypted once
+     * the handshake set the keys (CallLink.Crypt).
+     */
+    private class Link(input: InputStream, output: OutputStream, private val closer: Closeable, val bluetooth: Boolean, val peer: String) {
+        val input = DataInputStream(BufferedInputStream(input))
+        private val out = DataOutputStream(BufferedOutputStream(output))
+        @Volatile var authenticated = false
+        private var sealer: CallLink.Crypt? = null
+        private var opener: CallLink.Crypt? = null
+        private val encoder = CallLink.Adpcm.Encoder()
+
+        /** After the handshake: every frame from here on is encrypted. */
+        fun keys(toMac: ByteArray, toPhone: ByteArray) {
+            synchronized(out) { sealer = CallLink.Crypt(toMac) }
+            opener = CallLink.Crypt(toPhone)
+            authenticated = true
+        }
 
         fun send(type: Int, payload: ByteArray, offset: Int = 0, length: Int = payload.size) {
             try {
                 synchronized(out) {
-                    CallLink.write(out, type, payload, offset, length)
+                    val s = sealer
+                    if (s == null) {
+                        CallLink.write(out, type, payload, offset, length)
+                    } else {
+                        CallLink.write(out, type, s.seal(type, payload, offset, length))
+                    }
                     out.flush()
                 }
             } catch (e: IOException) {
@@ -506,31 +547,170 @@ object CallBridge {
             }
         }
 
+        /** 20 ms of the downlink: ADPCM over Bluetooth, PCM over TCP. */
+        fun sendAudio(pcm: ByteArray, length: Int) {
+            if (bluetooth && length == CallLink.FRAME_BYTES) {
+                // The encoder's state follows the frames sent: one writer, the downlink thread.
+                send(CallLink.ADPCM, encoder.encode(pcm))
+            } else {
+                send(CallLink.AUDIO, pcm, 0, length)
+            }
+        }
+
+        /** The next frame, decrypted. Throws IOException at the end or on a bad frame. */
+        fun read(): CallLink.Frame {
+            val f = CallLink.read(input)
+            val o = opener ?: return f
+            return CallLink.Frame(f.type, o.open(f.type, f.payload))
+        }
+
         fun close() {
             try {
-                socket.close()
+                closer.close()
             } catch (e: IOException) {
                 // closed
             }
         }
+
+        companion object {
+            fun tcp(socket: Socket) = Link(socket.getInputStream(), socket.getOutputStream(), socket, false, socket.inetAddress.hostAddress ?: "?")
+        }
     }
 
+    /** The link `l` is gone: unless another comes up soon, the call's audio goes back to the phone. */
+    private fun linkLost(why: String) {
+        Log.i(TAG, why)
+        main.postDelayed({ if (link.get() == null) lost("no link to the Mac") }, LINK_GRACE_MS)
+    }
+
+    /** TCP, while there is no Bluetooth link. */
     private fun connectLoop() {
         while (!ended) {
+            if (link.get()?.bluetooth == true) {
+                Thread.sleep(RETRY_MS)
+                continue
+            }
             var l: Link? = null
             try {
                 l = connect()
-                link.set(l)
-                Log.i(TAG, "connected to the Mac (${l.socket.inetAddress.hostAddress})")
+                // A Bluetooth link came up meanwhile: it stays.
+                if (!link.compareAndSet(null, l)) {
+                    l.close()
+                    l = null
+                    continue
+                }
+                Log.i(TAG, "connected to the Mac (${l.peer})")
                 main.post { sendState() }
                 read(l)
             } catch (e: IOException) {
                 if (!ended) Log.i(TAG, "the Mac: ${e.message}")
             } finally {
                 l?.close()
-                if (l != null && link.compareAndSet(l, null)) main.post { lost("the connection to the Mac broke") }
+                if (l != null && link.compareAndSet(l, null)) main.post { linkLost("the connection to the Mac broke") }
             }
             if (!ended) Thread.sleep(RETRY_MS)
+        }
+    }
+
+    // --- Bluetooth ---
+
+    @Volatile private var scanner: BluetoothLeScanner? = null
+    private var scanning: ScanCallback? = null
+
+    /** Macs found by the scan: a device and its channel's PSM. */
+    private val found = LinkedBlockingQueue<Pair<BluetoothDevice, Int>>()
+
+    /**
+     * Scans for the Mac's advertisement (docs/calls.md) while there's no
+     * Bluetooth link and connects to its L2CAP channel; a Mac that passes the
+     * handshake becomes the link, replacing a TCP one.
+     */
+    private fun bluetoothLoop() {
+        val adapter: BluetoothAdapter? = try {
+            Hidden.manager(BluetoothManager::class.java, shell).adapter
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Bluetooth: $e")
+            null
+        }
+        if (adapter == null || !adapter.isEnabled) {
+            Log.i(TAG, "Bluetooth is off: no Bluetooth link")
+            return
+        }
+        scanner = adapter.bluetoothLeScanner ?: run {
+            Log.w(TAG, "Bluetooth: no LE scanner")
+            return
+        }
+        while (!ended) {
+            main.post { startScan() }
+            val (device, psm) = found.poll(1, TimeUnit.SECONDS) ?: continue
+            main.post { stopScan() }
+            Log.i(TAG, "Bluetooth: found the Mac (PSM $psm)")
+            val socket = try {
+                device.createInsecureL2capChannel(psm)
+            } catch (e: IOException) {
+                Log.i(TAG, "Bluetooth: $e")
+                Thread.sleep(RETRY_MS)
+                continue
+            }
+            val l = Link(socket.inputStream, socket.outputStream, socket, true, "Bluetooth")
+            // BluetoothSocket has no timeouts: close it if connecting or the handshake stalls.
+            main.postDelayed({ if (!l.authenticated) l.close() }, 3L * CONNECT_TIMEOUT_MS)
+            try {
+                socket.connect()
+                handshake(l)
+                link.getAndSet(l)?.close()
+                Log.i(TAG, "connected to the Mac over Bluetooth")
+                main.post { sendState() }
+                read(l)
+            } catch (e: IOException) {
+                if (!ended) Log.i(TAG, "Bluetooth link: ${e.message}")
+            } finally {
+                l.close()
+                if (link.compareAndSet(l, null)) main.post { linkLost("the Bluetooth link to the Mac broke") }
+            }
+            found.clear()
+            if (!ended) Thread.sleep(RETRY_MS)
+        }
+    }
+
+    /** Scans for the Mac's prefix (in the controller), unless it already does. On the main thread. */
+    private fun startScan() {
+        val sc = scanner ?: return
+        if (scanning != null || ended) return
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val window = HotspotToken.window(System.currentTimeMillis())
+                for (uuid in result.scanRecord?.serviceUuids.orEmpty()) {
+                    val psm = CallLink.blePsm(key, uuid.uuid, window) ?: continue
+                    found.offer(result.device to psm)
+                    return
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                Log.w(TAG, "Bluetooth: scan failed ($errorCode)")
+                if (scanning === this) scanning = null
+            }
+        }
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(CallLink.BLE_FILTER_UUID), ParcelUuid(CallLink.BLE_FILTER_MASK))
+            .build()
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        try {
+            sc.startScan(listOf(filter), settings, callback)
+            scanning = callback
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Bluetooth: scan: $e")
+        }
+    }
+
+    private fun stopScan() {
+        val callback = scanning ?: return
+        scanning = null
+        try {
+            scanner?.stopScan(callback)
+        } catch (e: RuntimeException) {
+            // Bluetooth went off
         }
     }
 
@@ -639,7 +819,7 @@ object CallBridge {
                 socket.close()
                 return@repeat
             }
-            val l = Link(socket)
+            val l = Link.tcp(socket)
             try {
                 socket.soTimeout = CONNECT_TIMEOUT_MS
                 handshake(l)
@@ -672,13 +852,16 @@ object CallBridge {
         if (proof.type != CallLink.AUTH || !CallLink.equal(proof.payload, CallLink.macMac(k, np, hello.payload))) {
             throw IOException("the Mac's proof is wrong")
         }
+        val (toMac, toPhone) = CallLink.sessionKeys(k, hello.payload, np)
+        l.keys(toMac, toPhone)
     }
 
     private fun read(l: Link) {
         while (!ended) {
-            val frame = CallLink.read(l.input)
+            val frame = l.read()
             when (frame.type) {
                 CallLink.AUDIO -> pipe?.offer(frame.payload)
+                CallLink.ADPCM -> pipe?.offer(CallLink.Adpcm.decode(frame.payload))
                 CallLink.MESSAGE -> {
                     val message = try {
                         JSONObject(String(frame.payload, Charsets.UTF_8))
