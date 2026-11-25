@@ -8,14 +8,17 @@ Prism's Quick Settings tile ("Hotspot"):
 | **Instant** (default) | Off. It comes on when the owner's MacBook asks over Bluetooth LE, and goes off again 120 s after the last client left | One client |
 | **Normal** | On, and it stays on: no idle timeout, and Prism starts it again after a reboot or when it stops | Everyone with the password, as configured in Settings |
 
-The tile is active while the hotspot is on in either mode ("Always on", or
-"Instant · on" while an instant hotspot runs) and inactive while an instant
-one is off ("Instant"). A tap turns it off or on: Always on goes to instant
-mode (off), a running instant hotspot goes off at once, and an idle one goes
-to Always on. A long press opens the hotspot page (also on the Phone tab):
+The tile is the Always-on switch: active in normal mode ("Always on"),
+inactive in instant mode ("Instant"), and a tap switches between the two. It
+never starts or stops an instant hotspot itself: going to Always on keeps a
+running hotspot on with normal mode's configuration, and leaving Always on
+switches its hotspot off. Its icon shows an instant hotspot apart from that:
+while one runs, a bolt takes the dot's place and the tile reads "Instant ·
+on". A long press opens the hotspot page (also on the Phone tab):
 
-- **Keep it on**: the mode; in instant mode, **Turn on now** (an instant
-  hotspot, as if the Mac had asked) or **Turn off now**.
+- **Always on**: the mode, the same switch as the tile; in instant mode,
+  **Turn on now** (an instant hotspot, as if the Mac had asked) or **Turn off
+  now**.
 - **Connected devices**: host name, IPv4 and MAC address of each device on
   the hotspot, every 3 s while the page is open (the tethering module's
   `TetheredClient`s, which it tells only a caller with `NETWORK_SETTINGS`).
