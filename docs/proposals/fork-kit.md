@@ -1,12 +1,27 @@
 # Proposal: one way to keep a fork — `fork-kit`
 
-Status: proposal (2026-11-24). Companion to `forks.md`: if this is adopted, every
-fork uses the same layout and the same workflows, and Prism's Forks feature
-needs only one strategy.
+Status: adopted (2026-11-25). Companion to `forks.md`: every fork uses the
+same layout and the same workflows, and Prism's Forks feature needs only one
+strategy.
 
 **Built:** the merge-through-a-sync-PR design is published as
-[BierDav/fork-kit](https://github.com/BierDav/fork-kit) v0.1.0 (Apache-2.0).
-Its README is the reference; this document records how we got there.
+[BierDav/fork-kit](https://github.com/BierDav/fork-kit) (Apache-2.0, TypeScript
+on Bun), now v0.4.0, and runs on all five forks. Its README is the reference;
+this document records how we got there. Since the first version:
+
+- **Central sync (v0.4.0):** one workflow in `BierDav/fork-kit`
+  (`sync-forks.yml`, every two hours) syncs every fork the App is installed on,
+  with a token limited to that fork. The key lives only there; forks keep just
+  the guard.
+- **The guard** sets the required status `fork-kit/hold` on every PR into the
+  fork branch: it fails while the PR has the label `fork-kit:hold`, and it
+  turns auto-merge off when someone other than fork-kit pushes to the sync PR.
+  It fails closed (v0.3.1).
+- **v0.3.1** fixed what two independent reviews found, among them that a
+  hand-made commit could pass as fork-kit's own. New outcome `diverged`: upstream
+  no longer contains what was merged last, and nothing is pushed.
+- seaweedfs became the GitHub fork `BierDav/seaweedfs` (open point 2), and
+  t3code's `placement-profiles` is the fork branch itself (open point 1).
 
 ## Review outcome (2026-11-24): the storage decision below is withdrawn
 
