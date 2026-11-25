@@ -1,6 +1,7 @@
-// The assistant's conversation above the composer, in Gemini's look: the
-// overlay's card (GeminiPlate.kt's chip, black or white) with a header and a
-// "New chat" button, the owner's words at the right, the answers as simple
+// The assistant's conversation above the composer, in Gemini's look: its
+// answer panel (GeminiPlate.kt's chip, black or white) with Gemini's controls
+// above it (New chat, full screen), the owner's words at the right in
+// Gemini's user bubble, the answers as simple
 // Markdown, a line per tool while it runs, and a card per tool result as
 // Gemini's action cards render them (the Google app's robin action cards:
 // 16 dp padding, a header with the app's icon and name, a "x • y" subtitle,
@@ -11,6 +12,15 @@
 package at.quickme.prism.assistant
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -71,7 +81,6 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -131,9 +140,16 @@ class FollowedAgent(
 )
 
 /**
- * The conversation in the overlay's card: [transcript] as it grows while
- * [running]; [agent] is what the newest hand-off's agent does now. [onEdit]
- * changes a sent message (entry, new text) and says why it couldn't.
+ * The conversation above the overlay's card, as Gemini's floaty answer page
+ * (the Google app's floaty2_response_page_v4): no header, but Gemini's
+ * controls above the panel at its end, a chip ("New chat", where Gemini has
+ * its action chip) and a round button that opens the conversation full screen
+ * ([onOpen], Gemini's "open in app"); the panel itself in Gemini's chip look
+ * with 28 dp corners, 24 dp above the first line and 16 dp at its sides, its
+ * edges fading over 48 dp where it scrolls, as tall as the screen allows and
+ * growing as the answer does. [transcript] grows while [running]; [agent] is
+ * what the newest hand-off's agent does now. [onEdit] changes a sent message
+ * (entry, new text) and says why it couldn't.
  */
 @Composable
 fun AssistantTranscript(
@@ -145,6 +161,8 @@ fun AssistantTranscript(
     modifier: Modifier = Modifier,
     /** The time timers count from; the clock in the app, fixed in previews. */
     now: (() -> Long)? = null,
+    /** The conversation full screen; no button without it. */
+    onOpen: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
@@ -153,7 +171,7 @@ fun AssistantTranscript(
     val handoff = transcript.latestHandoff()?.first
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isEmpty()) return@LaunchedEffect
-        // To the end of the last item, also once the card has grown to fit
+        // To the end of the last item, also once the panel has grown to fit
         // what was added (animateContentSize): a list scrolled past its end
         // stops at it.
         repeat(2) {
@@ -161,29 +179,31 @@ fun AssistantTranscript(
             delay(400)
         }
     }
-    val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.62f).dp
-    Surface(
-        shape = RoundedCornerShape(24.dp),
-        color = Color.Transparent,
-        modifier = modifier.animateContentSize().geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, 24.dp),
-    ) {
-        Column(Modifier.heightIn(max = maxHeight)) {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(PrismIcons.Sparkle, null, Modifier.size(20.dp), tint = colors.primary)
-                Text("Prism", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 8.dp).weight(1f))
-                TextButton(onClick = onNew, enabled = !running) {
-                    Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-                    Text("New chat", modifier = Modifier.padding(start = 6.dp))
-                }
-            }
+    Column(modifier) {
+        // Gemini's controls: at the end, 4 dp above the panel, each button's
+        // 4 dp inset outside the panel's edge.
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 4.dp).offset(x = 4.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = !running, modifier = Modifier.padding(end = 4.dp))
+            if (onOpen != null) ControlButton(PrismIcons.OpenInNew, "Open full screen", onOpen)
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                // 12 dp to the card, with the composer's 8.
+                .padding(bottom = 4.dp)
+                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, PanelRadius)
+                .clip(RoundedCornerShape(PanelRadius))
+                .animateContentSize(tween(350, easing = PanelEasing)),
+        ) {
             LazyColumn(
                 state = list,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().fadingEdges(list, 48.dp),
             ) {
                 items(entries, key = { it.id }) { e ->
                     TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now)
@@ -192,6 +212,62 @@ fun AssistantTranscript(
                     item(key = "thinking") { Thinking() }
                 }
             }
+        }
+    }
+}
+
+/** Gemini's panel corners (floaty_response_background). */
+private val PanelRadius = 28.dp
+
+/** Gemini's grow-in-out: the panel follows its content on M3's emphasized decelerate. */
+private val PanelEasing = androidx.compose.animation.core.CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
+
+/**
+ * Android's fading edges as Gemini's panel has them (requiresFadingEdge,
+ * 48 dp): what scrolls out fades towards the edge it leaves by.
+ */
+private fun Modifier.fadingEdges(list: androidx.compose.foundation.lazy.LazyListState, length: Dp): Modifier =
+    graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }.drawWithContent {
+        drawContent()
+        val l = length.toPx().coerceAtMost(size.height / 2)
+        if (list.canScrollBackward) drawRect(
+            Brush.verticalGradient(0f to Color.Black, 1f to Color.Transparent, startY = 0f, endY = l),
+            size = Size(size.width, l), blendMode = BlendMode.DstOut,
+        )
+        if (list.canScrollForward) drawRect(
+            Brush.verticalGradient(0f to Color.Transparent, 1f to Color.Black, startY = size.height - l, endY = size.height),
+            topLeft = Offset(0f, size.height - l), size = Size(size.width, l), blendMode = BlendMode.DstOut,
+        )
+    }
+
+/**
+ * Gemini's action chip above its panel: a pill in the surface colour, 36 dp
+ * tall in a 48 dp touch target, the icon 18 dp, 12 dp before it and 16 dp
+ * after the label.
+ */
+@Composable
+private fun ControlChip(icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Box(modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+        Surface(
+            onClick = onClick, enabled = enabled, shape = CircleShape, color = colors.surface,
+            contentColor = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
+        ) {
+            Row(Modifier.height(36.dp).padding(start = 12.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, Modifier.size(18.dp))
+                Text(label, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
+            }
+        }
+    }
+}
+
+/** Gemini's "open in app" above its panel: a 40 dp disc in the surface colour, in a 48 dp touch target. */
+@Composable
+private fun ControlButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+        Surface(onClick = onClick, shape = CircleShape, color = colors.surface, contentColor = colors.onSurfaceVariant, modifier = Modifier.size(40.dp)) {
+            Box(contentAlignment = Alignment.Center) { Icon(icon, label, Modifier.size(24.dp)) }
         }
     }
 }
@@ -214,11 +290,16 @@ fun TranscriptEntry(e: Entry, agent: FollowedAgent?, onEdit: suspend (String, St
 /** Whether "Thinking…" shows below [t]: a turn runs and no tool line says what it does. */
 fun thinking(t: Transcript, running: Boolean): Boolean = running && (t.entries.lastOrNull() as? Entry.Step)?.running != true
 
-/** What the owner said, at the right, with what they attached. */
+/**
+ * What the owner said, at the right, with what they attached: Gemini's user
+ * bubble (user_bubble_layout_v5), the highest-but-one surface container with
+ * 24 dp corners but 4 dp at the top end, 12 dp above and below the text, at
+ * least 42 dp from the start.
+ */
 @Composable
 private fun UserLine(e: Entry.User) {
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+    Column(Modifier.fillMaxWidth().padding(start = 42.dp, top = 4.dp, bottom = 4.dp), horizontalAlignment = Alignment.End) {
         if (e.attachments.isNotEmpty()) {
             Text(
                 e.attachments.joinToString(", "),
@@ -231,11 +312,10 @@ private fun UserLine(e: Entry.User) {
         Text(
             e.text,
             style = MaterialTheme.typography.bodyLarge,
-            color = colors.onSecondaryContainer,
+            color = colors.onSurface,
             modifier = Modifier
-                .widthIn(max = 300.dp)
-                .background(colors.secondaryContainer, RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp))
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .background(colors.surfaceContainerHigh, RoundedCornerShape(topStart = 24.dp, topEnd = 4.dp, bottomEnd = 24.dp, bottomStart = 24.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
         )
     }
 }

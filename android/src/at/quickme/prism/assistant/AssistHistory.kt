@@ -3,7 +3,9 @@
 // first and grouped by day as Gemini's chat list is; one opens with its
 // transcript (TranscriptView's entries) and goes on with what is typed here,
 // through the same harness (AssistantSession). New chat starts another;
-// Delete removes one everywhere. The overlay opens it (AssistHistory.open).
+// Delete removes one everywhere. AssistHistory.open opens the list; the
+// overlay shows its own conversation full screen with HistoryChat, in its
+// window, and opens the list from there.
 
 package at.quickme.prism.assistant
 
@@ -20,13 +22,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -68,6 +75,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -360,7 +368,12 @@ private fun ConversationRow(item: HistoryItem, device: String, now: Long, onOpen
     }
 }
 
-/** One conversation: its transcript and a composer that continues it. */
+/**
+ * One conversation, full screen: its transcript and a composer that continues
+ * it. The Chats list opens it, and so does the overlay (AssistActivity), whose
+ * card grows into it: there Back returns to the card, [onChats] opens the list,
+ * and [composer] is the overlay's own card.
+ */
 @Composable
 internal fun HistoryChat(
     transcript: Transcript,
@@ -380,6 +393,14 @@ internal fun HistoryChat(
     onBack: () -> Unit,
     /** The clock timers count from; fixed in previews. */
     now: (() -> Long)? = null,
+    /** The Chats list, from a chat that isn't in it (the overlay's). */
+    onChats: (() -> Unit)? = null,
+    /** The agent the overlay follows, shown live in the card of hand-off [handoff]. */
+    agent: FollowedAgent? = null,
+    handoff: String? = null,
+    /** In place of the plain field: the overlay's card. */
+    composer: (@Composable () -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
@@ -388,68 +409,85 @@ internal fun HistoryChat(
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
     }
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        at.quickme.prism.assistant.core.Conversations.title(transcript) ?: "New chat",
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Chats") } },
-                actions = {
-                    IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
-                    if (onDelete != null) IconButton(onClick = { confirm = true }, enabled = !running) { Icon(Icons.Rounded.Delete, "Delete chat") }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
-            )
-        },
-        bottomBar = {
-            Surface(color = colors.surface) {
-                Column(Modifier.navigationBarsPadding().imePadding().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)) {
-                    if (!configured) {
-                        Text("The assistant isn't set up on this phone (assistant_api_key).", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = text,
-                            onValueChange = onText,
-                            placeholder = { Text("Ask Prism") },
-                            enabled = configured && canSend,
-                            maxLines = 5,
-                            shape = RoundedCornerShape(28.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                unfocusedContainerColor = colors.surfaceContainerHigh,
-                                focusedContainerColor = colors.surfaceContainerHigh,
-                                unfocusedBorderColor = colors.surfaceContainerHigh,
-                            ),
-                            modifier = Modifier.weight(1f),
+    // The overlay's card lies over the chat at its bottom (as in the overlay),
+    // and the list keeps clear of it.
+    var cardHeight by remember { mutableIntStateOf(0) }
+    val cardSpace = with(androidx.compose.ui.platform.LocalDensity.current) { cardHeight.toDp() }
+    Box(modifier) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            at.quickme.prism.assistant.core.Conversations.title(transcript) ?: "New chat",
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
-                        FilledIconButton(
-                            onClick = onSend,
-                            enabled = configured && canSend && !running && text.isNotBlank(),
-                            modifier = Modifier.padding(start = 8.dp).size(52.dp),
-                        ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, if (onChats != null) "Back" else "Chats") }
+                    },
+                    actions = {
+                        if (onChats != null) IconButton(onClick = onChats) { Icon(PrismIcons.Chat, "Chats") }
+                        IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
+                        if (onDelete != null) IconButton(onClick = { confirm = true }, enabled = !running) { Icon(Icons.Rounded.Delete, "Delete chat") }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                )
+            },
+            bottomBar = {
+                if (composer == null) Surface(color = colors.surface) {
+                    Column(Modifier.navigationBarsPadding().imePadding().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)) {
+                        if (!configured) {
+                            Text("The assistant isn't set up on this phone (assistant_api_key).", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = text,
+                                onValueChange = onText,
+                                placeholder = { Text("Ask Prism") },
+                                enabled = configured && canSend,
+                                maxLines = 5,
+                                shape = RoundedCornerShape(28.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    unfocusedContainerColor = colors.surfaceContainerHigh,
+                                    focusedContainerColor = colors.surfaceContainerHigh,
+                                    unfocusedBorderColor = colors.surfaceContainerHigh,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilledIconButton(
+                                onClick = onSend,
+                                enabled = configured && canSend && !running && text.isNotBlank(),
+                                modifier = Modifier.padding(start = 8.dp).size(52.dp),
+                            ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                        }
                     }
                 }
-            }
-        },
-    ) { padding ->
-        when {
-            loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
-            error != null -> EmptyState(PrismIcons.Chat, "This chat did not open", error, Modifier.padding(padding))
-            entries.isEmpty() && !running -> EmptyState(PrismIcons.Sparkle, "New chat", "Ask Prism anything; it can act on this phone and hand work to T3.", Modifier.padding(padding))
-            else -> LazyColumn(
-                state = list,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(entries, key = { it.id }) { e -> TranscriptEntry(e, null, onEdit, now) }
-                if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
+            },
+        ) { padding ->
+            when {
+                loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
+                error != null -> EmptyState(PrismIcons.Chat, "This chat did not open", error, Modifier.padding(padding))
+                entries.isEmpty() && !running -> EmptyState(PrismIcons.Sparkle, "New chat", "Ask Prism anything; it can act on this phone and hand work to T3.", Modifier.padding(padding))
+                else -> LazyColumn(
+                    state = list,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + cardSpace + 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(entries, key = { it.id }) { e -> TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now) }
+                    if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
+                }
             }
         }
+        if (composer != null) Box(
+            // The card as Gemini's chat input: 12 dp from the sides and the bottom.
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp)
+                .onSizeChanged { cardHeight = it.height },
+            contentAlignment = Alignment.BottomCenter,
+        ) { composer() }
     }
     if (confirm && onDelete != null) {
         AlertDialog(
