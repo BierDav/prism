@@ -23,6 +23,8 @@ class MatrixClient(private val homeserver: String, private val token: String) {
 
     private var me: String? = null
     private var rooms: List<Matrix.Room>? = null
+    /** How many of the most recent rooms [rooms] covers (all, after a full /sync). */
+    private var roomsCover = 0
 
     private fun headers() = mapOf("Authorization" to "Bearer $token")
 
@@ -34,16 +36,34 @@ class MatrixClient(private val homeserver: String, private val token: String) {
 
     suspend fun me(): String = me ?: Matrix.userId(get(Matrix.whoamiPath())).also { me = it }
 
-    /** The joined rooms, most recently active first (kept for this conversation). */
-    suspend fun rooms(fresh: Boolean = false): List<Matrix.Room> {
+    /**
+     * The [limit] most recently active joined rooms, most recent first (kept
+     * for this conversation). Finding a room by name looks through [ALL], so
+     * an older room is found and a name shared with one is seen as ambiguous.
+     */
+    suspend fun rooms(fresh: Boolean = false, limit: Int = RECENT): List<Matrix.Room> {
         requireSetUp()
-        if (!fresh) rooms?.let { return it }
-        return Matrix.decodeRooms(get(Matrix.roomsSyncPath()), me()).also { rooms = it }
+        if (!fresh && roomsCover >= limit) rooms?.let { all -> return all.take(limit) }
+        val (found, cover) = try {
+            Matrix.decodeSlidingRooms(
+                Http.request("POST", Matrix.root(homeserver) + Matrix.slidingSyncPath(), Matrix.slidingSyncBody(limit).toString(), headers()),
+            ) to limit
+        } catch (e: HttpException) {
+            // A homeserver without sliding sync: the (slow) full /sync.
+            if (e.status != 404 && e.status != 400) throw e
+            Matrix.decodeRooms(get(Matrix.roomsSyncPath()), me()) to Int.MAX_VALUE
+        }
+        rooms = found
+        roomsCover = cover
+        return found
     }
 
     /** The one room [query] names (ID or name); ambiguity goes back to the model. */
     suspend fun room(query: String): Matrix.Room {
-        val found = Matrix.find(rooms(), query).ifEmpty { Matrix.find(rooms(fresh = true), query) }
+        val q = query.trim()
+        // A room ID is taken as it is; the homeserver refuses one the owner isn't in.
+        if (q.startsWith("!") && ':' in q) return rooms(limit = ALL).firstOrNull { it.id == q } ?: Matrix.Room(q, q)
+        val found = Matrix.find(rooms(limit = ALL), query).ifEmpty { Matrix.find(rooms(fresh = true, limit = ALL), query) }
         val exact = found.filter { it.id == query.trim() || it.name.equals(query.trim(), true) }
         val pick = exact.singleOrNull() ?: found.singleOrNull().takeIf { exact.isEmpty() }
         return when {
@@ -96,6 +116,14 @@ class MatrixClient(private val homeserver: String, private val token: String) {
             Http.request("PUT", Matrix.base(homeserver) + Matrix.sendPath(roomId, "prism-" + UUID.randomUUID()), Matrix.edit(eventId, text).toString(), headers()),
         )
     }
+
+    companion object {
+        /** The rooms a list shows from (300 take about 6 s). */
+        const val RECENT = 300
+
+        /** The rooms a name is looked up in: all of them, in practice (570 take about 13 s, once per conversation). */
+        const val ALL = 5000
+    }
 }
 
 internal fun matrixTools(matrix: MatrixClient): List<AssistantTool> = listOf(
@@ -105,8 +133,9 @@ internal fun matrixTools(matrix: MatrixClient): List<AssistantTool> = listOf(
         optional = listOf(stringParam("query", "Part of a room's or person's name")),
     ) {
         override suspend fun run(args: Args): ToolOutput {
-            val all = matrix.rooms(fresh = true)
-            val rooms = args.optString("query")?.takeIf { it.isNotBlank() }?.let { Matrix.find(all, it) } ?: all
+            val query = args.optString("query")?.takeIf { it.isNotBlank() }
+            val all = matrix.rooms(fresh = true, limit = if (query != null) MatrixClient.ALL else MatrixClient.RECENT)
+            val rooms = query?.let { Matrix.find(all, it) } ?: all
             if (rooms.isEmpty()) return ToolOutput("No room matches.")
             val shown = rooms.take(20)
             return ToolOutput(
