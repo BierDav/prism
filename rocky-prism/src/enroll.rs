@@ -228,6 +228,25 @@ pub(crate) fn decode_provisioning(provisioning: &str) -> Result<String, PrismErr
     Ok(uri)
 }
 
+/// The database a provisioning (`rocky://provision/...`) or a peer contact
+/// (`rocky://peer/...`) belongs to: its publisher, hex. None when it can't
+/// be read.
+pub(crate) fn publisher_of(uri: &str) -> Option<String> {
+    let body = uri
+        .trim()
+        .strip_prefix(ROCKY_PROVISION_PREFIX)
+        .or_else(|| uri.trim().strip_prefix("rocky://peer/"))?;
+    let bytes = BASE64URL_NOPAD
+        .decode(body.trim_end_matches('=').as_bytes())
+        .or_else(|_| BASE64.decode(body.as_bytes()))
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("publisher")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// A device name: a DNS label, as the workers' pod names and fleet's hosts are.
 pub fn is_valid_device_name(name: &str) -> bool {
     (1..=63).contains(&name.len())

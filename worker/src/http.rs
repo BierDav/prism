@@ -162,6 +162,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/device-session", put(put_t3_device_session))
         .route("/v1/t3/device-sessions", get(get_t3_device_sessions))
         .route(
+            "/v1/t3/mcp-session",
+            get(get_t3_mcp_session).put(put_t3_mcp_session),
+        )
+        .route(
             "/v1/android/release",
             get(crate::android::get_release).put(crate::android::put_release),
         )
@@ -171,7 +175,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/android/settings",
-            get(crate::android_settings::get_settings).put(crate::android_settings::put_settings),
+            put(crate::android_settings::put_settings),
         )
         .route(
             "/v1/telemetry/write",
@@ -180,10 +184,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/t3/pair", post(crate::admin::post_pair))
         .route("/v1/machines", get(crate::admin::get_machines))
-        .route(
-            "/v1/devices/{device}/token",
-            post(crate::admin::post_device_token).delete(crate::admin::delete_device_token),
-        )
         .route(
             "/v1/placement/account-limits/{account}",
             put(crate::admin::put_account_limit).delete(crate::admin::delete_account_limit),
@@ -482,6 +482,53 @@ async fn get_t3_device_sessions(State(state): State<AppState>, headers: HeaderMa
             Json(json!({ "error": err.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Whether the workers want an MCP session from this machine, and when
+/// theirs expires (`prism register-t3-mcp`).
+async fn get_t3_mcp_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let machine = match require_machine_token(&state, &headers) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match crate::pairing::host_session_state(&state.client, &state.cfg, &machine, (state.now_fn)())
+        .await
+    {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Registers the workers' MCP session with this machine's T3, which the
+/// machine minted itself (`prism register-t3-mcp`).
+async fn put_t3_mcp_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let machine = match require_machine_token(&state, &headers) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let Ok(payload) = serde_json::from_slice(&body) else {
+        return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+    };
+    match crate::pairing::register_host_session(
+        &state.client,
+        &state.cfg,
+        &machine,
+        payload,
+        (state.now_fn)(),
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err((status, msg)) => (status, Json(json!({ "error": msg }))).into_response(),
     }
 }
 

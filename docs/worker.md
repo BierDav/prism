@@ -74,7 +74,8 @@ All tables are replayed Rocky tables. Ids are Rocky ids unless noted.
   the owner sees.
 - `pushes(key, at)`: the ntfy wake-ups the leader posted, kept 8 days.
 - `t3_sessions(machine, url, token, label, updated_at)`: paired T3 MCP sessions
-  (from `prism pair`, `POST /v1/t3/pair`).
+  (from `prism pair`, `POST /v1/t3/pair`, or registered by the machine itself,
+  `prism register-t3-mcp`, `PUT /v1/t3/mcp-session`).
 - `t3_client_sessions(machine, url, token, environment_id, updated_at)`: T3
   client API sessions registered by T3 hosts via `PUT /v1/t3/client-session`
   for scanning and answering command approvals.
@@ -280,6 +281,16 @@ The worker keeps the paths that outside callers use:
 - `GET /v1/t3/device-sessions`, `PUT /v1/t3/device-session`: T3 hosts
   pairing every device with their T3 (`prism register-t3-devices`, machine
   token; docs/direct-fix.md)
+- `GET /v1/t3/mcp-session`, `PUT /v1/t3/mcp-session`: a T3 host registering
+  the workers' own MCP session with its T3 (`prism register-t3-mcp`, machine
+  token), the `t3_sessions` row `prism pair` stores by hand. `GET` answers
+  `{machine, wanted, reason}` or `{machine, wanted, access, paired,
+  expiresAt}`: only a machine in the config with a T3 of its own wants one,
+  not the cluster machine, one with a `t3_token`, or one with `via`. `PUT`
+  takes `{origin, token, access, expiresAt}`; the origin must be the
+  machine's NetBird name, and the worker checks the token with an MCP call
+  where it reaches the machine (`t3_url`, else the origin) before it stores
+  it. A renewal keeps the session's access.
 - `GET /v1/android/release`, `GET /v1/android/release.apk`: APK updates. The Go
   server wanted a device token; Rocky provisioning has none, so these are
   public. The phone installs only an APK of its own package signed with its
@@ -289,11 +300,11 @@ The worker keeps the paths that outside callers use:
   `android_publishers`; Content-Length of at most 200 MiB, `sha256` required,
   a zip, a higher `versionCode`)
 - `PUT /v1/android/settings`: a publisher (`android/publish.py`) sets a
-  phone's settings (machine token in `android_publishers`); `GET
-  /v1/android/settings` is the phone's own, with its `prism_` device token.
-  Both answer as Go did. They live in the `settings` table under
-  `android.settings.<device>`, and the leader pushes app.settings once per
-  change.
+  phone's settings (machine token in `android_publishers`), as Go did. The
+  phone reads its own from its replica (`GET /v1/android/settings`,
+  rocky-prism-ffi); the workers no longer serve it over HTTP. They live in
+  the `settings` table under `android.settings.<device>`, and the leader
+  pushes app.settings once per change.
 - `POST /v1/telemetry/write`: the phone's metrics (Prometheus remote write,
   at most 2 MiB), forwarded unchanged to `telemetry_url` in the config with
   basic auth `telemetry_user` (default `prism_phone`) and
@@ -305,10 +316,10 @@ The worker keeps the paths that outside callers use:
 - `GET /health`, `GET /v1/health` (`503` only while the replica is
   incomplete; it reads nothing, so a busy database never delays it)
 
-The owner's admin routes, what `prism pair`, `machines`, `device-token` and
-`device-revoke` call. The Go server ran these commands in its pod against
-PostgreSQL; the worker serves them to the admin token, `admin:<hex
-HMAC-SHA256(event key, "prism-admin-v1")>`, which `prism` derives from
+The owner's admin routes, what `prism pair`, `machines` and `account-limit`
+call. The Go server ran these commands in its pod against PostgreSQL; the
+worker serves them to the admin token, `admin:<hex HMAC-SHA256(event key,
+"prism-admin-v1")>`, which `prism` derives from
 `PRISM_EVENT_KEY(_FILE)`. So they run where the key is, in a worker pod
 (`kubectl exec prism-worker-0 -- /prism machines`), against the worker at
 `PRISM_URL` (default `http://127.0.0.1:8080`):
@@ -319,10 +330,10 @@ HMAC-SHA256(event key, "prism-admin-v1")>`, which `prism` derives from
   owner's text. `prism` never sends a code twice.
 - `GET /v1/machines` → Go's machines view (`machines.rs`), which `prism
   machines` prints as Go did.
-- `POST|DELETE /v1/devices/{device}/token` → `{device, token}` or `{device,
-  revoked}`: a `prism_` device token, of which only the SHA-256 is kept
-  (`settings` row `device.token.<device>`). Tokens the Go server minted are
-  in PostgreSQL and don't carry over: mint new ones.
+- The `prism_` device tokens (`prism device-token`, `POST|DELETE
+  /v1/devices/{device}/token`) are gone: the phone and the Macs read
+  everything from their own replica, the TV only fetches the public APK
+  updates, and nothing sent one any more.
 - `PUT|DELETE /v1/placement/account-limits/{account}` → `{account, limit}`:
   an account's temporary placement limit (`prism account-limit`,
   `docs/placement.md`).
@@ -334,8 +345,8 @@ request row.
 
 | | Rust |
 | --- | --- |
-| `prism run`, `report`, `ping`, `token`, `register-t3`, `register-t3-devices`, the Mac app's subcommands | `prism` (`cli/`), packages.<system>.prism |
-| `prism pair`, `machines`, `device-token`, `device-revoke`, `account-limit` | `prism` in a worker pod, over the admin routes above |
+| `prism run`, `report`, `ping`, `token`, `register-t3`, `register-t3-devices`, `register-t3-mcp`, the Mac app's subcommands | `prism` (`cli/`), packages.<system>.prism |
+| `prism pair`, `machines`, `account-limit` | `prism` in a worker pod, over the admin routes above |
 | The sealing rollout (`coordinate`) | `prism-worker coordinate`, the one-shot Job in `deploy/jobs/` |
 | The server | `prism-worker` (`worker/`), the image's entrypoint |
 
@@ -557,7 +568,8 @@ server does, in the alert-fix placement profile (the `actions` row), with
 the Go server's prompt. The target is the alert's `machine` label, else the
 cluster (`cluster_machine`, `t3_workspace`). The worker reaches the cluster machine (`T3_ACCESS_TOKEN(_FILE)`, or its
 `t3_token`), machines with a configured `t3_token`, paired sessions stored in
-`t3_sessions`, machines those link to, and machines without T3 over SSH from
+`t3_sessions` (registered by the machines themselves or by `prism pair`),
+machines those link to, and machines without T3 over SSH from
 `ssh_runners`. Launched fix threads are recorded in `agents` and watched by the
 leader's agent watcher, which updates `agent_activity` and posts
 `agent.finished` when the run completes.

@@ -421,41 +421,44 @@ pub async fn device_session_expiries(
     Ok(serde_json::json!({"sessions": out}))
 }
 
-/// Checks a device session a T3 host minted for itself and stores it. The
-/// origin must be the host's NetBird name, which the devices reach; T3 must
-/// answer as that machine and accept the token for what its kind needs.
-pub async fn register_device_session(
-    client: &PrismClient,
+/// A session a T3 host minted for itself, checked against its T3.
+pub(crate) struct VerifiedSession {
+    /// The host's NetBird origin, as it sent it (without a trailing `/`).
+    pub origin: String,
+    /// Where the workers reach this T3: the configured `t3_url`, else `origin`.
+    pub reach: String,
+    pub environment_id: String,
+    pub label: String,
+}
+
+/// Checks a session a T3 host minted with its own T3, for a device or for
+/// the workers. The origin must be the host's NetBird name, which the
+/// devices reach; T3 must answer as that machine and accept the token for
+/// what its kind needs (`client`: orchestration read and operate; `mcp`: an
+/// MCP call).
+pub(crate) async fn verify_host_session(
     cfg: &Config,
     machine: &str,
-    p: DeviceSessionPayload,
-    now: i64,
-) -> Result<(), (axum::http::StatusCode, String)> {
+    origin: &str,
+    token: &str,
+    kind: &str,
+) -> Result<VerifiedSession, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
-    if !cfg.devices.contains_key(&p.device) {
-        return Err(bad("Prism has no such device."));
-    }
-    if !KINDS.contains(&p.kind.as_str()) {
-        return Err(bad("The kind is client or mcp."));
-    }
-    if p.token.is_empty() || p.expires_at <= now {
-        return Err(bad("An unexpired session is required."));
-    }
     let configured = match cfg.machines.get(machine) {
         Some(m) if m.has_t3() => m.clone(),
         _ => return Err(bad("This machine has no T3 in Prism's config.")),
     };
-    let origin = url::Url::parse(&p.origin).map_err(|_| bad("The origin is not a URL."))?;
-    let host_ok = origin
+    let parsed = url::Url::parse(origin).map_err(|_| bad("The origin is not a URL."))?;
+    let host_ok = parsed
         .host_str()
         .is_some_and(|h| h.eq_ignore_ascii_case(&format!("{machine}.{}", cfg.netbird_domain)));
-    if !matches!(origin.scheme(), "http" | "https") || origin.path() != "/" || !host_ok {
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.path() != "/" || !host_ok {
         return Err(bad("The T3 origin must be this machine's NetBird name."));
     }
-    let origin = origin.as_str().trim_end_matches('/').to_string();
+    let origin = parsed.as_str().trim_end_matches('/').to_string();
     // The workers check the session where they reach this T3.
-    let check = if configured.t3_url.is_empty() {
+    let reach = if configured.t3_url.is_empty() {
         origin.clone()
     } else {
         configured.t3_url.trim_end_matches('/').to_string()
@@ -474,7 +477,7 @@ pub async fn register_device_session(
             "The machine's T3 did not answer.".to_string(),
         )
     };
-    let rpc = crate::approvals::T3Rpc::new(&check, &p.token);
+    let rpc = crate::approvals::T3Rpc::new(&reach, token);
     let desc: EnvDesc = rpc
         .get("/.well-known/t3/environment")
         .await
@@ -486,7 +489,7 @@ pub async fn register_device_session(
     {
         return Err(bad("The T3 environment does not match this machine."));
     }
-    if p.kind == KIND_CLIENT {
+    if kind == KIND_CLIENT {
         #[derive(Deserialize)]
         struct AuthSession {
             #[serde(default)]
@@ -510,9 +513,9 @@ pub async fn register_device_session(
             ));
         }
     } else {
-        let token = p.token.clone();
+        let token = token.to_string();
         let mcp =
-            crate::t3::McpClient::new(format!("{check}/mcp"), Box::new(move || token.clone()));
+            crate::t3::McpClient::new(format!("{reach}/mcp"), Box::new(move || token.clone()));
         if let Err(err) = mcp
             .call("t3_environment_links", serde_json::json!({}))
             .await
@@ -525,10 +528,38 @@ pub async fn register_device_session(
             });
         }
     }
-    let session = DeviceSession {
+    Ok(VerifiedSession {
         origin,
-        token: p.token,
+        reach,
         environment_id: desc.environment_id,
+        label: desc.label,
+    })
+}
+
+/// Checks a device session a T3 host minted for itself and stores it.
+pub async fn register_device_session(
+    client: &PrismClient,
+    cfg: &Config,
+    machine: &str,
+    p: DeviceSessionPayload,
+    now: i64,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
+    if !cfg.devices.contains_key(&p.device) {
+        return Err(bad("Prism has no such device."));
+    }
+    if !KINDS.contains(&p.kind.as_str()) {
+        return Err(bad("The kind is client or mcp."));
+    }
+    if p.token.is_empty() || p.expires_at <= now {
+        return Err(bad("An unexpired session is required."));
+    }
+    let verified = verify_host_session(cfg, machine, &p.origin, &p.token, &p.kind).await?;
+    let session = DeviceSession {
+        origin: verified.origin,
+        token: p.token,
+        environment_id: verified.environment_id,
         expires_at: p.expires_at,
     };
     let value = serde_json::to_string(&session).unwrap_or_default();

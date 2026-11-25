@@ -29,6 +29,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// What opening an absent or empty directory does.
+/// A missing or empty directory: no replica in it yet.
+fn dir_is_empty(directory: &str) -> bool {
+    !Path::new(directory).exists()
+        || std::fs::read_dir(directory)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+}
+
 enum First<'a> {
     Create,
     Join(&'a str),
@@ -124,13 +132,33 @@ impl PrismClient {
     ) -> Result<Self, PrismError> {
         let networked = network.is_some();
         let provisioning = decode_provisioning(&provisioning)?;
-        let client = Self::open_with(
+        let existed = !dir_is_empty(&directory);
+        let mut client = Self::open_with(
             &directory,
-            network,
-            coordination,
+            network.clone(),
+            coordination.clone(),
             First::Join(&provisioning),
         )
         .await?;
+        // A replica of another database (Prism's database was created anew
+        // and the device got a new provisioning): Rocky would keep opening
+        // the old one and ignore the provisioning. Its rows belong to a
+        // database nobody syncs any more, so drop it and enroll again.
+        if existed && client.belongs_elsewhere(&provisioning).await {
+            eprintln!(
+                "rocky-prism: the replica in {directory} belongs to another database \
+                 than its provisioning; enrolling again"
+            );
+            client.close().await?;
+            std::fs::remove_dir_all(&directory).map_err(storage_err)?;
+            client = Self::open_with(
+                &directory,
+                network,
+                coordination,
+                First::Join(&provisioning),
+            )
+            .await?;
+        }
         if networked {
             let session = client.db.session();
             let enabled = session.set_automatic_sync(true).await;
@@ -138,6 +166,76 @@ impl PrismClient {
             enabled.map_err(storage_err)?;
         }
         Ok(client)
+    }
+
+    /// Whether this replica belongs to another database than
+    /// `provisioning` (`rocky://provision/...`): their publishers differ.
+    /// False when either can't be read, so a replica is never dropped on a
+    /// guess.
+    async fn belongs_elsewhere(&self, provisioning: &str) -> bool {
+        let session = self.db.session();
+        let contact = session.contact().await;
+        session.close().await;
+        match (
+            crate::enroll::publisher_of(provisioning),
+            contact
+                .ok()
+                .as_deref()
+                .and_then(crate::enroll::publisher_of),
+        ) {
+            (Some(wanted), Some(have)) => wanted != have,
+            _ => false,
+        }
+    }
+
+    /// [`PrismClient::open_provisioned_with`], then [`PrismClient::add_peers`]:
+    /// how a device starts. Returns the client and how many peers it added.
+    ///
+    /// A replica of another database can't always tell which database it
+    /// belongs to (an old, incomplete one may not produce its own contact),
+    /// but it refuses the peers: "the contact belongs to another domain".
+    /// When the provisioning and the peers agree on a database and the
+    /// replica refuses them, the replica is the stale one: it is dropped and
+    /// the device enrolls again. A peer list that disagrees with the
+    /// provisioning never drops a replica.
+    pub async fn open_provisioned_with_peers(
+        directory: String,
+        provisioning: String,
+        network: Option<Network>,
+        coordination: Option<rocky_sdk::CoordinatorSlot>,
+        peers: Vec<String>,
+    ) -> Result<(Self, u32), PrismError> {
+        let client = Self::open_provisioned_with(
+            directory.clone(),
+            provisioning.clone(),
+            network.clone(),
+            coordination.clone(),
+        )
+        .await?;
+        let err = match client.add_peers(peers.clone()).await {
+            Ok(added) => return Ok((client, added)),
+            Err(err) => err,
+        };
+        let wanted = crate::enroll::publisher_of(&decode_provisioning(&provisioning)?);
+        let agree = wanted.is_some()
+            && !peers.is_empty()
+            && peers
+                .iter()
+                .all(|peer| crate::enroll::publisher_of(peer) == wanted);
+        if !(agree && err.to_string().contains("another domain")) {
+            let _ = client.close().await;
+            return Err(err);
+        }
+        eprintln!(
+            "rocky-prism: the replica in {directory} refuses its provisioning's peers \
+             ({err}); enrolling again"
+        );
+        client.close().await?;
+        std::fs::remove_dir_all(&directory).map_err(storage_err)?;
+        let client =
+            Self::open_provisioned_with(directory, provisioning, network, coordination).await?;
+        let added = client.add_peers(peers).await?;
+        Ok((client, added))
     }
 
     async fn open_with(
@@ -158,10 +256,7 @@ impl PrismClient {
             }
             None => config,
         };
-        let is_empty = !Path::new(directory).exists()
-            || std::fs::read_dir(directory)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(true);
+        let is_empty = dir_is_empty(directory);
         let opened = match (is_empty, first) {
             (false, _) => config.open().await,
             (true, First::Create) => config.create().await,

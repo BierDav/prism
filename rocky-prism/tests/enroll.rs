@@ -134,3 +134,96 @@ async fn provisioned_devices_sync_both_ways_and_reopen_their_directory() {
     attach_a.close().await;
     attach_b.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provisioning_of_a_new_database_replaces_the_old_replica() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let replica = dir.path().join("rocky");
+    let (attachment, _) = loopback().await;
+
+    let old = PrismRoot::create().await.expect("old root");
+    let old_device = old.provision("david-pixel").await.expect("provision old");
+    let client = open(&replica, &old_device.provisioning, &attachment).await;
+    put_profile(&client, "old").await;
+    client.close().await.expect("close");
+
+    // The same provisioning again keeps the replica.
+    let client = open(&replica, &old_device.provisioning, &attachment).await;
+    assert_eq!(profile_ids(&client).await, ["old"]);
+    client.close().await.expect("close");
+
+    // A provisioning from a new root: the old replica goes, the device
+    // enrolls in the new database.
+    let new = PrismRoot::create().await.expect("new root");
+    let new_device = new.provision("david-pixel").await.expect("provision new");
+    let client = open(&replica, &new_device.provisioning, &attachment).await;
+    assert_eq!(client.node().await.expect("node"), new_device.node);
+    assert!(profile_ids(&client).await.is_empty());
+    client.close().await.expect("close");
+
+    // And it stays: the next open reuses the new replica.
+    let client = open(&replica, &new_device.provisioning, &attachment).await;
+    assert_eq!(client.node().await.expect("node"), new_device.node);
+    client.close().await.expect("close");
+    attachment.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peers_of_another_database_never_drop_a_replica() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let replica = dir.path().join("rocky");
+    let (attachment, _) = loopback().await;
+
+    let old = PrismRoot::create().await.expect("old root");
+    let old_device = old.provision("david-pixel").await.expect("provision");
+    let old_worker = old.provision("prism-worker-0").await.expect("provision");
+    let new = PrismRoot::create().await.expect("new root");
+    let new_device = new.provision("david-pixel").await.expect("provision");
+    let new_worker = new.provision("prism-worker-0").await.expect("provision");
+    let old_peer = contact(&old_worker.provisioning, "127.0.0.1:9").await;
+    let new_peer = contact(&new_worker.provisioning, "127.0.0.1:9").await;
+
+    let open_with_peers = |provisioning: String, peers: Vec<String>| {
+        let replica = replica.display().to_string();
+        let network = Network::Borrowed(attachment.transport());
+        async move {
+            PrismClient::open_provisioned_with_peers(
+                replica,
+                provisioning,
+                Some(network),
+                None,
+                peers,
+            )
+            .await
+        }
+    };
+    let (client, added) = open_with_peers(old_device.provisioning.clone(), vec![old_peer.clone()])
+        .await
+        .expect("old database");
+    assert_eq!(added, 1);
+    put_profile(&client, "old").await;
+    client.close().await.expect("close");
+
+    // The old provisioning with the new database's peers: they disagree, so
+    // the open fails and the replica stays.
+    assert!(
+        open_with_peers(old_device.provisioning.clone(), vec![new_peer.clone()])
+            .await
+            .is_err()
+    );
+    let (client, _) = open_with_peers(old_device.provisioning.clone(), vec![old_peer])
+        .await
+        .expect("old database again");
+    assert_eq!(profile_ids(&client).await, ["old"]);
+    client.close().await.expect("close");
+
+    // The new provisioning with the new peers: the device enrolls anew.
+    let (client, added) = open_with_peers(new_device.provisioning.clone(), vec![new_peer])
+        .await
+        .expect("new database");
+    assert_eq!(added, 1);
+    assert_eq!(client.node().await.expect("node"), new_device.node);
+    assert!(profile_ids(&client).await.is_empty());
+    client.close().await.expect("close");
+    attachment.close().await;
+}

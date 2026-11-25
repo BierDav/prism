@@ -25,6 +25,9 @@ Access defaults to `full-access`; alternatives are `read-only`, `approval-requir
 `auto-accept-edits` and `auto`. The code must grant the requested access. \
 The T3's label must match the machine name (or its configured environment label). \
 Prism never echoes the code. Pair again with a fresh code to renew the session.\n\n\
+A machine in Prism's config with a T3 of its own pairs itself: its hourly `prism register-t3-mcp` \
+(fleet's prism-t3-client-session) registers a fresh session when the workers have none or theirs \
+expires within 15 days, keeping the access paired here.\n\n\
 Machines without T3 need no pairing: agents for them run on an SSH runner and use SSH. \
 A machine that another paired machine links in T3 needs none either.";
 
@@ -502,6 +505,143 @@ pub async fn pair_argument(
     })
 }
 
+// --- The workers' session, registered by the machine itself -------------
+
+/// Why the workers take no MCP session from `machine`'s own registration
+/// (`prism register-t3-mcp`), or `None` when they do: every machine in the
+/// config with a T3 of its own, except the cluster machine and machines with
+/// a configured credential (Prism uses those) and machines another
+/// machine's T3 links (`via`; Prism reaches them through it).
+pub fn host_session_refusal(cfg: &Config, machine: &str) -> Option<String> {
+    let Some(m) = cfg.machines.get(machine).filter(|m| m.has_t3()) else {
+        return Some(format!("{machine} has no T3 in Prism's config."));
+    };
+    if machine == cfg.cluster_machine {
+        return Some(format!(
+            "{machine} is the cluster machine; Prism uses its configured T3 credential."
+        ));
+    }
+    if !m.t3_token.is_empty() {
+        return Some(format!(
+            "Prism uses the configured T3 credential ({}) for {machine}.",
+            m.t3_token
+        ));
+    }
+    if !m.via.is_empty() {
+        return Some(format!(
+            "Prism reaches {machine} through {}'s T3, which links it.",
+            m.via
+        ));
+    }
+    None
+}
+
+/// `GET /v1/t3/mcp-session`: whether the workers want an MCP session from
+/// `machine`, with which access, and when theirs expires, so the machine
+/// mints one only when it is missing or due. An unexpired session that never
+/// expires (`expiresAt` 0) is `paired` too.
+pub async fn host_session_state(
+    client: &PrismClient,
+    cfg: &Config,
+    machine: &str,
+    now: i64,
+) -> Result<Value, rocky_prism::PrismError> {
+    if let Some(reason) = host_session_refusal(cfg, machine) {
+        return Ok(json!({"machine": machine, "wanted": false, "reason": reason}));
+    }
+    let current = client
+        .list_t3_sessions()
+        .await?
+        .into_iter()
+        .find(|s| s.machine == machine && !s.token.is_empty());
+    let paired = current
+        .as_ref()
+        .is_some_and(|s| s.expires_at == 0 || s.expires_at > now);
+    // A renewal keeps the access the owner paired with.
+    let access = current
+        .as_ref()
+        .map(|s| s.access.as_str())
+        .filter(|a| ACCESS_LEVELS.contains(a))
+        .unwrap_or("full-access");
+    Ok(json!({
+        "machine": machine,
+        "wanted": true,
+        "access": access,
+        "paired": paired,
+        "expiresAt": current.filter(|_| paired).map_or(0, |s| s.expires_at),
+    }))
+}
+
+/// What `PUT /v1/t3/mcp-session` takes from a T3 host.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSessionPayload {
+    /// The host's NetBird origin, e.g. `http://david-mb.netbird.cloud:3773`.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub access: String,
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// Checks the MCP session a machine minted with its own T3 for the workers
+/// and stores it as the machine's `t3_sessions` row, as `prism pair` does.
+pub async fn register_host_session(
+    client: &PrismClient,
+    cfg: &Config,
+    machine: &str,
+    p: HostSessionPayload,
+    now: i64,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    if let Some(reason) = host_session_refusal(cfg, machine) {
+        return Err((StatusCode::BAD_REQUEST, reason));
+    }
+    let access = if p.access.is_empty() {
+        "full-access".to_string()
+    } else {
+        p.access
+    };
+    if !ACCESS_LEVELS.contains(&access.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Access must be one of: {}.", ACCESS_LEVELS.join(", ")),
+        ));
+    }
+    if p.token.is_empty() || p.expires_at <= now {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "An unexpired session is required.".into(),
+        ));
+    }
+    let verified = crate::direct::verify_host_session(
+        cfg,
+        machine,
+        &p.origin,
+        &p.token,
+        crate::direct::KIND_MCP,
+    )
+    .await?;
+    client
+        .upsert_t3_session(&T3SessionRow {
+            machine: machine.to_string(),
+            origin: verified.reach,
+            token: p.token,
+            environment_id: verified.environment_id,
+            label: verified.label,
+            access: access.clone(),
+            paired_at: now,
+            expires_at: p.expires_at,
+        })
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    println!("prism-worker: {machine} registered the workers' T3 session ({access} access)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +997,161 @@ mod tests {
                 paired: false,
                 answer: "Could not pair new-machine. Create a fresh code and try again.\n\nT3: Invalid pairing code [code removed]".into(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn machines_register_the_workers_session_themselves() {
+        let fake = crate::testutil::FakeT3::default().router().route(
+            "/.well-known/t3/environment",
+            axum::routing::get(|| async {
+                Json(json!({"environmentId": "env-mb", "label": "david-mb"}))
+            }),
+        );
+        let reach = crate::testutil::serve(fake).await;
+        let cfg = Config::parse(&format!(
+            r#"{{"cluster_machine": "david-server", "machines": {{
+                "david-server": {{"t3_url": "http://10.0.0.1:3773", "t3_token": "T3_ACCESS_TOKEN"}},
+                "david-mb": {{"t3_url": "{reach}"}},
+                "david-mm-linz": {{"via": "david-mb"}},
+                "builder": {{"t3_url": "http://10.0.0.3:3773", "t3_token": "BUILDER_T3_TOKEN"}},
+                "ccs-oracle-1": {{"t3": false}}}}}}"#
+        ))
+        .expect("config");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = PrismClient::open_or_create(dir.path().join("db").display().to_string(), None)
+            .await
+            .expect("client");
+        const NOW: i64 = 1_800_000_000;
+        const DAYS_30: i64 = 30 * 86_400;
+
+        // Only machines Prism reaches with a session of their own want one.
+        for (machine, reason) in [
+            ("david-server", "is the cluster machine"),
+            ("david-mm-linz", "through david-mb's T3"),
+            ("builder", "configured T3 credential (BUILDER_T3_TOKEN)"),
+            ("ccs-oracle-1", "has no T3"),
+            ("david-tp", "has no T3"),
+        ] {
+            let state = host_session_state(&client, &cfg, machine, NOW)
+                .await
+                .expect("state");
+            assert_eq!(state["wanted"], false, "{machine}");
+            assert!(
+                state["reason"].as_str().unwrap().contains(reason),
+                "{machine}: {state}"
+            );
+            let refused = register_host_session(
+                &client,
+                &cfg,
+                machine,
+                HostSessionPayload {
+                    origin: format!("http://{machine}.netbird.cloud:3773"),
+                    token: "t3-token".into(),
+                    expires_at: NOW + DAYS_30,
+                    ..HostSessionPayload::default()
+                },
+                NOW,
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.1.contains(reason), "{machine}: {refused:?}");
+        }
+        assert_eq!(
+            host_session_state(&client, &cfg, "david-mb", NOW)
+                .await
+                .unwrap(),
+            json!({"machine": "david-mb", "wanted": true, "access": "full-access",
+                   "paired": false, "expiresAt": 0})
+        );
+
+        let payload = |origin: &str, token: &str, expires_at: i64| HostSessionPayload {
+            origin: origin.into(),
+            token: token.into(),
+            access: String::new(),
+            expires_at,
+        };
+        let netbird = "http://david-mb.netbird.cloud:3773";
+        for (p, want) in [
+            (
+                payload("http://100.64.0.9:3773", "t3-token", NOW + DAYS_30),
+                "NetBird name",
+            ),
+            (payload(netbird, "t3-token", NOW), "unexpired session"),
+            (
+                payload(netbird, "wrong-token", NOW + DAYS_30),
+                "T3 refused this MCP session.",
+            ),
+            (
+                HostSessionPayload {
+                    access: "admin".into(),
+                    ..payload(netbird, "t3-token", NOW + DAYS_30)
+                },
+                "Access must be one of",
+            ),
+        ] {
+            let err = register_host_session(&client, &cfg, "david-mb", p, NOW)
+                .await
+                .unwrap_err();
+            assert!(err.1.contains(want), "{err:?}");
+        }
+        assert!(client.list_t3_sessions().await.unwrap().is_empty());
+
+        register_host_session(
+            &client,
+            &cfg,
+            "david-mb",
+            payload(netbird, "t3-token", NOW + DAYS_30),
+            NOW,
+        )
+        .await
+        .expect("registered");
+        let sessions = client.list_t3_sessions().await.unwrap();
+        assert_eq!(
+            sessions,
+            vec![T3SessionRow {
+                machine: "david-mb".into(),
+                // Where the workers reach it, as `prism pair` stores it.
+                origin: reach.clone(),
+                token: "t3-token".into(),
+                environment_id: "env-mb".into(),
+                label: "david-mb".into(),
+                access: "full-access".into(),
+                paired_at: NOW,
+                expires_at: NOW + DAYS_30,
+            }]
+        );
+        assert_eq!(
+            host_session_state(&client, &cfg, "david-mb", NOW)
+                .await
+                .unwrap(),
+            json!({"machine": "david-mb", "wanted": true, "access": "full-access",
+                   "paired": true, "expiresAt": NOW + DAYS_30})
+        );
+        // Expired, it is missing again.
+        let later = host_session_state(&client, &cfg, "david-mb", NOW + DAYS_30)
+            .await
+            .unwrap();
+        assert_eq!(
+            (later["paired"].clone(), later["expiresAt"].clone()),
+            (json!(false), json!(0))
+        );
+
+        // A renewal keeps the access the owner paired with by hand.
+        client
+            .upsert_t3_session(&T3SessionRow {
+                access: "read-only".into(),
+                expires_at: 0,
+                ..sessions[0].clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            host_session_state(&client, &cfg, "david-mb", NOW)
+                .await
+                .unwrap(),
+            json!({"machine": "david-mb", "wanted": true, "access": "read-only",
+                   "paired": true, "expiresAt": 0})
         );
     }
 }

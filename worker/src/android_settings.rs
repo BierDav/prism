@@ -2,12 +2,13 @@
 //! ported from the Go server's `android.go`.
 //!
 //! The publisher (`android/publish.py`) uploads each device's settings, the
-//! keys the app's managed configuration had; the device fetches its own with
-//! its `prism_` token. They live in the replicated `settings` table under
-//! `android.settings.<device>`; a change makes the leader push app.settings,
-//! which carries no values. Values are never logged.
+//! keys the app's managed configuration had; the device reads its own from
+//! its replica (`GET /v1/android/settings`, rocky-prism-ffi). They live in
+//! the replicated `settings` table under `android.settings.<device>`; a
+//! change makes the leader push app.settings, which carries no values.
+//! Values are never logged.
 
-use crate::admin::{authenticate_device, error, unavailable};
+use crate::admin::{error, unavailable};
 use crate::http::{AppState, require_machine_token};
 use axum::{
     Json,
@@ -171,26 +172,6 @@ pub async fn put_settings(
         Json(json!({ "device": req.device, "changed": changed })),
     )
         .into_response()
-}
-
-/// `GET /v1/android/settings` (device): the caller's own settings.
-pub async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let device = match authenticate_device(&state.client, &headers).await {
-        Ok(Some(d)) => d,
-        Ok(None) => {
-            return error(StatusCode::UNAUTHORIZED, "Sign in again.", "unauthorized");
-        }
-        Err(err) => return unavailable("authentication", err),
-    };
-    match stored(&state, &device).await {
-        Ok(Some(s)) => (StatusCode::OK, Json(s)).into_response(),
-        Ok(None) => error(
-            StatusCode::NOT_FOUND,
-            format!("No settings are published for {device}."),
-            "not_found",
-        ),
-        Err(err) => unavailable("android settings", err),
-    }
 }
 
 /// The app.settings pushes for settings changed in the last day: one per
