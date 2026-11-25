@@ -95,7 +95,13 @@ internal class EdgeGlow {
  * Gemini's scrim behind its input card (the Google app's halo drawable): the
  * screen darkens round the card, fully at its edge and 75 dp inside it, fading
  * out over 150 dp outside along a ten-step ease-out curve. Black, at up to
- * 24 % in dark mode and 14 % in light (Pixel 2026's values).
+ * 77 % in dark mode and 14 % in light.
+ *
+ * The Google app sets its strength at run time (cclg); the flags 35 and 61
+ * it carries for it are never read. The 77 % is fitted to the owner's
+ * screenshot of Gemini in the dark (two halos round its card darken the page
+ * to 30 % at the card's side); 24 % left Prism's halo a third as deep. Light
+ * mode keeps 14 %: there is no light screenshot to fit.
  */
 @RequiresApi(33)
 internal class HaloScrim {
@@ -115,7 +121,7 @@ internal class HaloScrim {
         shader.setFloatUniform("cornerRadius", cornerRadius)
         shader.setFloatUniform("blurRadius", 150f * density)
         shader.setFloatUniform("scrimColor", color.red, color.green, color.blue)
-        paint.alpha = (alpha.coerceIn(0f, 1f) * (if (dark) 61f else 35f)).toInt()
+        paint.alpha = (alpha.coerceIn(0f, 1f) * (if (dark) 196f else 35f)).toInt()
         canvas.drawRect(0f, 0f, width, height, paint)
     }
 }
