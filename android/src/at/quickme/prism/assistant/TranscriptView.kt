@@ -6,7 +6,8 @@
 // 16 dp padding, a header with the app's icon and name, a "x • y" subtitle,
 // the content, a borderless button): weather with the next hours, the call,
 // the message with its edit button, the alarm and timer, the setting with
-// its switch, and the T3 agent's live activity after a hand-off.
+// its switch (which the owner can flip: core/Toggles.kt), and the T3 agent's
+// live activity after a hand-off.
 
 package at.quickme.prism.assistant
 
@@ -107,6 +108,7 @@ import at.quickme.prism.assistant.core.SettingCard
 import at.quickme.prism.assistant.core.ThreadCard
 import at.quickme.prism.assistant.core.ThreadListCard
 import at.quickme.prism.assistant.core.TimerCard
+import at.quickme.prism.assistant.core.Toggles
 import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.Transcript
 import at.quickme.prism.assistant.core.Weather
@@ -133,7 +135,8 @@ class FollowedAgent(
 /**
  * The conversation in the overlay's card: [transcript] as it grows while
  * [running]; [agent] is what the newest hand-off's agent does now. [onEdit]
- * changes a sent message (entry, new text) and says why it couldn't.
+ * changes a sent message (entry, new text) and says why it couldn't;
+ * [onToggle] flips a card's switch (entry, new state), likewise.
  */
 @Composable
 fun AssistantTranscript(
@@ -145,6 +148,8 @@ fun AssistantTranscript(
     modifier: Modifier = Modifier,
     /** The time timers count from; the clock in the app, fixed in previews. */
     now: (() -> Long)? = null,
+    /** Without it, the cards' switches only show their state. */
+    onToggle: (suspend (String, Boolean) -> String?)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
@@ -186,7 +191,7 @@ fun AssistantTranscript(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 items(entries, key = { it.id }) { e ->
-                    TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now)
+                    TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now, onToggle)
                 }
                 if (thinking(transcript, running)) {
                     item(key = "thinking") { Thinking() }
@@ -201,13 +206,22 @@ fun AssistantTranscript(
  * [agent] for the hand-off whose agent is followed.
  */
 @Composable
-fun TranscriptEntry(e: Entry, agent: FollowedAgent?, onEdit: suspend (String, String) -> String?, now: (() -> Long)? = null) {
+fun TranscriptEntry(
+    e: Entry,
+    agent: FollowedAgent?,
+    onEdit: suspend (String, String) -> String?,
+    now: (() -> Long)? = null,
+    onToggle: (suspend (String, Boolean) -> String?)? = null,
+) {
     when (e) {
         is Entry.User -> UserLine(e)
         is Entry.Answer -> MarkdownText(e.text)
         is Entry.Step -> StepLine(e)
         is Entry.Problem -> ProblemLine(e.text)
-        is Entry.Shown -> ToolCard(e.card, agent = agent, onEdit = { text -> onEdit(e.id, text) }, now = now)
+        is Entry.Shown -> ToolCard(
+            e.card, agent = agent, onEdit = { text -> onEdit(e.id, text) }, now = now,
+            onToggle = onToggle?.let { toggle -> { on: Boolean -> toggle(e.id, on) } },
+        )
     }
 }
 
@@ -328,9 +342,15 @@ private fun spans(spans: List<Markdown.Span>, link: Color, codeBackground: Color
 
 // --- Cards ---
 
-/** A tool's result, as Gemini's action card for it. */
+/** A tool's result, as Gemini's action card for it; [onToggle] flips its switch, if it has one. */
 @Composable
-fun ToolCard(card: Card, agent: FollowedAgent? = null, onEdit: suspend (String) -> String? = { null }, now: (() -> Long)? = null) {
+fun ToolCard(
+    card: Card,
+    agent: FollowedAgent? = null,
+    onEdit: suspend (String) -> String? = { null },
+    now: (() -> Long)? = null,
+    onToggle: (suspend (Boolean) -> String?)? = null,
+) {
     // The live agent only in its own card: a failed or other hand-off keeps its own text.
     if (card is HandoffCard && agent != null && card.failed.isEmpty() && agent.agentId == card.agentId) {
         AgentConversation(
@@ -386,15 +406,7 @@ fun ToolCard(card: Card, agent: FollowedAgent? = null, onEdit: suspend (String) 
             }
         }
         is TimerCard -> TimerView(card, now)
-        is SettingCard -> ActionCard(settingIcon(card.kind), if (card.kind in setOf("app", "link", "navigation")) settingHeader(card.kind) else "Settings • ${card.title}", null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(card.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (card.subtitle.isNotEmpty()) Text(card.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                }
-                card.on?.let { Switch(checked = it, onCheckedChange = null) }
-            }
-        }
+        is SettingCard -> SettingView(card, onToggle?.takeIf { Toggles.switchable(card) })
         is ContactsCard -> ActionCard(Icons.Rounded.Person, "Contacts", null) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 card.contacts.take(6).forEach { c ->
@@ -572,6 +584,48 @@ private fun MessageView(card: MessageCard, onEdit: suspend (String) -> String?) 
                 Text(
                     "An SMS can't be changed once sent. Ask Prism to send a correction.",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                )
+            }
+        }
+        error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+    }
+}
+
+/**
+ * A setting, as Gemini's "Settings • Flashlight" card: its state, and the
+ * switch the owner flips to change it back (or again) when [onToggle] is
+ * given. The switch moves at once and waits for the phone; the card then
+ * shows what the tool reports, or why it couldn't.
+ */
+@Composable
+private fun SettingView(card: SettingCard, onToggle: (suspend (Boolean) -> String?)?) {
+    val colors = MaterialTheme.colorScheme
+    var switching by remember(card) { mutableStateOf<Boolean?>(null) }
+    var error by remember(card) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    ActionCard(settingIcon(card.kind), if (card.kind in setOf("app", "link", "navigation")) settingHeader(card.kind) else "Settings • ${card.title}", null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(card.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (card.subtitle.isNotEmpty()) Text(card.subtitle, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (switching != null) LoadingIndicator(Modifier.padding(end = 8.dp).size(20.dp))
+            card.on?.let { on ->
+                Switch(
+                    checked = switching ?: on,
+                    onCheckedChange = onToggle?.let { toggle ->
+                        { wanted: Boolean ->
+                            switching = wanted
+                            error = null
+                            scope.launch {
+                                // On success the transcript's card changes, and with it this view's state.
+                                error = toggle(wanted)
+                                switching = null
+                            }
+                        }
+                    },
+                    enabled = onToggle == null || switching == null,
+                    modifier = Modifier.semantics { contentDescription = "${card.title} ${if (switching ?: on) "on" else "off"}" },
                 )
             }
         }

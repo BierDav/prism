@@ -1,20 +1,25 @@
 // The assistant's pure logic on a plain JVM (src/at/quickme/prism/assistant/core):
 // tool arguments, phone numbers and clock times, the weather decoding, the
 // Matrix events and their decoding, the transcript as the harness reports
-// its progress, and the Markdown the transcript shows.
+// its progress, a card's switch flipped by hand and what the model hears of
+// it, and the Markdown the transcript shows.
 //
 //   java -cp <classes>:kotlin-stdlib.jar:kotlinx-serialization-*.jar AssistantTestKt
 
 import at.quickme.prism.assistant.core.Args
 import at.quickme.prism.assistant.core.Card
 import at.quickme.prism.assistant.core.ClockTime
+import at.quickme.prism.assistant.core.Conversations
 import at.quickme.prism.assistant.core.Entry
 import at.quickme.prism.assistant.core.Event
+import at.quickme.prism.assistant.core.HandNotes
 import at.quickme.prism.assistant.core.HandoffCard
 import at.quickme.prism.assistant.core.Markdown
 import at.quickme.prism.assistant.core.Matrix
 import at.quickme.prism.assistant.core.MessageCard
 import at.quickme.prism.assistant.core.PhoneNumbers
+import at.quickme.prism.assistant.core.SettingCard
+import at.quickme.prism.assistant.core.Toggles
 import at.quickme.prism.assistant.core.ToolArgumentException
 import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.Transcript
@@ -175,6 +180,48 @@ fun main() {
     check(back == t, "the transcript survives JSON (the resume window)")
     check(Json.decodeFromString(Card.serializer(), Json.encodeToString(Card.serializer(), w)) is WeatherCard, "cards are polymorphic")
 
+    // --- A card's switch flipped by hand (Toggles, HandNotes) ---
+    val dndOn = SettingCard("dnd", "Do Not Disturb", "On", true)
+    val torchOn = SettingCard("flashlight", "Flashlight", "On", true)
+    check(Toggles.call(dndOn, false) == (Tools.DND to buildBool("on", false)), "Do Not Disturb's switch runs do_not_disturb with on=false")
+    check(Toggles.call(torchOn, false)?.let { (tool, a) -> tool == Tools.FLASHLIGHT && !Args(a).boolean("on") } == true, "the flashlight's runs flashlight, as the tool reads it")
+    check(Toggles.call(SettingCard("media", "Media", "Paused", false), true)?.let { (tool, a) -> tool == Tools.MEDIA && Args(a).string("action") == "play" } == true, "media's plays")
+    val volume = SettingCard("volume", "Ring volume", "40%", true)
+    check(Toggles.stream(volume) == "ring", "a volume card's stream from its title")
+    check(
+        Toggles.call(volume, false)?.let { (tool, a) -> tool == Tools.VOLUME && Args(a).choice("stream", listOf("media", "ring", "notification", "alarm", "call")) == "ring" && Args(a).choice("change", listOf("up", "down", "mute", "unmute")) == "mute" } == true,
+        "a volume's switch mutes, as set_volume reads it",
+    )
+    check(Toggles.call(volume.copy(on = false), true)?.second?.let { Args(it).string("change") } == "unmute", "and unmutes")
+    check(Toggles.call(SettingCard("app", "Maps", "Opened"), true) == null, "an opened app has no switch")
+    check(Toggles.call(SettingCard("volume", "Odd volume", "3%", true), false) == null, "nor a volume card it can't name")
+    check(Toggles.switchable(dndOn) && !Toggles.switchable(SettingCard("link", "example.org", "https://example.org")) && !Toggles.switchable(w), "which cards are switchable")
+    var toggled = listOf(
+        Event.Said("do not disturb please"),
+        Event.ToolStarted("d1", Tools.DND, "Switching Do Not Disturb"),
+        Event.ToolFinished("d1", Tools.DND, "Do Not Disturb is on.", card = dndOn),
+        Event.Answer("Do Not Disturb is on."),
+    ).fold(Transcript()) { acc, e -> acc.after(e) }
+    // What AssistantSession.toggle does with what the tool reports.
+    val dndOff = SettingCard("dnd", "Do Not Disturb", "Off", false)
+    toggled = toggled.withCard("tool:d1", dndOff)
+    check(((toggled.entries.first { it.id == "tool:d1" } as Entry.Shown).card as SettingCard).on == false, "the card shows the new state")
+    check(toggled.entries.size == 3 && toggled.entries.last() is Entry.Answer, "and stays where it was")
+    val kept = Json.decodeFromString(Transcript.serializer(), Json.encodeToString(Transcript.serializer(), toggled))
+    check(((kept.entries.first { it.id == "tool:d1" } as Entry.Shown).card as SettingCard).on == false, "the new state survives the resume window")
+    val stored = Conversations.transcript(Conversations.entryRows(toggled))
+    check(((stored.entries.first { it.id == "tool:d1" } as Entry.Shown).card as SettingCard).let { it.on == false && it.subtitle == "Off" }, "and the stored conversation (its rows)")
+    val said = Toggles.note(dndOn, dndOff, "Do Not Disturb is off.")
+    check(said == "The owner switched Do Not Disturb off by hand on its card (it was on); the phone says: \"Do Not Disturb is off.\".", "the note says what changed: $said")
+    val notes = HandNotes()
+    check(notes.isEmpty && HandNotes.framed(notes.take()) == null, "no notes, nothing for the model")
+    notes.add("The owner edited the Matrix message to Anna by hand.")
+    notes.add(said)
+    val next = notes.take()
+    check(next.startsWith("The owner edited") && next.endsWith("is off.\".") && notes.isEmpty, "the next turn takes every note, in order, once")
+    check(HandNotes.framed(next) == "[Since the last turn: $next]", "the model reads them ahead of the owner's words")
+    check(HandNotes.framed(notes.take()) == null, "and the turn after hears nothing again")
+
     // --- Markdown ---
     val md = Markdown.parse("# Title\nSome **bold** and *it* and `x_y` here.\n\n- one\n  - two\n3. three\n```\ncode *raw*\n```\nsnake_case_name stays")
     check(md[0] == Markdown.Block.Heading(1, listOf(Markdown.Span("Title"))), "a heading")
@@ -194,6 +241,8 @@ fun main() {
     println(if (failed == 0) "all passed" else "$failed failed")
     exitProcess(if (failed == 0) 0 else 1)
 }
+
+private fun buildBool(name: String, value: Boolean) = JsonObject(mapOf(name to JsonPrimitive(value)))
 
 private fun buildArgs(vararg pairs: Pair<String, String>) =
     JsonObject(pairs.associate { (k, v) -> k to JsonPrimitive(v) })

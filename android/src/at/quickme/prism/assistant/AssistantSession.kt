@@ -24,9 +24,13 @@ import at.quickme.prism.Settings
 import at.quickme.prism.assistant.core.Conversations
 import at.quickme.prism.assistant.core.Entry
 import at.quickme.prism.assistant.core.Event
+import at.quickme.prism.assistant.core.HandNotes
 import at.quickme.prism.assistant.core.HandoffCard
 import at.quickme.prism.assistant.core.MessageCard
+import at.quickme.prism.assistant.core.SettingCard
 import at.quickme.prism.assistant.core.SystemPrompt
+import at.quickme.prism.assistant.core.Toggles
+import at.quickme.prism.assistant.core.Args
 import at.quickme.prism.assistant.core.Transcript
 import ai.koog.prompt.message.Message
 import android.util.Log
@@ -77,7 +81,8 @@ class AssistantSession(
     private var revision = 0L
 
     private var history: List<Message> = if (resume) memory.history() else emptyList()
-    private var notes = ArrayList<String>()
+    /** What the owner did by hand on the cards since the last turn, for the next one. */
+    private val notes = HandNotes()
     private var storing: Job? = null
     private var turn: Job? = null
 
@@ -127,8 +132,7 @@ class AssistantSession(
         // The conversation this turn belongs to: once it is deleted
         // ([dropDeleted]), nothing of the turn reaches the next one.
         val mine = conversationId
-        val note = notes.joinToString(" ")
-        notes.clear()
+        val note = notes.take()
         val harness = harness()
         try {
             val result = harness.run(
@@ -201,6 +205,37 @@ class AssistantSession(
             throw e
         } catch (e: Exception) {
             problem(e)
+        }
+    }
+
+    /**
+     * The owner flipped the switch of entry [entryId]'s card to [on]: the
+     * tool that made the card runs again with the arguments for that state
+     * (Toggles.call), the card shows what it reports and is kept with the
+     * conversation, and the model hears of it in the next turn. Returns why
+     * it failed, or null.
+     */
+    suspend fun toggle(entryId: String, on: Boolean): String? {
+        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? SettingCard
+            ?: return "That card is gone."
+        if (card.on == on) return null
+        val (name, args) = Toggles.call(card, on) ?: return "This switch can't be changed from here."
+        val tool = phoneTools(context, capture).firstOrNull { it.name == name } ?: return "This switch can't be changed from here."
+        val mine = conversationId
+        return try {
+            val output = tool.run(Args(args))
+            val now = (output.card as? SettingCard) ?: card.copy(on = on)
+            // The conversation may have changed meanwhile (a new chat, another opened).
+            if (conversationId != mine) return null
+            transcript = transcript.withCard(entryId, now)
+            notes.add(Toggles.note(card, now, output.text))
+            save()
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "switch on a card failed (${e.javaClass.simpleName})")
+            e.message?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }?.take(200) ?: "That didn't work."
         }
     }
 

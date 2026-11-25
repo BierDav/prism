@@ -238,6 +238,7 @@ private fun HistoryScreen(onClose: () -> Unit) {
                 }
             },
             onEdit = { entry, edited -> shown?.edit(entry, edited) },
+            onToggle = { entry, on -> shown?.toggle(entry, on) },
             onNew = { openConversation(null) },
             onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
                 delete(shown.conversationId)
@@ -380,6 +381,8 @@ internal fun HistoryChat(
     onBack: () -> Unit,
     /** The clock timers count from; fixed in previews. */
     now: (() -> Long)? = null,
+    /** Flips a card's switch (entry, new state); without it the switches only show their state. */
+    onToggle: (suspend (String, Boolean) -> String?)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
@@ -446,7 +449,7 @@ internal fun HistoryChat(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(entries, key = { it.id }) { e -> TranscriptEntry(e, null, onEdit, now) }
+                items(entries, key = { it.id }) { e -> TranscriptEntry(e, null, onEdit, now, onToggle) }
                 if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
             }
         }
