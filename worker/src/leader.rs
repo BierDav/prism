@@ -228,8 +228,14 @@ impl LeaderWork {
         {
             eprintln!("prism-worker: machine/project refresh failed: {err}");
         }
-        if let Err(err) =
-            crate::agents::expiry_reminders(&self.client, &self.pusher, &self.secrets, now).await
+        if let Err(err) = crate::agents::expiry_reminders(
+            &self.client,
+            &self.cfg,
+            &self.pusher,
+            &self.secrets,
+            now,
+        )
+        .await
         {
             eprintln!("prism-worker: expiry reminders failed: {err}");
         }

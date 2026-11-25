@@ -352,7 +352,7 @@ T3 acknowledges a move in its next request with
 
 ## The phone's API
 
-With the device token, as the rest of `/v1`.
+From the device's replica, as the rest of `/v1`.
 
 `GET /v1/placement` returns:
 
