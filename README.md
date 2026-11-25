@@ -121,8 +121,12 @@ its words and steps, from its T3 thread (`AssistConversation.kt`,
 thread (`POST /v1/agents/{id}/messages`); + starts a new request. The
 assistant's conversations are kept in Prism's replica (`assistant_*`
 tables, so on every device and across reinstalls); "New chat" starts another
-and keeps the last, and the Chats screen (`assistant/AssistHistory.kt`) lists
-them newest first, opens one, continues it and deletes it. The Phone tab's Profiles page configures placement
+and keeps the last. The answer panel above the card is Gemini's (its controls
+above it, its bubbles and fading edges). Dragging the card up grows it with
+the finger and, past a threshold, into the conversation full screen in the
+same window (a shared transition; Back shrinks it into the card again), and
+from there the Chats screen (`assistant/AssistHistory.kt`) lists the
+conversations newest first, opens one, continues it and deletes it. The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in
