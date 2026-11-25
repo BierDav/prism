@@ -39,14 +39,14 @@ It runs the call bridge as the shell user instead, which holds
   carries the call's audio both ways, over Bluetooth when it can (below).
   When the call ends it exits.
 - **Mac** (`macos/PhoneCalls.swift`, `macos/CallPanel.swift`): Prism for
-  macOS scans for the phone's Bluetooth advertisement and listens on TCP
-  port 47470, shows the panel, and plays
+  macOS advertises an L2CAP channel for the phone over Bluetooth and
+  listens on TCP port 47470, shows the panel, and plays
   and records the call through the Mac's speakers and microphone with
   macOS's voice processing (echo cancellation).
 
 If the connection to the Mac breaks, the call's audio goes back to the
-phone. Nothing connects while there's no call: the phone neither advertises
-nor connects, and its NetBird peer stays idle.
+phone. Nothing connects while there's no call: the phone neither scans nor
+connects, and its NetBird peer stays idle.
 
 ## Setup
 
@@ -71,31 +71,42 @@ it has, and moves the call to a better one when it comes up:
    same time, the phone's hotspot clients and its Wi-Fi and hotspot
    neighbours, directly. The first to pass the handshake wins.
 
-The bridge advertises for Bluetooth and tries TCP at once; while a Bluetooth
-link is up it makes no TCP attempts. A Bluetooth link that passes the
-handshake replaces a TCP one (the Mac keeps the newest authenticated
-connection). If the Bluetooth link breaks, the phone advertises again and
-goes back to TCP. Audio moves with the link; the call stays where it is.
+The bridge scans for the Mac over Bluetooth and tries TCP at once; while a
+Bluetooth link is up it makes no TCP attempts. A Bluetooth link that passes
+the handshake replaces a TCP one (the Mac keeps the newest authenticated
+connection). If the Bluetooth link breaks, the phone scans again and goes
+back to TCP. Audio moves with the link; the call stays where it is.
 
 ### Bluetooth
 
-While the call lasts and no Bluetooth link is up, the phone listens on an
-LE L2CAP channel (`listenUsingInsecureL2capChannel`, a PSM Android
-assigns) and advertises it: a legacy, connectable advertisement without a
-name, with
+The Mac advertises and the phone, during a call, scans and connects: Prism
+for macOS gets no LE scan results from macOS (it delivers them to Apple's own
+clients only), while a Mac's advertisement is what the hotspot already relies
+on (docs/hotspot.md).
 
-- one 128-bit service UUID, made like the hotspot's (docs/hotspot.md) but
-  with the call key `K` (below; the bridge never sees `hotspot_key`) and
-  the label `"prism-call-ble/v1"`: bytes 0..3 `51 52 28 f6`, bytes 4..15
-  `HMAC-SHA256(K, "prism-call-ble/v1" ‖ u64be(window))[0..12]`,
-  `window = floor(unix seconds / 30)`, new at every window;
-- manufacturer data, company `0xffff`: the PSM, u16 little-endian.
+While calls are set up and Bluetooth is on, the Mac publishes an LE L2CAP
+channel without Bluetooth encryption (`publishL2CAPChannel(withEncryption:
+false)`, a PSM macOS assigns) and advertises it as one 128-bit service UUID
+(macOS advertises nothing but service UUIDs and a name), new at every window:
 
-The Mac scans for the UUIDs of the windows `w-1 .. w+1` around its clock,
-connects to the phone, opens the L2CAP channel to the PSM, and from there
-it's the same connection as over TCP: hello, auth, then encrypted frames.
-The channel is not encrypted by Bluetooth (no pairing): the link's own
-encryption below covers it, as it does TCP.
+```
+bytes 0..3   51 52 28 f7                the call's prefix (the scan filter's mask)
+bytes 4..5   the PSM, u16 big-endian
+bytes 6..15  HMAC-SHA256(K, "prism-call-ble/v1" || u64be(window) || u16be(PSM))[0..10]
+window       floor(unix seconds / 30)
+```
+
+`K` is the call key (below): the bridge never sees `hotspot_key`. The prefix
+differs from the hotspot's (`51 52 28 f6`), so the phone's hotspot scan
+doesn't wake for it.
+
+During the call, while it has no Bluetooth link, the phone scans with a
+filter on the prefix, takes an advertisement whose tag checks out for one of
+the windows `w-2 .. w+1` around its clock, and opens an L2CAP channel to that
+device's PSM (`createInsecureL2capChannel`). From there it's the same
+connection as over TCP: the Mac sends hello when the channel opens, then
+auth, then encrypted frames. The channel itself is not encrypted (no
+pairing): the link's own encryption below covers it, as it does TCP.
 
 ### Frames
 
@@ -152,7 +163,7 @@ self-test`): with `hotspot_key` 00..1f, `nm` = 16 × 0xa1 and
 - Mac → phone key = `e217c291c386519a354b1495f052bfa3ee077d449a732034e729b15ed389e0a1`
 - Mac → phone frame 0, type 3, `{"type":"answer"}`: `1460883d130b6181c25fdaf6e9590c9ab3944501a65af93501ef0fa7e62e2e8b85`
 - phone → Mac frame 1, the same: `82c2303e6af04e6dbef747805e1be4ecdecd0470cdb1f26aac9213a56f64603c11`
-- the Bluetooth service UUID of window 59999999: `515228f6-c9ae-4dcc-2ab1-bb010abf3a07`
+- the Bluetooth service UUID of window 59999999 for PSM 0x0080: `515228f7-0080-8c3b-e48f-5aa7d078035d`
 
 ADPCM: the samples `round(8000 · sin(2π · 440 · i / 16000))`, `i` = 0..639,
 encoded from predictor 0, index 0 as two frames:
