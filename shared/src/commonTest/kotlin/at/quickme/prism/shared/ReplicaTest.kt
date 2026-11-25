@@ -77,6 +77,47 @@ suspend fun replicaTests(directory: String) {
     check(invalid?.status == 400) { "an unknown task was accepted" }
     check(PrismReplica.peers("wss://a\n wss://b ,\n") == listOf("wss://a", "wss://b")) { "peers" }
 
+    // The assistant's conversations: stored, read back, listed, deleted.
+    val stored = api.saveAssistantConversation(
+        "c-1", 0, "s-1", "Weather?", 100, 200,
+        listOf(StoredEntry("e0", """{"type":"user","text":"Weather?"}"""), StoredEntry("tool:1", "{}")),
+        listOf("""{"m":1}""", """{"m":2}"""),
+    )
+    check(stored == 1L) { "stored: $stored" }
+    // Its answer lost, the identical save again: the same answer.
+    val retried = api.saveAssistantConversation(
+        "c-1", 0, "s-1", "Weather?", 100, 200,
+        listOf(StoredEntry("e0", """{"type":"user","text":"Weather?"}"""), StoredEntry("tool:1", "{}")),
+        listOf("""{"m":1}""", """{"m":2}"""),
+    )
+    check(retried == 1L) { "the retry of a committed save: $retried" }
+    val stale = try {
+        api.saveAssistantConversation("c-1", 0, "s-other", "x", 1, 1, emptyList(), emptyList())
+        null
+    } catch (e: PrismError) {
+        e
+    }
+    check(stale?.status == 409) { "a save on an old revision: ${stale?.status}" }
+    val read = api.assistantConversation("c-1")
+    check(read.conversation == AssistantConversation("c-1", "david-pixel", "Weather?", 100, 200, 1)) { "read: ${read.conversation}" }
+    check(read.entries.map { it.id } == listOf("e0", "tool:1") && read.history == listOf("""{"m":1}""", """{"m":2}""")) { "read: $read" }
+    check(api.assistantConversations().map { it.id } == listOf("c-1")) { "conversation list" }
+    api.deleteAssistantConversation("c-1")
+    val gone = try {
+        api.assistantConversation("c-1")
+        null
+    } catch (e: PrismError) {
+        e
+    }
+    check(gone?.status == 404) { "a deleted conversation still read: ${gone?.status}" }
+    val savedAgain = try {
+        api.saveAssistantConversation("c-1", 1, "s-back", "back", 1, 1, emptyList(), emptyList())
+        null
+    } catch (e: PrismError) {
+        e
+    }
+    check(savedAgain?.status == 410 && savedAgain.code == "gone") { "a deleted conversation saved again: ${savedAgain?.status}" }
+
     replica.close()
     val closed = try {
         replica.placement()

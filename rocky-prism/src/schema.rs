@@ -1,8 +1,14 @@
 use crate::types::PrismError;
 use rocky_sdk::{Affinity, Column, Schema, Table};
 
+/// The schema's version. Version 2 added the assistant's tables, nothing
+/// else: an additive change, which the first issuer opening with it publishes
+/// as a `continue` seal and every other replica follows (docs/worker.md,
+/// "Schema changes").
+pub const SCHEMA_VERSION: u32 = 2;
+
 pub fn prism_schema() -> Result<Schema, PrismError> {
-    Schema::builder("prism", 1)
+    Schema::builder("prism", SCHEMA_VERSION)
         .table(
             Table::replayed("profiles")
                 .column(Column::new("slug", Affinity::Text).required())
@@ -454,6 +460,71 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                         .required()
                         .default(""),
                 ),
+        )
+        .table(
+            // The phone assistant's conversations (rocky-prism/src/assistant.rs):
+            // one row per conversation, naming its committed revision, how
+            // many entries it has and which messages (`history_from` up to
+            // `history_to`); `deleted` makes it a tombstone that refuses saves.
+            Table::replayed("assistant_conversations")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("device", Affinity::Text).required())
+                .column(Column::new("title", Affinity::Text).required().default(""))
+                .column(Column::new("created_at", Affinity::Integer).required())
+                .column(Column::new("updated_at", Affinity::Integer).required())
+                .column(
+                    Column::new("revision", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("entry_count", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("history_from", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                .column(
+                    Column::new("history_to", Affinity::Integer)
+                        .required()
+                        .default(0),
+                )
+                // The app's ID of the save that committed `revision`: its retry
+                // is answered as the first time.
+                .column(
+                    Column::new("save_id", Affinity::Text)
+                        .required()
+                        .default(""),
+                )
+                .column(
+                    Column::new("deleted", Affinity::Integer)
+                        .required()
+                        .default(false),
+                ),
+        )
+        .table(
+            // What a conversation shows, one row per transcript entry (the
+            // owner's words, an answer, a tool's line or card) as the app's
+            // JSON, by `position`, written under `revision`. Never image or
+            // file bytes.
+            Table::replayed("assistant_entries")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("position", Affinity::Integer).required())
+                .column(Column::new("revision", Affinity::Integer).required())
+                .column(Column::new("entry_id", Affinity::Text).required())
+                .column(Column::new("body", Affinity::Text).required()),
+        )
+        .table(
+            // The model's history that continues a conversation, one row per
+            // message as the app's JSON, by `seq`, written under `revision`.
+            Table::replayed("assistant_history")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("seq", Affinity::Integer).required())
+                .column(Column::new("revision", Affinity::Integer).required())
+                .column(Column::new("body", Affinity::Text).required()),
         )
         .build()
         .map_err(|err| PrismError::Storage(err.to_string()))

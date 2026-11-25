@@ -228,7 +228,8 @@ let
       javaSources=$(find src build/gen -name '*.java')
       # The app's sources with shared/'s (commonMain, jvmMain) in one module.
       ${shared.kotlincArgs.jvm} build/kotlin.args $(find src -name '*.kt') $javaSources
-      kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
+      # The app and shared/ are one module: more than kotlinc's default 512 MB heap.
+      JAVA_OPTS="-Xmx3g -Xms256m" kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
         -Xplugin=${kotlin}/lib/compose-compiler-plugin.jar \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3Api \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi \
@@ -598,6 +599,8 @@ in
         run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar:${serializationJars} "$@"; }
         run CoreTestKt
         run AssistantTestKt
+        run ConversationsTestKt
+        run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
         run MetricsTestKt remote-write.bin

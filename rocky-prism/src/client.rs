@@ -79,6 +79,8 @@ pub struct PrismClient {
     /// write grows Rocky's history, and each worker sees enough syncs to keep
     /// its own over `PLACEMENT_BURN_WINDOW_SECS`.
     samples: std::sync::Mutex<BTreeMap<String, Vec<PlacementSample>>>,
+    /// Serialises this process's writes of assistant conversations.
+    pub(crate) assistant_lock: tokio::sync::Mutex<()>,
 }
 
 impl PrismClient {
@@ -153,6 +155,7 @@ impl PrismClient {
             alerts_lock: tokio::sync::Mutex::new(()),
             events_lock: tokio::sync::Mutex::new(()),
             samples: std::sync::Mutex::default(),
+            assistant_lock: tokio::sync::Mutex::new(()),
         })
     }
 
