@@ -115,6 +115,11 @@ pub struct Config {
     pub telemetry_url: String,
     #[serde(default)]
     pub telemetry_user: String,
+    /// ClickHouse's HTTP interface, where the workers write their placement
+    /// decisions (`observability.placement_decisions`, `placement_log.rs`),
+    /// with the telemetry credential. Empty turns the log off.
+    #[serde(default)]
+    pub placement_log_url: String,
     #[serde(default)]
     pub text_generation: TextGenerationConfig,
     #[serde(default)]

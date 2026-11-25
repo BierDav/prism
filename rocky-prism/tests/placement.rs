@@ -672,6 +672,25 @@ fn test_pace_interrupts_before_a_limit_runs_out() {
 }
 
 #[test]
+fn test_a_monthly_quota_is_not_full_while_used() {
+    // gh, make and jetbrains report a monthly quota as their session window.
+    // One thread at 0.5% per hour stays far from the switch point for weeks;
+    // predicting to the reset 28 days away would call the entry full.
+    let load = PlacementLoad {
+        running: 1,
+        burn_per_thread_per_hour: Some(0.5),
+    };
+    let dec = paced_state((10.0, 28 * 24 * 60), (0.0, 72 * 60), 10.0, load);
+    assert_eq!(dec.state, "ok", "{}", dec.reason);
+    assert!(
+        dec.predicted_session_percent
+            .is_some_and(|p| (p - 15.0).abs() < 1e-9),
+        "{:?}",
+        dec.predicted_session_percent
+    );
+}
+
+#[test]
 fn test_weekly_to_spend_runs_into_the_limit() {
     // Half the weekly allowance is left four hours before its reset: it cannot all
     // be spent, so the thread keeps going past the switch point until the limit.

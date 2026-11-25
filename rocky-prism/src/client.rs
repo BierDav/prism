@@ -13,8 +13,12 @@ use crate::types::{
     PlacementPolicy, PlacementProfileRow, PlacementProfileView, PlacementSample,
     PlacementSelection, PlacementSyncActions, PlacementSyncEntryResp, PlacementSyncModel,
     PlacementSyncMoveResp, PlacementSyncProfileResp, PlacementSyncRequest, PlacementSyncResponse,
-    PlacementSyncThread, PlacementView, PrismError, PutPlacementEntryInput,
+    PlacementSyncThread, PlacementView, PlacementWindow, PrismError, PutPlacementEntryInput,
     PutPlacementProfileRequest, SetPlacementActionsRequest,
+};
+use crate::weekly::{
+    WeeklyActivation, WeeklyActivationState, WeeklyActivationStep, account_of,
+    weekly_activation_step,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use rocky_sdk::{Configuration, Database, Network, SqlFailure, SqlValue, params};
@@ -42,6 +46,10 @@ const ACTION_TEXT_GENERATION: &str = "text-generation";
 const POLICY_SWITCH_AT: &str = "switch_at_percent";
 const POLICY_WEEKLY_SLACK: &str = "weekly_slack_sessions";
 const POLICY_ACTIVE_HOURS: &str = "active_hours";
+const POLICY_WEEKLY_MOVE_SLACK: &str = "weekly_move_slack_sessions";
+/// Per account, what [`PrismClient::due_weekly_activations`] keeps
+/// (`crate::weekly::WeeklyActivationState`), as `weekly_activation:<account>`.
+const POLICY_WEEKLY_ACTIVATION: &str = "weekly_activation:";
 
 /// How much synced history a replica keeps before it refuses writes and
 /// incoming frames ("storage queue is full"). Rocky prunes history only after
@@ -229,9 +237,14 @@ impl PrismClient {
         // replica refuses reads and new rows while it applies synced changes
         // (`Incomplete`). So an unchanged report rewrites nothing, and only
         // refreshes `seen_at` in place once it is HOST_SEEN_REFRESH_SECS old.
+        // Only running threads are stored: they are all the fleet-wide load
+        // counts, and a host keeps every idle profile thread it ever ran
+        // (hundreds), which would rewrite them all on every start and stop
+        // and outgrow a Rocky transaction. Moves use the request's threads.
         let threads: Vec<StoredThread> = req
             .threads
             .iter()
+            .filter(|t| t.running)
             .map(|t| {
                 Ok(StoredThread {
                     thread_id: t.thread_id.clone(),
@@ -479,6 +492,7 @@ impl PrismClient {
         let text_gen = self.text_generation_profile().await?;
 
         let mut decisions_by_id = BTreeMap::new();
+        let mut inputs_by_id: BTreeMap<String, Vec<PlacementEntryInput>> = BTreeMap::new();
         let mut resp_profiles = Vec::with_capacity(profiles.len());
         for p in &profiles {
             let mut inputs = Vec::with_capacity(p.entries.len());
@@ -514,7 +528,30 @@ impl PrismClient {
                 ranked: dec.ranked.clone(),
             });
             decisions_by_id.insert(p.id.clone(), dec);
+            inputs_by_id.insert(p.id.clone(), inputs);
         }
+        // Ranks the profiles again once this sync moved running threads, so
+        // that a host evacuating one account doesn't pile every thread onto the
+        // same entry: each moved thread counts where it goes.
+        let rerank = |loads: &BTreeMap<String, PlacementLoad>| {
+            profiles
+                .iter()
+                .filter_map(|p| {
+                    let inputs = inputs_by_id.get(&p.id)?;
+                    let dec = rank_placement_profile(
+                        &p.id,
+                        &p.label,
+                        inputs,
+                        &policy,
+                        &host_models,
+                        loads,
+                        now_time,
+                        vienna_tz(),
+                    );
+                    Some((p.id.clone(), dec))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
 
         // 6. Compute moves for this host's reported threads.
         let cooldown_since = now_unix - PLACEMENT_MOVE_COOLDOWN_SECS;
@@ -629,6 +666,13 @@ impl PrismClient {
             else {
                 continue;
             };
+            if t.running && t.selection.model != target.to.model {
+                if let Some(from) = loads.get_mut(&t.selection.model) {
+                    from.running = (from.running - 1).max(0);
+                }
+                loads.entry(target.to.model.clone()).or_default().running += 1;
+                decisions_by_id = rerank(&loads);
+            }
             let move_id = format!("{machine}:{}:{}:{now_unix}", t.thread_id, target.to.model);
             let move_row = PlacementMoveRow {
                 id: move_id.clone(),
@@ -1385,7 +1429,12 @@ impl PrismClient {
         }
 
         let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for key in [POLICY_SWITCH_AT, POLICY_WEEKLY_SLACK, POLICY_ACTIVE_HOURS] {
+        for key in [
+            POLICY_SWITCH_AT,
+            POLICY_WEEKLY_SLACK,
+            POLICY_WEEKLY_MOVE_SLACK,
+            POLICY_ACTIVE_HOURS,
+        ] {
             tx.execute("DELETE FROM policy WHERE key = ?", params![key])
                 .await
                 .map_err(storage_err)?;
@@ -1408,6 +1457,15 @@ impl PrismClient {
         )
         .await
         .map_err(storage_err)?;
+        if let Some(slack) = policy.weekly_move_slack_sessions {
+            let pid = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
+            tx.execute(
+                "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                params![pid, POLICY_WEEKLY_MOVE_SLACK, slack.to_string()],
+            )
+            .await
+            .map_err(storage_err)?;
+        }
         if let Some(ah) = &policy.active_hours {
             let ah_json = serde_json::to_string(ah).map_err(storage_err)?;
             let pid3 = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
@@ -1434,6 +1492,127 @@ impl PrismClient {
         }
         tx.commit().await.map_err(storage_err)?;
         Ok(())
+    }
+
+    /// The profile accounts whose weekly window ended and has not started
+    /// again, for the leader to send each a very small prompt (`crate::weekly`).
+    /// An account counts when an enabled profile entry names it and a fresh
+    /// host report carries a weekly reading for it. Stores each running
+    /// window's reset the first time it shows, and counts a prompt as sent
+    /// when it returns the account, so a lost or failed prompt is tried again
+    /// only after `WEEKLY_ACTIVATION_RETRY_SECS`.
+    pub async fn due_weekly_activations(
+        &self,
+        now_unix: i64,
+    ) -> Result<Vec<WeeklyActivation>, PrismError> {
+        let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
+        // Each account with the models its enabled entries name, in profile order.
+        let mut models_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for p in self.placement_profiles().await? {
+            for e in p.entries.iter().filter(|e| e.enabled) {
+                let models = models_by_account
+                    .entry(account_of(&e.model).to_string())
+                    .or_default();
+                if !models.contains(&e.model) {
+                    models.push(e.model.clone());
+                }
+            }
+        }
+        if models_by_account.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut readings: BTreeMap<String, Vec<PlacementWindow>> = BTreeMap::new();
+        for host in self
+            .hosts_since(now_unix - PLACEMENT_FRESH_REPORT_SECS)
+            .await?
+        {
+            for m in host.models {
+                if let Some(w) = m.weekly {
+                    readings.entry(m.model).or_default().push(w);
+                }
+            }
+        }
+
+        let mut states: BTreeMap<String, WeeklyActivationState> = BTreeMap::new();
+        let mut rows = self
+            .db
+            .query("SELECT key, value FROM policy", params![])
+            .await
+            .map_err(storage_err)?;
+        while let Some(row) = rows.next().await.map_err(storage_err)? {
+            let key: String = row.get("key").map_err(storage_err)?;
+            let Some(account) = key.strip_prefix(POLICY_WEEKLY_ACTIVATION) else {
+                continue;
+            };
+            let value: String = row.get("value").map_err(storage_err)?;
+            let Ok(state) = serde_json::from_str::<WeeklyActivationState>(&value) else {
+                continue;
+            };
+            // Two leaders in a row may each have written one; the later prompt counts.
+            if states
+                .get(account)
+                .is_none_or(|kept| kept.pinged_at < state.pinged_at)
+            {
+                states.insert(account.to_string(), state);
+            }
+        }
+        drop(rows);
+
+        let mut writes: Vec<(String, WeeklyActivationState)> = Vec::new();
+        let mut due = Vec::new();
+        for (account, models) in &models_by_account {
+            let account_readings: Vec<PlacementWindow> = models
+                .iter()
+                .filter_map(|m| readings.get(m))
+                .flatten()
+                .cloned()
+                .collect();
+            let state = states.get(account).cloned().unwrap_or_default();
+            match weekly_activation_step(&account_readings, &state, now_time) {
+                WeeklyActivationStep::Wait => {}
+                WeeklyActivationStep::Remember(resets_at) => writes.push((
+                    account.clone(),
+                    WeeklyActivationState {
+                        resets_at,
+                        pinged_at: state.pinged_at,
+                        tries: 0,
+                    },
+                )),
+                WeeklyActivationStep::Activate => {
+                    writes.push((
+                        account.clone(),
+                        WeeklyActivationState {
+                            pinged_at: now_unix,
+                            tries: state.tries + 1,
+                            ..state
+                        },
+                    ));
+                    due.push(WeeklyActivation {
+                        account: account.clone(),
+                        model: models[0].clone(),
+                    });
+                }
+            }
+        }
+        if !writes.is_empty() {
+            let mut tx = self.db.transaction().await.map_err(storage_err)?;
+            for (account, state) in writes {
+                let key = format!("{POLICY_WEEKLY_ACTIVATION}{account}");
+                let value = serde_json::to_string(&state).map_err(storage_err)?;
+                tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
+                    .await
+                    .map_err(storage_err)?;
+                let id = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
+                tx.execute(
+                    "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                    params![id, key, value],
+                )
+                .await
+                .map_err(storage_err)?;
+            }
+            tx.commit().await.map_err(storage_err)?;
+        }
+        Ok(due)
     }
 
     /// Returns the moves for `machine` that are still asked or were created at or
@@ -1657,6 +1836,11 @@ impl PrismClient {
                 POLICY_WEEKLY_SLACK => {
                     if let Ok(v) = value.parse::<f64>() {
                         policy.weekly_slack_sessions = v;
+                    }
+                }
+                POLICY_WEEKLY_MOVE_SLACK => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        policy.weekly_move_slack_sessions = Some(v);
                     }
                 }
                 POLICY_ACTIVE_HOURS => {
@@ -2306,6 +2490,114 @@ mod tests {
         assert_eq!(single.0, 1);
         assert!(single.1.is_some(), "burn rate from the samples");
         assert_eq!(david_load(true).await, single);
+    }
+
+    #[tokio::test]
+    async fn a_host_with_hundreds_of_idle_threads_syncs() {
+        // david-mb reported 178 profile threads, one of them running; storing
+        // them all outgrew a Rocky transaction and every sync failed.
+        let (_dir, client) = open().await;
+        put_profile(&client, "default", &[DAVID]).await;
+        let mut threads: Vec<PlacementSyncThread> = (0..300)
+            .map(|i| PlacementSyncThread {
+                title: format!("An idle thread with a title of some length, number {i}"),
+                running: false,
+                ..thread(&format!("thr-idle-{i:03}"), "default", DAVID)
+            })
+            .collect();
+        threads.push(thread("thr-running", "default", DAVID));
+        client
+            .sync_placement("host-a".into(), request(50.0, NOW, threads), NOW)
+            .await
+            .expect("sync");
+        let fresh = client.hosts_since(NOW).await.expect("hosts");
+        let running = client
+            .running_threads_for_hosts(&fresh)
+            .await
+            .expect("running");
+        assert_eq!(running.get(DAVID), Some(&1));
+        let stored = client.stored_report("host-a").await.expect("stored");
+        assert_eq!(stored.expect("report").threads.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_evacuation_spreads_running_threads_by_load() {
+        // claude-1 is spent for hours; five threads running on it move. Each
+        // moved thread counts on claude-david, so once claude-david would
+        // fill up the rest go to claude-alex instead of all to the first.
+        const ONE: &str = "claude-1/claude-opus-5-5";
+        const ALEX: &str = "claude-alex/claude-opus-5-5";
+        let (_dir, client) = open().await;
+        put_profile(&client, "default", &[ONE, DAVID, ALEX]).await;
+        // claude-david burns 6% per thread per hour.
+        insert_sample(&client, NOW - 1200, 40.0).await;
+        insert_sample(&client, NOW - 60, 42.0).await;
+        let window = |used: f64, hours: i64| PlacementWindow {
+            used_percent: used,
+            resets_at: DateTime::from_timestamp(NOW + hours * 3600, 0)
+                .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_default(),
+        };
+        let mut req = request(42.0, NOW, Vec::new());
+        let david = req.models[0].clone();
+        req.models = vec![
+            PlacementSyncModel {
+                model: ONE.into(),
+                session: Some(window(100.0, 3)),
+                ..david.clone()
+            },
+            PlacementSyncModel {
+                session: Some(window(42.0, 2)),
+                ..david.clone()
+            },
+            PlacementSyncModel {
+                model: ALEX.into(),
+                session: Some(window(10.0, 4)),
+                ..david
+            },
+        ];
+        req.threads = (0..5)
+            .map(|i| thread(&format!("thr-{i}"), "default", ONE))
+            .collect();
+        let resp = client
+            .sync_placement("host-a".into(), req, NOW)
+            .await
+            .expect("sync");
+        assert_eq!(resp.moves.len(), 5, "{:?}", resp.moves);
+        let to_david = resp.moves.iter().filter(|m| m.to.model == DAVID).count();
+        let to_alex = resp.moves.iter().filter(|m| m.to.model == ALEX).count();
+        assert!(
+            to_david >= 1 && to_alex >= 1,
+            "david {to_david}, alex {to_alex}"
+        );
+        assert_eq!(to_david + to_alex, 5);
+    }
+
+    #[tokio::test]
+    async fn the_move_slack_is_stored() {
+        let (_dir, client) = open().await;
+        let policy = PlacementPolicy {
+            weekly_move_slack_sessions: Some(2.5),
+            ..PlacementPolicy::default()
+        };
+        client
+            .set_placement_policy(policy.clone())
+            .await
+            .expect("set");
+        assert_eq!(client.placement_policy().await.expect("get"), policy);
+        // Left out, it falls back to the default again.
+        client
+            .set_placement_policy(PlacementPolicy::default())
+            .await
+            .expect("clear");
+        assert_eq!(
+            client
+                .placement_policy()
+                .await
+                .expect("get")
+                .weekly_move_slack_sessions,
+            None
+        );
     }
 
     #[tokio::test]
