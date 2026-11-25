@@ -5,11 +5,22 @@ struct ProfilesView: View {
     @ObservedObject var store: PrismStore
     @State private var draft: Draft?
     @State private var confirmingDelete = false
+    @State private var limitDraft: LimitDraft?
 
     private struct Draft {
         var original: PlacementProfile?
         var label = ""
         var entries: [PlacementEntry] = []
+    }
+
+    /// A temporary account limit being added or edited, as the shares to keep.
+    private struct LimitDraft {
+        var adding: Bool
+        var account = ""
+        var sessionKept = ""
+        var weeklyKept = ""
+        var hasEnd = false
+        var end = Date().addingTimeInterval(24 * 3600)
     }
 
     var body: some View {
@@ -22,8 +33,12 @@ struct ProfilesView: View {
             if let placement = store.placement {
                 if draft != nil {
                     editor(placement)
+                } else if limitDraft != nil {
+                    limitEditor(placement)
                 } else {
                     profileList(placement)
+                    Divider()
+                    accountLimits(placement)
                 }
             } else if store.connection == .connecting || (store.connected && store.profilesError == nil) {
                 ProgressView("Loading profiles…")
@@ -49,7 +64,7 @@ struct ProfilesView: View {
                             } label: {
                                 VStack(alignment: .leading) {
                                     Text(profile.displayLabel).fontWeight(.medium)
-                                    Text("\(profile.configuredEntries.count) models").font(.caption).foregroundStyle(.secondary)
+                                    Text(entryCount(profile)).font(.caption).foregroundStyle(.secondary)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
@@ -78,29 +93,43 @@ struct ProfilesView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(indices.indices, id: \.self) { position in
-                        entryRow(position, indices: indices, models: placement.models)
+                        entryRow(position, indices: indices, placement: placement)
                         Divider()
                     }
                 }
             }
             .frame(maxHeight: 280)
             .fixedSize(horizontal: false, vertical: true)
+            let models = placement.models.filter { !$0.hidden && $0.instanceId != PlacementEntry.companion.PROFILE_INSTANCE }
+            // Profiles it may use: not itself, and none that uses it (the server refuses cycles).
+            let profiles = placement.referenceCandidates(profileId: draft?.original?.id ?? "", held: draft?.entries ?? [])
             Menu("Add Model") {
-                ForEach(Array(placement.models.filter { !$0.hidden }.enumerated()), id: \.offset) { _, model in
-                    Button("\(model.displayLabel) · \(model.displayProvider)") {
-                        draft?.entries.append(PlacementEntry(
-                            instanceId: model.instanceId, model: model.model, label: model.label,
-                            driver: model.driver, provider: model.provider, reasoning: "", enabled: true,
-                            sessionShareOfWeekly: nil, state: "", reason: "", runningThreads: 0))
+                Section("Models") {
+                    ForEach(Array(models.enumerated()), id: \.offset) { _, model in
+                        Button("\(model.displayLabel) · \(model.displayProvider)") {
+                            draft?.entries.append(PlacementEntry.companion.of(model: model))
+                        }
+                        .disabled(draft?.entries.contains { $0.instanceId == model.instanceId && $0.model == model.model } == true)
                     }
-                    .disabled(draft?.entries.contains { $0.instanceId == model.instanceId && $0.model == model.model } == true)
+                }
+                if !profiles.isEmpty {
+                    Section("Profiles") {
+                        ForEach(profiles, id: \.id) { profile in
+                            Button("Profile · \(profile.displayLabel)", systemImage: "square.stack.3d.up") {
+                                draft?.entries.append(PlacementEntry.companion.reference(profile: profile, enabled: true))
+                            }
+                        }
+                    }
                 }
             }
-            .disabled(!placement.models.contains { !$0.hidden })
+            .disabled(models.isEmpty && profiles.isEmpty)
             HStack {
-                if let id = draft?.original?.id, id != placement.effectiveAlertFixProfile,
-                   id != placement.effectiveTextGenerationProfile,
-                   !placement.policy.roleProfiles.values.contains(id) {
+                if let id = draft?.original?.id, !placement.profileUsedBy(profileId: id).isEmpty {
+                    Text("Used by \(placement.profileUsedBy(profileId: id).joined(separator: ", ")), so it can't be deleted.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let id = draft?.original?.id {
                     Button("Delete…", role: .destructive) { confirmingDelete = true }
                         .confirmationDialog("Delete this profile?", isPresented: $confirmingDelete, titleVisibility: .visible) {
                             Button("Delete Profile", role: .destructive) {
@@ -124,11 +153,11 @@ struct ProfilesView: View {
     }
 
     @ViewBuilder
-    private func entryRow(_ position: Int, indices: [Int], models: [PlacementModel]) -> some View {
+    private func entryRow(_ position: Int, indices: [Int], placement: Placement) -> some View {
         let index = indices[position]
         if let draft, draft.entries.indices.contains(index) {
             let entry = draft.entries[index]
-            let levels = models.first {
+            let levels = entry.isProfileReference ? [] : placement.models.first {
                 $0.instanceId == entry.instanceId && $0.model == entry.model
             }?.reasoning?.levels ?? []
             VStack(alignment: .leading, spacing: 5) {
@@ -136,9 +165,23 @@ struct ProfilesView: View {
                     Toggle(isOn: Binding(get: { entry.enabled }, set: { enabled in
                         update(index, enabled: enabled)
                     })) {
-                        VStack(alignment: .leading) {
-                            Text(entry.displayLabel)
-                            Text(entry.displayProvider).font(.caption).foregroundStyle(.secondary)
+                        if entry.isProfileReference {
+                            // Another profile, used whole: its enabled models rank here, in its order.
+                            Label {
+                                VStack(alignment: .leading) {
+                                    Text("Profile · \(placement.profiles.first { $0.id == entry.model }?.displayLabel ?? entry.displayLabel)")
+                                    if !entry.reason.isEmpty {
+                                        Text(entry.reason).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            } icon: {
+                                Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
+                            }
+                        } else {
+                            VStack(alignment: .leading) {
+                                Text(entry.displayLabel)
+                                Text(entry.displayProvider).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     Spacer()
@@ -148,13 +191,13 @@ struct ProfilesView: View {
                     moveButton(up: false, disabled: position == indices.count - 1) {
                         self.draft?.entries.swapAt(index, indices[position + 1])
                     }
-                    Button("Remove model", systemImage: "minus.circle") {
+                    Button(entry.isProfileReference ? "Remove profile" : "Remove model", systemImage: "minus.circle") {
                         self.draft?.entries.remove(at: index)
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)
                 }
-                if !levels.isEmpty || !entry.reasoning.isEmpty {
+                if !entry.isProfileReference && (!levels.isEmpty || !entry.reasoning.isEmpty) {
                     Picker("Reasoning", selection: Binding(get: { entry.reasoning }, set: { update(index, reasoning: $0) })) {
                         Text("Default").tag("")
                         if !entry.reasoning.isEmpty && !levels.contains(entry.reasoning) {
@@ -163,6 +206,142 @@ struct ProfilesView: View {
                         ForEach(levels.filter { !$0.isEmpty }, id: \.self) { Text($0).tag($0) }
                     }
                 }
+            }
+        }
+    }
+
+    private func entryCount(_ profile: PlacementProfile) -> String {
+        let entries = profile.configuredEntries
+        let profiles = entries.filter(\.isProfileReference).count
+        let models = entries.count - profiles
+        var parts = ["\(models) \(models == 1 ? "model" : "models")"]
+        if profiles > 0 { parts.append("\(profiles) \(profiles == 1 ? "profile" : "profiles")") }
+        return parts.joined(separator: ", ")
+    }
+
+    // MARK: Account limits
+
+    private var now: Int64 { Int64(Date().timeIntervalSince1970) }
+
+    private func accountLimits(_ placement: Placement) -> some View {
+        let limits = placement.policy.accountLimits.sorted { $0.key < $1.key }
+        let free = placement.accounts.filter { placement.policy.accountLimits[$0] == nil }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Account Limits").font(.headline)
+            if limits.isEmpty {
+                Text("No account is held back.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(limits, id: \.key) { item in
+                let (account, limit) = (item.key, item.value)
+                let ended = limit.ended(now: now)
+                HStack {
+                    Button {
+                        limitDraft = LimitDraft(
+                            adding: false, account: account,
+                            sessionKept: limit.sessionKept.map { "\($0.intValue)" } ?? "",
+                            weeklyKept: limit.weeklyKept.map { "\($0.intValue)" } ?? "",
+                            hasEnd: limit.untilEpochSeconds != nil,
+                            end: limit.untilEpochSeconds.map { Date(timeIntervalSince1970: TimeInterval($0.int64Value)) }
+                                ?? Date().addingTimeInterval(24 * 3600))
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(account).fontWeight(.medium)
+                            Text(limit.summary).font(.caption).foregroundStyle(.secondary)
+                            Text(endText(limit, ended: ended)).font(.caption)
+                                .foregroundStyle(ended ? AnyShapeStyle(Color.red) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+                        }
+                        .opacity(ended ? 0.6 : 1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Button("Remove limit", systemImage: "minus.circle") {
+                        Task { _ = await store.changeProfiles { try await $0.clearAccountLimit(account: account) } }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                }
+            }
+            Button("Add Limit", systemImage: "plus") {
+                limitDraft = LimitDraft(adding: true, account: free.first ?? "")
+            }
+            .disabled(free.isEmpty)
+        }
+    }
+
+    private func endText(_ limit: PlacementAccountLimit, ended: Bool) -> String {
+        guard !limit.until.isEmpty else { return "No end" }
+        guard let at = limit.untilEpochSeconds else { return "Until \(limit.until)" }
+        let date = Date(timeIntervalSince1970: TimeInterval(at.int64Value))
+        return (ended ? "Ended " : "Until ") + date.formatted(.dateTime.weekday().day().month().hour().minute())
+    }
+
+    private func keptValue(_ text: String) -> Int? {
+        guard let value = Int(text.trimmingCharacters(in: .whitespaces)), (0...99).contains(value) else { return nil }
+        return value
+    }
+
+    private func limitEditor(_ placement: Placement) -> some View {
+        let draft = limitDraft ?? LimitDraft(adding: true)
+        let session = keptValue(draft.sessionKept)
+        let weekly = keptValue(draft.weeklyKept)
+        let invalid = (!draft.sessionKept.isEmpty && session == nil) || (!draft.weeklyKept.isEmpty && weekly == nil)
+        let free = placement.accounts.filter { placement.policy.accountLimits[$0] == nil }
+        return VStack(alignment: .leading, spacing: 8) {
+            if draft.adding {
+                Picker("Account", selection: Binding(get: { limitDraft?.account ?? "" }, set: { limitDraft?.account = $0 })) {
+                    ForEach(free, id: \.self) { Text($0).tag($0) }
+                }
+            } else {
+                Text(draft.account).font(.headline)
+            }
+            Text("Placement counts a window as full once only this share is left, so threads move before then. Empty: no limit on that window.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            LabeledContent("Keep of the 5-hour window") {
+                HStack(spacing: 4) {
+                    TextField("None", text: Binding(get: { limitDraft?.sessionKept ?? "" }, set: { limitDraft?.sessionKept = $0 }))
+                        .frame(width: 50)
+                        .multilineTextAlignment(.trailing)
+                    Text("%")
+                }
+            }
+            LabeledContent("Keep of the week") {
+                HStack(spacing: 4) {
+                    TextField("None", text: Binding(get: { limitDraft?.weeklyKept ?? "" }, set: { limitDraft?.weeklyKept = $0 }))
+                        .frame(width: 50)
+                        .multilineTextAlignment(.trailing)
+                    Text("%")
+                }
+            }
+            if invalid {
+                Text("Enter a share from 0 to 99.").font(.caption).foregroundStyle(.red)
+            }
+            Toggle("Ends", isOn: Binding(get: { limitDraft?.hasEnd ?? false }, set: { limitDraft?.hasEnd = $0 }))
+            if draft.hasEnd {
+                DatePicker("Until", selection: Binding(get: { limitDraft?.end ?? Date() }, set: { limitDraft?.end = $0 }),
+                           in: Date()...)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { limitDraft = nil }
+                Button("Save") {
+                    let until = draft.hasEnd
+                        ? PlacementAccountLimit.companion.formatRfc3339(epoch: Int64(draft.end.timeIntervalSince1970)) : ""
+                    let limit = PlacementAccountLimit.companion.keeping(
+                        sessionKept: session.map { KotlinInt(int: Int32($0)) },
+                        weeklyKept: weekly.map { KotlinInt(int: Int32($0)) },
+                        until: until)
+                    let account = draft.account
+                    Task {
+                        if await store.changeProfiles({ try await $0.setAccountLimit(account: account, limit: limit) }) {
+                            limitDraft = nil
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(draft.account.isEmpty || invalid || (session == nil && weekly == nil))
             }
         }
     }

@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import at.quickme.prism.shared.Placement
+import at.quickme.prism.shared.PlacementAccountLimit
 import at.quickme.prism.shared.PlacementEntry
 import at.quickme.prism.shared.PlacementProfile
 import at.quickme.prism.shared.PrismClient
@@ -51,12 +52,7 @@ internal object PlacementSettingsState {
 
     fun save(context: Context, id: String, label: String, entries: List<PlacementEntry>) {
         edit(context, { placement ->
-            val profile = PlacementProfile(id, label, if (entries.isEmpty()) {
-                placement.models.map { model -> PlacementEntry(
-                    instanceId = model.instanceId, model = model.model, label = model.label,
-                    driver = model.driver, provider = model.provider, enabled = false,
-                ) }
-            } else entries)
+            val profile = PlacementProfile(id, label, entries, configuredEntryCount = entries.size)
             placement.copy(profiles = if (placement.profiles.any { it.id == id }) {
                 placement.profiles.map { if (it.id == id) profile else it }
             } else placement.profiles + profile)
@@ -83,6 +79,14 @@ internal object PlacementSettingsState {
                 textGeneration = textGeneration ?: it.actions.textGeneration,
             ))
         }) { setPlacementActions(alertFix, textGeneration) }
+    }
+
+    /** Sets [account]'s temporary limit, or removes it with null. */
+    fun accountLimit(context: Context, account: String, limit: PlacementAccountLimit?) {
+        edit(context, {
+            val limits = if (limit == null) it.policy.accountLimits - account else it.policy.accountLimits + (account to limit)
+            it.copy(policy = it.policy.copy(accountLimits = limits))
+        }) { if (limit == null) clearAccountLimit(account) else setAccountLimit(account, limit) }
     }
 
     private fun edit(context: Context, apply: (Placement) -> Placement, write: suspend PrismClient.() -> Placement) {

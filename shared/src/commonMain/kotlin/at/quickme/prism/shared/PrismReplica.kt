@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -171,6 +174,39 @@ class PrismReplica private constructor(private val replica: Replica, private val
         // Every field: rocky-prism's PlacementPolicy has no defaults.
         replica.setPlacementPolicy(withDefaults.encodeToString(PlacementPolicy.serializer(), policy))
         return placement()
+    }
+
+    /** As [PrismClient.setAccountLimit]: [account]'s temporary limit. Fails with [PrismError]. */
+    @Throws(Exception::class)
+    suspend fun setAccountLimit(account: String, limit: PlacementAccountLimit): Placement =
+        placementCall("PUT", account, json.encodeToString(PlacementAccountLimit.serializer(), limit))
+
+    /** Removes [account]'s temporary limit. Fails with [PrismError]. */
+    @Throws(Exception::class)
+    suspend fun clearAccountLimit(account: String): Placement = placementCall("DELETE", account, null)
+
+    /** An account-limit route of the replica's API (it has no binding of its own). */
+    private suspend fun placementCall(method: String, account: String, body: String?): Placement {
+        val answer = replica.call(
+            ApiRequest(
+                method = method,
+                path = "/v1/placement/account-limits/${T3Links.encode(account)}",
+                body = body,
+                device = "",
+                clusterMachine = clusterMachine,
+                waitSeconds = 0u,
+                prismUrl = "",
+            )
+        )
+        if (answer.status / 100 != 2) {
+            val error = try {
+                json.parseToJsonElement(answer.body).jsonObject["error"]?.jsonPrimitive?.contentOrNull
+            } catch (e: Exception) {
+                null
+            }
+            throw PrismError(answer.status, "", error ?: "The replica answered HTTP ${answer.status}.")
+        }
+        return json.decodeFromString(Placement.serializer(), answer.body)
     }
 
     /**

@@ -573,13 +573,21 @@ final class PrismStore: ObservableObject {
                 description: "", command: "", output: output, labels: [:], state: "open", startsAt: ago(minutes),
                 createdAt: ago(minutes), updatedAt: ago(minutes), endedAt: 0, agents: agents)
         }
+        let review = PlacementProfile(id: "review", label: "Review", entries: [], configuredEntryCount: nil)
         store.placement = Placement(
             profiles: [
-                PlacementProfile(id: "coding", label: "Coding", entries: [], configuredEntryCount: nil),
-                PlacementProfile(id: "review", label: "Review", entries: [], configuredEntryCount: nil),
+                PlacementProfile(
+                    id: "coding", label: "Coding",
+                    entries: [PlacementEntry.companion.reference(profile: review, enabled: true)], configuredEntryCount: 1),
+                review,
             ], models: [], alertFixProfile: "coding",
             actions: PlacementActions(alertFix: "coding", textGeneration: nil), roles: [],
-            policy: PlacementPolicy(switchAtPercent: 95, weeklySlackSessions: 1, activeHours: nil, roleProfiles: [:]), moves: [])
+            policy: PlacementPolicy(
+                switchAtPercent: 95, weeklySlackSessions: 1, activeHours: nil, roleProfiles: [:],
+                weeklyMoveSlackSessions: nil,
+                accountLimits: ["claude-alex": PlacementAccountLimit(
+                    sessionPercent: KotlinDouble(double: 70), weeklyPercent: KotlinDouble(double: 90), until: "2026-11-28T08:00:00Z")]),
+            moves: [])
         store.alerts = [
             alert(41, "alert", "KubePersistentVolumeFillingUp", "Storage", "critical", "",
                   "PVC data-postgres-0 in namespace databases is 91% full and fills up within 4 hours.", 23,

@@ -113,6 +113,49 @@ private fun objectTests() {
     check(placement.models.single().let { it.driver == "claudeAgent" && it.provider == "Claude" && it.reasoning?.defaultLevel == "high" }) { "model: $placement" }
     check(placement.policy.activeHours?.end == 23 && placement.policy.weeklySlackSessions == 2.5) { "placement: $placement" }
     check(placement.moves.single().state == "continued") { "placement moves: ${placement.moves}" }
+    check(placement.policy.accountLimits.isEmpty()) { "no account limits: ${placement.policy}" }
+
+    // Profile references, account limits.
+    val nested = json.decodeFromString(
+        Placement.serializer(),
+        """{"profiles":[
+            {"id":"coding","label":"Coding","configuredEntryCount":2,"entries":[
+              {"instanceId":"placement","model":"anthropic","label":"Anthropic","driver":"placement","enabled":true,"state":"ok"},
+              {"instanceId":"codex","model":"codex-david/gpt-6.2-sol","enabled":true},
+              {"instanceId":"claudeAgent","model":"claude-alex/claude-opus-5-5","enabled":false}]},
+            {"id":"anthropic","label":"Anthropic","configuredEntryCount":1,"entries":[
+              {"instanceId":"placement","model":"claude","enabled":true}]},
+            {"id":"claude","label":"Claude","entries":[{"instanceId":"claudeAgent","model":"claude-alex/claude-opus-5-5"}]},
+            {"id":"other","label":"Other","entries":[]}],
+          "models":[
+            {"instanceId":"claudeAgent","model":"claude-alex/claude-opus-5-5"},
+            {"instanceId":"claudeAgent","model":"claude-1/claude-opus-5-5"},
+            {"instanceId":"codex","model":"codex-david/gpt-6.2-sol"},
+            {"instanceId":"agy-pooled","model":"agy-pro"},
+            {"instanceId":"placement","model":"x/y"}],
+          "policy":{"switchAtPercent":95,"weeklySlackSessions":3,"weeklyMoveSlackSessions":1.2,
+            "accountLimits":{"claude-alex":{"sessionPercent":70,"weeklyPercent":90,"until":"2026-11-28T08:00:00Z"},"codex-david":{"weeklyPercent":80}}}}""",
+    )
+    val ref = nested.profiles[0].configuredEntries[0]
+    check(ref.isProfileReference && ref.displayProvider == "Profile" && ref.displayLabel == "Anthropic") { "reference: $ref" }
+    check(nested.accounts == listOf("claude-1", "claude-alex", "codex-david")) { "accounts: ${nested.accounts}" }
+    check(nested.reaches("coding", "claude") && !nested.reaches("claude", "coding")) { "reaches" }
+    check(nested.referenceCandidates("claude", emptyList()).map { it.id } == listOf("other")) {
+        "candidates for claude: ${nested.referenceCandidates("claude", emptyList())}"
+    }
+    check(nested.referenceCandidates("coding", nested.profiles[0].configuredEntries).map { it.id } == listOf("claude", "other")) { "candidates for coding" }
+    check(nested.profileUsedBy("anthropic") == listOf("the profile Coding")) { "used by: ${nested.profileUsedBy("anthropic")}" }
+    check(nested.profileUsedBy("other").isEmpty()) { "other is unused" }
+    check(nested.policy.weeklyMoveSlackSessions == 1.2) { "move slack: ${nested.policy}" }
+    val alex = nested.policy.accountLimits.getValue("claude-alex")
+    check(alex.sessionKept == 30 && alex.weeklyKept == 10 && alex.summary == "Keeps 30% of the 5-hour window and 10% of the week") { "limit: $alex" }
+    check(alex.untilEpochSeconds == 1795852800L && !alex.ended(1795852799L) && alex.ended(1795852800L)) { "until: ${alex.untilEpochSeconds}" }
+    check(nested.policy.accountLimits.getValue("codex-david").let { it.sessionKept == null && it.weeklyKept == 20 && !it.ended(Long.MAX_VALUE) })
+    check(PlacementAccountLimit.keeping(30, null, "x") == PlacementAccountLimit(sessionPercent = 70.0, until = "x"))
+    check(PlacementAccountLimit.formatRfc3339(1795852800L) == "2026-11-28T08:00:00Z") { PlacementAccountLimit.formatRfc3339(1795852800L) }
+    check(PlacementAccountLimit.parseRfc3339("2026-11-28T09:00:00+01:00") == 1795852800L)
+    check(PlacementAccountLimit.parseRfc3339("2024-02-29T00:00:00.5Z") == 1709164800L)
+    check(PlacementAccountLimit.parseRfc3339("tomorrow") == null)
 
     var kept: List<String> = emptyList()
     val seen = SeenKeys(listOf("a", "b"), limit = 3) { kept = it }
@@ -201,8 +244,26 @@ private suspend fun clientTests() {
         it.method == "PUT" && it.path == "/v1/placement/actions" &&
             it.body == """{"alertFix":"coding","textGeneration":"","roleProfiles":{"review":"review","test":""}}"""
     }) { "setPlacementActions: ${sent.last()}" }
-    client.setPlacementPolicy(PlacementPolicy(switchAtPercent = 90.0, weeklySlackSessions = 2.5))
-    check(sent.last().let { it.method == "PUT" && it.path == "/v1/placement/policy" })
+    client.setPlacementPolicy(PlacementPolicy(
+        switchAtPercent = 90.0, weeklySlackSessions = 2.5,
+        accountLimits = mapOf("claude-alex" to PlacementAccountLimit(sessionPercent = 70.0)),
+    ))
+    check(sent.last().let { it.method == "PUT" && it.path == "/v1/placement/policy" && "accountLimits" !in it.body.orEmpty() }) {
+        "setPlacementPolicy: ${sent.last()}"
+    }
+    client.setAccountLimit("claude-alex", PlacementAccountLimit.keeping(30, 10, "2026-11-28T08:00:00Z"))
+    check(sent.last().let {
+        it.method == "PUT" && it.path == "/v1/placement/account-limits/claude-alex" &&
+            it.body == """{"sessionPercent":70.0,"weeklyPercent":90.0,"until":"2026-11-28T08:00:00Z"}"""
+    }) { "setAccountLimit: ${sent.last()}" }
+    client.setAccountLimit("claude-alex", PlacementAccountLimit.keeping(null, 10))
+    check(sent.last().body == """{"weeklyPercent":90.0}""") { "setAccountLimit without end: ${sent.last()}" }
+    client.clearAccountLimit("claude-alex")
+    check(sent.last().let { it.method == "DELETE" && it.path == "/v1/placement/account-limits/claude-alex" && it.body == null })
+    client.savePlacementProfile("coding", "Coding", listOf(PlacementEntry.reference(PlacementProfile("anthropic", "Anthropic"))))
+    check(sent.last().body == """{"label":"Coding","entries":[{"instanceId":"placement","model":"anthropic","reasoning":"","enabled":true}]}""") {
+        "profile reference: ${sent.last()}"
+    }
 }
 
 private suspend fun pushTests(relayUrl: String) {

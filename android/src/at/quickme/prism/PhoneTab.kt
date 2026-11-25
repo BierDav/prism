@@ -169,6 +169,7 @@ fun PhoneTab(padding: PaddingValues) {
                 PlacementSettings(
                     onOpenProfile = { id -> context.startActivity(PlacementActivity.profileIntent(context, id)) },
                     onOpenActions = { context.startActivity(PlacementActivity.actionsIntent(context)) },
+                    onOpenLimits = { context.startActivity(PlacementActivity.limitsIntent(context)) },
                 )
             }
         },
@@ -402,6 +403,7 @@ private fun ReleaseOwnerDialog(onRelease: () -> Unit, onDismiss: () -> Unit) {
 private fun PlacementSettings(
     onOpenProfile: (String) -> Unit,
     onOpenActions: () -> Unit,
+    onOpenLimits: () -> Unit,
 ) {
     val context = LocalContext.current
     val state = rememberPlacementSettings()
@@ -430,6 +432,7 @@ private fun PlacementSettings(
                 placement = placement,
                 onOpenProfile = onOpenProfile,
                 onOpenActions = onOpenActions,
+                onOpenLimits = onOpenLimits,
                 onReorder = { ids -> state.order(context, ids) },
                 onDeleteProfile = { id -> state.delete(context, id) },
                 onCreateProfile = { label ->
@@ -448,12 +451,14 @@ private fun PlacementSettings(
     }
 }
 
-/** Profiles list (tap to open, hold-and-drag to reorder, long-press to delete), Add profile, and Actions. */
+/** Profiles list (tap to open, hold-and-drag to reorder, hold without moving to delete), Add profile,
+ *  Actions and Account limits. */
 @Composable
 internal fun PlacementSection(
     placement: Placement,
     onOpenProfile: (String) -> Unit,
     onOpenActions: () -> Unit,
+    onOpenLimits: () -> Unit = {},
     onReorder: (List<String>) -> Unit = {},
     onDeleteProfile: (String) -> Unit = {},
     onCreateProfile: (String) -> Unit = {},
@@ -491,6 +496,7 @@ internal fun PlacementSection(
                         }
                         PlacementProfileRow(
                             profile = profile,
+                            placement = placement,
                             hiddenModels = hiddenModels,
                             tags = tags,
                             isDragging = isDragging,
@@ -500,21 +506,7 @@ internal fun PlacementSection(
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { addingProfile = true }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Icon(Icons.Rounded.Add, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Add profile",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+                AddRow("Add profile") { addingProfile = true }
             }
         }
 
@@ -542,6 +534,33 @@ internal fun PlacementSection(
                 Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open actions", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+
+        val now = System.currentTimeMillis() / 1000
+        val active = placement.policy.accountLimits.filterValues { !it.ended(now) }
+        val limitsLine = when (active.size) {
+            0 -> if (placement.policy.accountLimits.isEmpty()) "None: every account up to the switch point" else "None active"
+            1 -> active.entries.first().let { (account, limit) -> "$account · ${limit.summary.replaceFirstChar { it.lowercase() }}" }
+            else -> "${active.size} accounts held back: ${active.keys.sorted().joinToString(", ")}"
+        }
+        Panel(modifier = Modifier.clip(MaterialTheme.shapes.large).clickable(onClick = onOpenLimits)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Account limits", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        limitsLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Open account limits", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 
     if (addingProfile) {
@@ -558,49 +577,72 @@ internal fun PlacementSection(
     }
 
     deleteCandidate?.let { profile ->
-        val usedBy = profileUsedBy(placement, profile.id)
-        if (usedBy.isNotEmpty()) {
-            AlertDialog(
-                onDismissRequest = { deleteCandidate = null },
-                title = { Text("Can't delete ${profile.displayLabel}") },
-                text = {
-                    Text("This profile is used by ${usedBy.joinToString(", ")}. Choose a different profile in Actions first.")
-                },
-                confirmButton = {
-                    TextButton(onClick = { deleteCandidate = null }) { Text("OK") }
-                },
-            )
-        } else {
-            AlertDialog(
-                onDismissRequest = { deleteCandidate = null },
-                title = { Text("Delete ${profile.displayLabel}?") },
-                text = { Text("Threads tagged with this profile will no longer be scheduled by it.") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        deleteCandidate = null
-                        onDeleteProfile(profile.id)
-                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-                },
-                dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
-            )
+        DeleteProfileDialog(
+            placement = placement,
+            profile = profile,
+            onDelete = {
+                deleteCandidate = null
+                onDeleteProfile(profile.id)
+            },
+            onDismiss = { deleteCandidate = null },
+        )
+    }
+}
+
+/** Asks before deleting [profile], or says what still uses it (the server refuses those with 409). */
+@Composable
+internal fun DeleteProfileDialog(
+    placement: Placement,
+    profile: PlacementProfile,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val usedBy = placement.profileUsedBy(profile.id)
+    if (usedBy.isNotEmpty()) {
+        val inProfiles = placement.profiles.count { it.id != profile.id && profile.id in placement.referencedProfiles(it.id) }
+        val inActions = usedBy.size > inProfiles
+        val fix = when {
+            inActions && inProfiles > 0 -> "Choose a different profile in Actions, and remove it from those profiles, first."
+            inProfiles > 0 -> "Remove it from ${if (inProfiles == 1) "that profile" else "those profiles"} first."
+            else -> "Choose a different profile in Actions first."
         }
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Can't delete ${profile.displayLabel}") },
+            text = { Text("This profile is used by ${usedBy.joinToString(", ")}. $fix") },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Delete ${profile.displayLabel}?") },
+            text = { Text("Threads tagged with this profile will no longer be scheduled by it.") },
+            confirmButton = {
+                TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
     }
 }
 
 @Composable
 private fun PlacementProfileRow(
     profile: PlacementProfile,
+    placement: Placement,
     hiddenModels: Set<Pair<String, String>>,
     tags: List<String>,
     isDragging: Boolean,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val enabledEntries = profile.entries.filter { it.enabled && (it.instanceId to it.model) !in hiddenModels }
+    val entries = profile.configuredEntries
+    val enabledEntries = entries.filter { it.enabled && (it.instanceId to it.model) !in hiddenModels }
+    val first = enabledEntries.firstOrNull()?.let {
+        if (it.isProfileReference) "Profile · ${placement.profileLabel(it.model)}" else it.displayLabel
+    }
     val supporting = when (enabledEntries.size) {
-        0 -> if (profile.entries.any { it.enabled }) "No visible models enabled" else "No models enabled"
-        1 -> "${enabledEntries.first().displayLabel} · 1 on"
-        else -> "${enabledEntries.first().displayLabel} · ${enabledEntries.size} on"
+        0 -> if (entries.isEmpty()) "No models yet" else if (entries.any { it.enabled }) "No visible models enabled" else "No models enabled"
+        else -> "$first · ${enabledEntries.size} on"
     }
     val rowBg = if (isDragging) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLow
 
@@ -651,10 +693,3 @@ private fun PlacementProfileRow(
     }
 }
 
-private fun profileUsedBy(placement: Placement, profileId: String): List<String> = buildList {
-    if (profileId == placement.effectiveAlertFixProfile) add("Alert fixes")
-    if (profileId == placement.effectiveTextGenerationProfile) add("Text generation")
-    placement.policy.roleProfiles.filterValues { it == profileId }.keys.forEach { role ->
-        add("Delegated agents (${role.replaceFirstChar { it.uppercase() }})")
-    }
-}
