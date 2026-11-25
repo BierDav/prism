@@ -330,9 +330,10 @@ prism ping                                      # check the token
   `machine`, `check`, `severity` (default `warning`) and `source=prism`, with
   the output and command, an ID per episode and an `alert.firing` push.
   Failures of the same check keep the episode open and update it. Only an
-  `ok` report ends it, with an `alert.ended` push; the next failure is a new episode. Machine events do
-  not go through Alertmanager, so its routing, silences and inhibition do not
-  apply to them.
+  `ok` report ends it, with an `alert.ended` push; the next failure is a new
+  episode. A check that is retired ends its event with one last
+  `prism report <check> ok` on that machine. Machine events do not go through
+  Alertmanager, so its routing, silences and inhibition do not apply to them.
 - A minute's tidy-up repeats what a report could not finish and forgets
   events resolved a week ago. At most 50 checks per machine can fail at once.
 - Each machine has its own token, `<machine>.<HMAC-SHA256 of the name>`,

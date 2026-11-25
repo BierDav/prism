@@ -1608,4 +1608,29 @@ mod tests {
         assert_eq!(e.title, "#42 NodeNotReady gone");
         assert_eq!(e.priority(), 1);
     }
+
+    #[test]
+    fn an_older_apps_dismiss_or_resolve_ends_with_why() {
+        let row = AlertRow {
+            key: "k".into(),
+            fingerprint: "f".into(),
+            episode: "2026-11-21T10:00:00Z".into(),
+            payload: "{}".into(),
+            state: ALERT_OPEN.into(),
+            received_at: 1,
+            resolved_at: None,
+            missing_since: 0,
+            number: 7,
+            row_id: vec![1],
+        };
+        for kind in ["dismiss", "resolve"] {
+            match check_action(&row, kind, "") {
+                Err(PrismError::InvalidInput(msg)) => {
+                    assert!(msg.contains("ends by itself"), "{kind}: {msg}")
+                }
+                other => panic!("{kind}: {other:?}"),
+            }
+        }
+        assert!(check_action(&row, ACTION_FIX, "").is_ok());
+    }
 }
