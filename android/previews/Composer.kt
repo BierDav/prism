@@ -77,7 +77,7 @@ private fun ComposerSample(text: String, margin: Int, voice: VoiceInput? = null)
                 AssistComposer(
                     text = text, onText = {}, canSend = true, sending = false, onSend = {}, animate = false,
                     onMic = {}, voice = voice, onCard = { card = it },
-                    attach = remember { at.quickme.prism.AttachActions({}, {}, {}, {}) },
+                    attach = remember { at.quickme.prism.AttachActions({}, {}, {}) },
                     selectors = {},
                     modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = margin.dp).padding(bottom = 8.dp).fillMaxWidth(),
                 )
