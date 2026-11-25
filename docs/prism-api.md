@@ -78,9 +78,9 @@ the workers' config (`devices.<name>.key`, selfhosted-platform
 `manifests/alerting/prism-config.json`). `prism pubkey` prints a Mac's; the
 phone shows its key on the Approvals tab, and `prism-phone-enroll` prints it.
 
-The workers still mint `prism_` device tokens (`prism device-token
-<device>`) for their own HTTP routes (docs/worker.md, "HTTP on
-prism.quickme.at"); the apps don't use them.
+There are no device tokens: a device's identity is its replica's
+provisioning. (The workers' `prism_` device tokens, `prism device-token`,
+are gone; nothing used them.)
 
 ## Conventions
 
@@ -369,7 +369,8 @@ approvals are handled separately through `GET /v1/approvals` and
 `POST /v1/approvals/{id}/answer`. Prism forwards the chosen decision to
 T3’s client API. A device signature binds the approval to the selected scope.
 Fleet registers a short-lived T3 client session using `prism register-t3`;
-this client session is separate from the MCP session used for agent actions.
+this client session is separate from the MCP session used for agent actions,
+which each T3 host registers with `prism register-t3-mcp` (docs/worker.md).
 
 ### List
 
@@ -711,7 +712,7 @@ and fleet's publisher may change most of them later:
 - `GET /v1/android/settings` returns the calling device's own settings,
   `{"device", "settings", "updatedAt", "updatedBy"}`, or `404`. The phone
   asks its replica (`Replica.call`, for its `device_name`), so it needs no
-  token; the workers also answer it over HTTP to a `prism_` device token.
+  token. The workers don't serve it over HTTP.
 
 The phone applies them when `app.settings` names it, when its replica's
 `settings` change, every 6 hours and after a boot. Values are never logged.

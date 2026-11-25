@@ -9,7 +9,7 @@ workers behind them and the `prism` CLI machines report with.
 
 | Path | What |
 |---|---|
-| `cli/` | The `prism` CLI (Rust): `prism run`/`report`/`ping` on every fleet host, `prism pair`/`machines`/`device-token` in a worker pod (`docs/worker.md`); `packages.<system>.prism` |
+| `cli/` | The `prism` CLI (Rust): `prism run`/`report`/`ping` on every fleet host, `register-t3*` on every T3 host, `prism pair`/`machines` in a worker pod (`docs/worker.md`); `packages.<system>.prism` |
 | `worker/` | The prism worker (Rust): Prism's server, a StatefulSet in the cluster serving `prism.quickme.at`, each pod a replica of Prism's Rocky database (`docs/worker.md`). `worker/Dockerfile` builds the image `ghcr.io/bierdav/prism-worker`, which also carries `prism` |
 | `rocky-prism/`, `rocky-prism-ffi/`, `uniffi-bindgen/` | Prism's Rocky schema and client API, shared by the worker and the apps, and the apps' bindings to it |
 | `deploy/` | The Kubernetes manifests Argo CD deploys (`apps/prism.yaml` in selfhosted-platform); CI pins the image here |
@@ -286,9 +286,21 @@ seconds. It pushes a daily notice while a paired session, or its credential
 for the cluster's T3, expires soon. The watcher asks the T3 the agent was
 started on.
 
-To pair Prism with a machine's T3, create a fresh pairing link in that
-machine's T3 access settings, then pass it on stdin in the pod (it never
-appears in arguments or logs):
+Machines in Prism's config with a T3 of their own pair themselves: fleet's
+hourly `prism-t3-client-session` job runs `prism register-t3-mcp
+http://<host>.netbird.cloud:3773` on every T3 host. It asks the workers
+whether they want a session from that machine and when theirs expires
+(`GET /v1/t3/mcp-session`); when it is missing or expires within 15 days, the
+host mints a 30-day MCP session with its own T3 (as `register-t3-devices`
+does for the devices) and registers it (`PUT /v1/t3/mcp-session`), with the
+access the session had (default `full-access`). So a new database or an
+expiring session needs nobody. Today that is david-mb: the cluster machine
+uses its configured credential, and david-mm-linz is reached through
+david-mb's T3 (`via`).
+
+To pair Prism by hand with any other machine's T3, or to choose its access,
+create a fresh pairing link in that machine's T3 access settings, then pass
+it on stdin in the pod (it never appears in arguments or logs):
 
 ```sh
 kubectl -n monitoring exec -i prism-worker-0 -- /prism pair david-mb < link.txt
@@ -403,8 +415,8 @@ leader, enrollment and the HTTP routes. In short:
   `PRISM_ALERTS_TOKEN(_FILE)` (the `prism-alerts` Sealed Secret), because
   the path is public.
 - The owner's admin commands run in a worker pod over the admin routes:
-  `kubectl -n monitoring exec prism-worker-0 -- /prism machines`, `pair`,
-  `device-token <device>`, `device-revoke <device>`.
+  `kubectl -n monitoring exec prism-worker-0 -- /prism machines`, `pair`.
+  There are no device tokens: the apps read from their own replica.
 - Devices that sign approvals are `devices` in the config, each with its
   public key (`key`: the Mac's Secure Enclave key, the phone's StrongBox
   key) and `kind`.

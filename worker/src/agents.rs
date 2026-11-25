@@ -653,10 +653,29 @@ async fn check_agent(
     Ok(())
 }
 
+/// What the reminder of an expiring paired session says: a machine that
+/// renews it itself has a failing job; any other needs `prism pair`.
+fn session_expiry_text(cfg: &Config, machine: &str, date: &str) -> String {
+    let manual = format!(
+        "create a fresh pairing link on {machine} and run `prism pair {machine}` in a prism-worker pod"
+    );
+    let renew = if crate::pairing::host_session_refusal(cfg, machine).is_none() {
+        format!(
+            "{machine} renews it itself every hour from 15 days before (prism-t3-client-session, `prism register-t3-mcp`), so that job is failing there: check its log, or {manual}"
+        )
+    } else {
+        format!("To renew it, {manual}")
+    };
+    format!(
+        "Prism's T3 session with {machine} expires on {date}. {renew}. Until then agents cannot start there."
+    )
+}
+
 /// Sends daily `notice` pushes when the cluster T3 token (< 7 days) or any
 /// paired T3 session (< 5 days) expires soon.
 pub async fn expiry_reminders(
     client: &PrismClient,
+    cfg: &Config,
     pusher: &Pusher,
     secrets: &Secrets,
     now: i64,
@@ -693,10 +712,7 @@ pub async fn expiry_reminders(
             key: format!("notice:session-expiry:{}:{}:{day}", s.machine, s.paired_at),
             time: now,
             title: format!("T3 session with {} expires", s.machine),
-            body: format!(
-                "Prism's T3 session with {} expires on {date}. Create a fresh pairing link on {} and run `prism pair {}` in a prism-worker pod to renew it. Until then agents cannot start there.",
-                s.machine, s.machine, s.machine
-            ),
+            body: session_expiry_text(cfg, &s.machine, &date),
             ..Notification::default()
         };
         let _ = pusher.deliver(client, &[n], now).await;
@@ -965,5 +981,22 @@ mod tests {
         assert_eq!(read.items[1].run_id, "");
         assert!(!read.items[1].text_truncated);
         assert_eq!(read.earlier_position, Some(168));
+    }
+
+    #[test]
+    fn session_reminders_name_the_renewal_that_applies() {
+        let cfg = Config::parse(
+            r#"{"cluster_machine": "david-server", "machines": {
+                "david-server": {}, "david-mb": {}}}"#,
+        )
+        .expect("config");
+        let own = session_expiry_text(&cfg, "david-mb", "2027-01-16");
+        assert!(own.contains("david-mb renews it itself"), "{own}");
+        assert!(own.contains("`prism pair david-mb`"), "{own}");
+        let paired = session_expiry_text(&cfg, "elsewhere", "2027-01-16");
+        assert_eq!(
+            paired,
+            "Prism's T3 session with elsewhere expires on 2027-01-16. To renew it, create a fresh pairing link on elsewhere and run `prism pair elsewhere` in a prism-worker pod. Until then agents cannot start there."
+        );
     }
 }

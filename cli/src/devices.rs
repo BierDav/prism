@@ -17,6 +17,12 @@
 //! missing ones and those with under 15 days left, so a device always holds
 //! one that outlives a two-week outage. Tokens go to the workers over stdin
 //! and HTTP only, never in arguments.
+//!
+//! `prism register-t3-mcp <origin>` does the same for the workers' own MCP
+//! session with this host's T3, what `prism pair` stores by hand: the workers
+//! say whether they want one from this machine and when theirs expires
+//! (`GET /v1/t3/mcp-session`), and the host mints and registers it when it
+//! is missing or due (`PUT /v1/t3/mcp-session`).
 
 use crate::client::{Client, text};
 use serde::Deserialize;
@@ -148,30 +154,44 @@ fn base64url(data: &[u8]) -> String {
     out
 }
 
-/// A full-access MCP session for `device` with the T3 at `origin`, through
-/// T3's MCP OAuth with a pairing code this host mints itself. Returns the
-/// token and when it expires (Unix seconds).
+/// Whom an MCP session is for, as T3 lists the OAuth client.
+pub struct McpClient<'a> {
+    /// The pairing's and the client's name in T3, e.g. `Prism on david-pixel`.
+    pub label: &'a str,
+    pub software_id: &'a str,
+    /// The T3 access level, e.g. `full-access`.
+    pub access: &'a str,
+}
+
+/// An MCP session with the T3 at `origin`, through T3's MCP OAuth with a
+/// pairing code this host mints itself. Returns the token and when it
+/// expires (Unix seconds).
 pub fn mcp_session(
     t3: &dyn T3Sessions,
     origin: &str,
-    device: &str,
+    client: &McpClient,
     now: i64,
 ) -> Result<(String, i64), String> {
     let admin = t3.issue(&PAIRING_SCOPES, "5m", "Prism device pairing")?;
-    let result = mcp_oauth(&admin.token, origin, device, now);
+    let result = mcp_oauth(&admin.token, origin, client, now);
     t3.revoke(&admin.session_id);
     result
 }
 
-fn mcp_oauth(admin: &str, origin: &str, device: &str, now: i64) -> Result<(String, i64), String> {
+fn mcp_oauth(
+    admin: &str,
+    origin: &str,
+    client: &McpClient,
+    now: i64,
+) -> Result<(String, i64), String> {
     let http = http()?;
     let ua = "prism-client";
-    let label = format!("Prism on {device}");
+    let (label, access) = (client.label, client.access);
     let code = answer(
         http.post(format!("{origin}/api/auth/pairing-token"))
             .header("User-Agent", ua)
             .bearer_auth(admin)
-            .json(&json!({"access": "full-access", "label": label}))
+            .json(&json!({"access": access, "label": label}))
             .send()
             .map_err(|err| format!("T3 at {origin} did not answer: {err}"))?,
         "the pairing code",
@@ -185,7 +205,7 @@ fn mcp_oauth(admin: &str, origin: &str, device: &str, now: i64) -> Result<(Strin
             .header("User-Agent", ua)
             .json(&json!({
                 "client_name": label,
-                "software_id": "prism-device",
+                "software_id": client.software_id,
                 "redirect_uris": [REDIRECT],
                 "token_endpoint_auth_method": "none",
             }))
@@ -214,7 +234,7 @@ fn mcp_oauth(admin: &str, origin: &str, device: &str, now: i64) -> Result<(Strin
                     "state": state,
                     "resource": resource,
                 },
-                "decision": {"_tag": "pairing-code", "access": "full-access", "code": code},
+                "decision": {"_tag": "pairing-code", "access": access, "code": code},
             }))
             .send()
             .map_err(|err| err.to_string())?,
@@ -289,7 +309,16 @@ pub fn register_devices(
                         .map(|at| (i.token, at.timestamp()))
                         .map_err(|_| "t3 auth session issue printed no expiry".to_string())
                 }),
-            "mcp" => mcp_session(t3, origin, &device, now),
+            "mcp" => mcp_session(
+                t3,
+                origin,
+                &McpClient {
+                    label: &format!("Prism on {device}"),
+                    software_id: "prism-device",
+                    access: "full-access",
+                },
+                now,
+            ),
             other => Err(format!("unknown session kind {other:?}")),
         };
         let registered = minted.and_then(|(token, expires_at)| {
@@ -317,6 +346,58 @@ pub fn register_devices(
     } else {
         Err(failed.join("; "))
     }
+}
+
+/// Registers the workers' MCP session with this host's T3 when they want
+/// one from this machine and theirs is missing or due. Returns what it did,
+/// for the job's log.
+pub fn register_workers(
+    prism: &Client,
+    t3: &dyn T3Sessions,
+    origin: &str,
+    now: i64,
+) -> Result<String, String> {
+    let origin = origin.trim_end_matches('/');
+    let state = prism.json("GET", "/v1/t3/mcp-session", None)?;
+    let machine = text(&state, "machine");
+    if state.get("wanted").and_then(Value::as_bool) != Some(true) {
+        return Ok(format!(
+            "the workers take no session from {machine}: {}",
+            text(&state, "reason")
+        ));
+    }
+    let paired = state.get("paired").and_then(Value::as_bool) == Some(true);
+    let expires = state.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
+    if paired && (expires == 0 || expires - now >= RENEW_BEFORE_SECS) {
+        return Ok(format!("the workers' session with {machine} is current"));
+    }
+    let access = match text(&state, "access") {
+        a if a.is_empty() => "full-access".to_string(),
+        a => a,
+    };
+    let (token, expires_at) = mcp_session(
+        t3,
+        origin,
+        &McpClient {
+            label: "Prism",
+            software_id: "prism",
+            access: &access,
+        },
+        now,
+    )?;
+    prism.send(
+        "PUT",
+        "/v1/t3/mcp-session",
+        Some(&json!({
+            "origin": origin,
+            "token": token,
+            "access": access,
+            "expiresAt": expires_at,
+        })),
+    )?;
+    Ok(format!(
+        "registered the workers' session with {machine} ({access} access)"
+    ))
 }
 
 #[cfg(test)]

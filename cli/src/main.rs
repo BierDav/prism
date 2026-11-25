@@ -1,6 +1,7 @@
 //! `prism`: the command machines report check results with (`prism run`,
-//! `prism report`), and the owner's tool for pairing and listing machines and
-//! minting device tokens. It replaces the Go server's client half
+//! `prism report`) and register their T3 sessions with (`prism
+//! register-t3*`), and the owner's tool for pairing and listing machines. It
+//! replaces the Go server's client half
 //! (`main.go` and `client.go`) with the same
 //! arguments, settings, output and exit codes. `prism serve` is gone: the
 //! server is prism-worker. On a Mac it also passes the Prism app's own
@@ -35,15 +36,15 @@ const USAGE: &str = r#"Usage:
       Pair every Prism device with this machine's T3 (at <origin>, its
       NetBird address): mint the sessions the workers report missing or due
       and register them. Needs t3 (PRISM_T3, default t3 on PATH).
+  prism register-t3-mcp <origin>
+      Pair the workers with this machine's T3 (at <origin>, its NetBird
+      address), as prism pair does by hand: mint their MCP session when they
+      want one from this machine and theirs is missing or due. Needs t3.
   prism pair <machine> [access] < link
       Pair the server with a machine's T3. Reads the pairing link (or
       "[url] <code>") from stdin, so it never appears in arguments or logs.
   prism machines
       Print how the server reaches each machine.
-  prism device-token <device>
-      Mint a Prism API token for a device (replacing its earlier one).
-  prism device-revoke <device>
-      Revoke a device's Prism API token.
   prism account-limit <account> [--session N] [--weekly N] [--until TIME]
   prism account-limit <account> --clear
       Limit how much of an account's session and weekly windows placement
@@ -54,8 +55,7 @@ Settings come from /etc/prism/client.json ({"url": …, "token_file": …}),
 or PRISM_CLIENT_CONFIG, PRISM_URL, PRISM_TOKEN and PRISM_TOKEN_FILE.
 Severity is info, warning (default) or critical.
 
-pair, machines, device-token, device-revoke and account-limit need
-PRISM_EVENT_KEY (or
+pair, machines and account-limit need PRISM_EVENT_KEY (or
 PRISM_EVENT_KEY_FILE): run them in a prism-worker pod. They call the worker
 at PRISM_URL, default http://127.0.0.1:8080.
 
@@ -141,19 +141,29 @@ fn dispatch(argv: &[String], env: Env) -> i32 {
             if args.len() != 1 {
                 return fail("usage: prism register-t3-devices <origin>");
             }
-            let t3 = devices::T3Command(
-                env("PRISM_T3")
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| "t3".into()),
-            );
             let now = chrono::Utc::now().timestamp();
             match Client::from_env(env)
-                .and_then(|c| devices::register_devices(&c, &t3, &args[0], now))
+                .and_then(|c| devices::register_devices(&c, &t3_command(env), &args[0], now))
             {
                 Ok(done) => {
                     for line in done {
                         println!("registered {line}");
                     }
+                    0
+                }
+                Err(err) => fail(err),
+            }
+        }
+        "register-t3-mcp" => {
+            if args.len() != 1 {
+                return fail("usage: prism register-t3-mcp <origin>");
+            }
+            let now = chrono::Utc::now().timestamp();
+            match Client::from_env(env)
+                .and_then(|c| devices::register_workers(&c, &t3_command(env), &args[0], now))
+            {
+                Ok(line) => {
+                    println!("{line}");
                     0
                 }
                 Err(err) => fail(err),
@@ -173,18 +183,6 @@ fn dispatch(argv: &[String], env: Env) -> i32 {
             }
             Err(err) => fail(err),
         },
-        "device-token" | "device-revoke" => {
-            if args.len() != 1 {
-                return fail(format!("usage: prism {command} <device>"));
-            }
-            match device_command(command, &args[0], env) {
-                Ok(line) => {
-                    println!("{line}");
-                    0
-                }
-                Err(err) => fail(err),
-            }
-        }
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             0
@@ -194,6 +192,15 @@ fn dispatch(argv: &[String], env: Env) -> i32 {
             usage_error()
         }
     }
+}
+
+/// This host's `t3` (PRISM_T3, default `t3` on PATH).
+fn t3_command(env: Env) -> devices::T3Command {
+    devices::T3Command(
+        env("PRISM_T3")
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "t3".into()),
+    )
 }
 
 /// Replaces this process with the Prism app for one of its subcommands on a
@@ -367,19 +374,6 @@ fn render_machines(view: &Value) -> String {
     lines.join("\n")
 }
 
-/// `prism device-token` and `prism device-revoke`: the line to print.
-fn device_command(command: &str, device: &str, env: Env) -> Result<String, String> {
-    let client = Client::admin_from_env(env)?;
-    let path = format!("/v1/devices/{}/token", url_segment(device));
-    if command == "device-revoke" {
-        let out = client.json("DELETE", &path, None)?;
-        let revoked = out.get("revoked").and_then(Value::as_bool) == Some(true);
-        return Ok(format!("{device}: token revoked: {revoked}"));
-    }
-    let out = client.json("POST", &path, None)?;
-    Ok(text(&out, "token"))
-}
-
 /// `prism account-limit <account> [--session N] [--weekly N] [--until T] | --clear`.
 fn account_limit_command(args: &[String], env: Env) -> Result<String, String> {
     const USE: &str =
@@ -427,8 +421,8 @@ fn account_limit_command(args: &[String], env: Env) -> Result<String, String> {
     Ok(format!("{account}: {}", out["limit"]))
 }
 
-/// Percent-encodes a path segment, so any device name reaches the worker,
-/// which refuses invalid ones as Go did.
+/// Percent-encodes a path segment, so any name reaches the worker, which
+/// refuses invalid ones.
 fn url_segment(s: &str) -> String {
     s.bytes()
         .map(|b| {
