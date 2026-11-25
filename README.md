@@ -47,7 +47,7 @@ every five minutes, and every host then deploys `main` on its own.
 
 ### Prism for macOS
 
-The menu-bar popout has three tabs:
+The menu-bar popout's tabs:
 
 - **Alerts**: the server's open alerts and machine events, grouped by
   category with their severity; per alert the agents it started (Open in T3)
@@ -62,6 +62,10 @@ The menu-bar popout has three tabs:
   memory (`GET /v1/machines/metrics`); click a host for its filesystems.
 - **Approvals**: what waits for the owner's decision (a click opens it), the
   last decisions and this Mac's public key.
+- **Wi-Fi** (the Wi-Fi icon): the reliable networks the Mac leaves the
+  phone's hotspot for, and the phone's hotspot it joins after asking the
+  phone; add the current, a nearby, a known or a typed network, or remove one
+  (docs/hotspot.md).
 
 Approvals are generic (`shared/`: `Approvals.kt`): something asks, with a
 title, its source, a summary, details and optionally the T3 thread that asks,
