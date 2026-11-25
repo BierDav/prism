@@ -323,13 +323,16 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
      * (0 for a new one), and returns the committed revision. Only what changed
      * is written, and a save cut short is never seen, so the same call again
      * after a failure is safe. Each entry's and message's JSON is at most
-     * 16 KiB. Fails with 409 (`conflict`) when the conversation moved on since
-     * [revision], 410 (`gone`) once it was deleted.
+     * 16 KiB. [saveId] names the revision this save makes (one per version):
+     * sent again after its answer was lost, a save that committed gets the
+     * same answer. Fails with 409 (`conflict`) when the conversation moved on
+     * since [revision], 410 (`gone`) once it was deleted.
      */
     @Throws(Exception::class)
     suspend fun saveAssistantConversation(
         id: String,
         revision: Long,
+        saveId: String,
         title: String,
         createdAt: Long,
         updatedAt: Long,
@@ -338,6 +341,7 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
     ): Long {
         val body = buildJsonObject {
             put("revision", revision)
+            put("saveId", saveId)
             put("title", title)
             put("createdAt", createdAt)
             put("updatedAt", updatedAt)

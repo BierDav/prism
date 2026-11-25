@@ -51,6 +51,7 @@ async fn a_conversation_is_saved_by_revision_and_read_back_in_order() {
         .save_assistant_conversation(
             row("c-1", "  Weather\nin Vienna? ", 100),
             0,
+            "",
             vec![
                 entry("e0", r#"{"type":"user","text":"Weather?"}"#),
                 entry("tool:1", r#"{"type":"step"}"#),
@@ -79,6 +80,7 @@ async fn a_conversation_is_saved_by_revision_and_read_back_in_order() {
         .save_assistant_conversation(
             row("c-1", "Weather in Vienna?", 100),
             1,
+            "",
             c.entries.clone(),
             c.history.clone(),
         )
@@ -97,6 +99,7 @@ async fn a_conversation_is_saved_by_revision_and_read_back_in_order() {
                 ..row("c-1", "Weather in Vienna?", 200)
             },
             1,
+            "",
             vec![
                 entry("e0", r#"{"type":"user","text":"Weather?"}"#),
                 entry("tool:1", r#"{"type":"card"}"#),
@@ -125,6 +128,7 @@ async fn a_conversation_is_saved_by_revision_and_read_back_in_order() {
         .save_assistant_conversation(
             row("c-1", "Weather in Vienna?", 300),
             2,
+            "",
             c.entries.clone(),
             strings(&["m2", "m3", "m5"]),
         )
@@ -144,6 +148,7 @@ async fn a_save_on_an_old_revision_is_refused() {
         client.save_assistant_conversation(
             row("c-1", "x", 1),
             base,
+            "",
             vec![entry("e0", text)],
             strings(&[text]),
         )
@@ -154,6 +159,41 @@ async fn a_save_on_an_old_revision_is_refused() {
     assert_eq!(conflict(save(1, "d").await), ASSISTANT_STALE);
     let c = client.assistant_conversation("c-1").await.expect("read");
     assert_eq!(c.history, strings(&["c"]));
+}
+
+/// A save that committed but whose answer was lost (Rocky timed out after
+/// the commit) is sent again as it was: it succeeds with the same revision,
+/// writes nothing more, and the next save builds on it. Another save on the
+/// old base is still refused.
+#[tokio::test]
+async fn the_retry_of_a_committed_save_succeeds_with_its_revision() {
+    let (_dir, client) = open().await;
+    let save = |base, save_id: &'static str, text: &'static str| {
+        client.save_assistant_conversation(
+            row("c-1", "x", 1),
+            base,
+            save_id,
+            vec![entry("e0", text)],
+            strings(&[text]),
+        )
+    };
+    assert_eq!(save(0, "s-a", "a").await.expect("first save"), 1);
+    // The phone never heard back, and sends the identical save again.
+    assert_eq!(save(0, "s-a", "a").await.expect("its retry"), 1);
+    assert_eq!(save(0, "s-a", "a").await.expect("and again"), 1);
+    let c = client.assistant_conversation("c-1").await.expect("read");
+    assert_eq!(
+        (c.conversation.revision, c.history.clone()),
+        (1, strings(&["a"]))
+    );
+
+    assert_eq!(save(1, "s-b", "b").await.expect("the next save"), 2);
+    assert_eq!(save(1, "s-b", "b").await.expect("its retry"), 2);
+    // A save of an older version is answered only while it is the committed one.
+    assert_eq!(conflict(save(0, "s-a", "a").await), ASSISTANT_STALE);
+    assert_eq!(conflict(save(1, "s-c", "c").await), ASSISTANT_STALE);
+    let c = client.assistant_conversation("c-1").await.expect("read");
+    assert_eq!((c.conversation.revision, c.history), (2, strings(&["b"])));
 }
 
 /// A deleted conversation stays deleted: its tombstone refuses later saves
@@ -167,6 +207,7 @@ async fn a_deleted_conversation_refuses_saves() {
             .save_assistant_conversation(
                 row(id, id, at),
                 0,
+                "",
                 vec![entry("e0", "{}")],
                 strings(&["m"]),
             )
@@ -203,7 +244,13 @@ async fn a_deleted_conversation_refuses_saves() {
         assert_eq!(
             conflict(
                 client
-                    .save_assistant_conversation(row("c-mid", "back", 500), base, vec![], vec![])
+                    .save_assistant_conversation(
+                        row("c-mid", "back", 500),
+                        base,
+                        "",
+                        vec![],
+                        vec![]
+                    )
                     .await
             ),
             ASSISTANT_DELETED
@@ -218,7 +265,7 @@ async fn a_deleted_conversation_refuses_saves() {
     assert_eq!(
         conflict(
             client
-                .save_assistant_conversation(row("c-never", "x", 1), 0, vec![], vec![])
+                .save_assistant_conversation(row("c-never", "x", 1), 0, "", vec![], vec![])
                 .await
         ),
         ASSISTANT_DELETED
@@ -238,7 +285,13 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     let entries: Vec<_> = (0..60).map(|i| entry(&format!("e{i}"), &big)).collect();
     let history: Vec<_> = (0..60).map(|i| format!("{i:03}{}", &big[3..])).collect();
     client
-        .save_assistant_conversation(row("c-big", "big", 1), 0, entries.clone(), history.clone())
+        .save_assistant_conversation(
+            row("c-big", "big", 1),
+            0,
+            "",
+            entries.clone(),
+            history.clone(),
+        )
         .await
         .expect("save big");
     let c = client.assistant_conversation("c-big").await.expect("read");
@@ -248,7 +301,7 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     // No limit on how long a conversation gets: 3000 entries.
     let many: Vec<_> = (0..3000).map(|i| entry(&format!("e{i}"), "{}")).collect();
     client
-        .save_assistant_conversation(row("c-long", "long", 1), 0, many, vec![])
+        .save_assistant_conversation(row("c-long", "long", 1), 0, "", many, vec![])
         .await
         .expect("save a long conversation");
     let c = client.assistant_conversation("c-long").await.expect("read");
@@ -263,14 +316,14 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     ] {
         assert!(matches!(
             client
-                .save_assistant_conversation(row("c-x", "x", 1), 0, entries, history)
+                .save_assistant_conversation(row("c-x", "x", 1), 0, "", entries, history)
                 .await,
             Err(PrismError::InvalidInput(_))
         ));
     }
     assert!(matches!(
         client
-            .save_assistant_conversation(row("not an id", "x", 1), 0, vec![], vec![])
+            .save_assistant_conversation(row("not an id", "x", 1), 0, "", vec![], vec![])
             .await,
         Err(PrismError::InvalidInput(_))
     ));
@@ -302,6 +355,7 @@ async fn a_replica_of_the_first_schema_takes_the_assistants_tables() {
         .save_assistant_conversation(
             row("c-1", "hi", 1),
             0,
+            "",
             vec![entry("e0", "{}")],
             strings(&["m"]),
         )

@@ -131,7 +131,7 @@ All tables are replayed Rocky tables. Ids are Rocky ids unless noted.
   volume keeps one version per package. The leader pushes `app.release` once
   per release.
 
-- `assistant_conversations(conversation_id, device, title, created_at, updated_at, revision, entry_count, history_from, history_to, deleted)`,
+- `assistant_conversations(conversation_id, device, title, created_at, updated_at, revision, entry_count, history_from, history_to, save_id, deleted)`,
   `assistant_entries(conversation_id, position, revision, entry_id, body)` and
   `assistant_history(conversation_id, seq, revision, body)`: the phone
   assistant's conversations (`rocky-prism/src/assistant.rs`), written by the
@@ -144,8 +144,9 @@ All tables are replayed Rocky tables. Ids are Rocky ids unless noted.
   conversation's row, then deletes what it replaced; readers take the
   newest row per position up to the committed revision, so they never see
   half a save. A save names the revision it builds on and is refused when
-  that is no longer the committed one; `deleted` marks a tombstone that
-  refuses every save.
+  that is no longer the committed one, unless the committed revision is that
+  save's own (`save_id`, the app's ID for it): then its retry gets the same
+  answer. `deleted` marks a tombstone that refuses every save.
 
 Request rows are written once per `request_id`, claimed like `alert_actions`
 (unclaimed, stale after 5 minutes, or already the worker's) and finished only

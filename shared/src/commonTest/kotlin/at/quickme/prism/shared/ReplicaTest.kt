@@ -79,13 +79,20 @@ suspend fun replicaTests(directory: String) {
 
     // The assistant's conversations: stored, read back, listed, deleted.
     val stored = api.saveAssistantConversation(
-        "c-1", 0, "Weather?", 100, 200,
+        "c-1", 0, "s-1", "Weather?", 100, 200,
         listOf(StoredEntry("e0", """{"type":"user","text":"Weather?"}"""), StoredEntry("tool:1", "{}")),
         listOf("""{"m":1}""", """{"m":2}"""),
     )
     check(stored == 1L) { "stored: $stored" }
+    // Its answer lost, the identical save again: the same answer.
+    val retried = api.saveAssistantConversation(
+        "c-1", 0, "s-1", "Weather?", 100, 200,
+        listOf(StoredEntry("e0", """{"type":"user","text":"Weather?"}"""), StoredEntry("tool:1", "{}")),
+        listOf("""{"m":1}""", """{"m":2}"""),
+    )
+    check(retried == 1L) { "the retry of a committed save: $retried" }
     val stale = try {
-        api.saveAssistantConversation("c-1", 0, "x", 1, 1, emptyList(), emptyList())
+        api.saveAssistantConversation("c-1", 0, "s-other", "x", 1, 1, emptyList(), emptyList())
         null
     } catch (e: PrismError) {
         e
@@ -104,7 +111,7 @@ suspend fun replicaTests(directory: String) {
     }
     check(gone?.status == 404) { "a deleted conversation still read: ${gone?.status}" }
     val savedAgain = try {
-        api.saveAssistantConversation("c-1", 1, "back", 1, 1, emptyList(), emptyList())
+        api.saveAssistantConversation("c-1", 1, "s-back", "back", 1, 1, emptyList(), emptyList())
         null
     } catch (e: PrismError) {
         e

@@ -492,6 +492,13 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                         .required()
                         .default(0),
                 )
+                // The app's ID of the save that committed `revision`: its retry
+                // is answered as the first time.
+                .column(
+                    Column::new("save_id", Affinity::Text)
+                        .required()
+                        .default(""),
+                )
                 .column(
                     Column::new("deleted", Affinity::Integer)
                         .required()

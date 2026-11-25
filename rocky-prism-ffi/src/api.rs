@@ -1396,11 +1396,12 @@ impl Api {
     }
 
     /// `PUT /v1/assistant/conversations/{id}`: the conversation as it is now
-    /// (the `revision` it builds on, `title`, `createdAt`, `updatedAt`,
-    /// `entries` `[{id, body}]`, `history` `[body]`); this device started it
-    /// if it is new. Answers `{"conversation": {id, revision}}` with the
-    /// committed revision; 409 when it changed since `revision`, 410 once
-    /// deleted.
+    /// (the `revision` it builds on, the `saveId` of the revision it makes,
+    /// `title`, `createdAt`, `updatedAt`, `entries` `[{id, body}]`, `history`
+    /// `[body]`); this device started it if it is new. Answers
+    /// `{"conversation": {id, revision}}` with the committed revision, also
+    /// to a retry of the save that committed it; 409 when it changed since
+    /// `revision`, 410 once deleted.
     async fn save_assistant_conversation(&self, id: &str, body: &Value) -> Result<Reply, ApiError> {
         let entries: Vec<AssistantEntry> = body
             .get("entries")
@@ -1425,9 +1426,16 @@ impl Api {
             revision: 0,
         };
         let base = body.get("revision").and_then(Value::as_i64).unwrap_or(0);
+        let save_id = str_field(body, "saveId");
         let c = &self.client;
         let saved = retrying(|| {
-            c.save_assistant_conversation(row.clone(), base, entries.clone(), history.clone())
+            c.save_assistant_conversation(
+                row.clone(),
+                base,
+                &save_id,
+                entries.clone(),
+                history.clone(),
+            )
         })
         .await;
         match saved {

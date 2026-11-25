@@ -18,6 +18,7 @@ import android.util.Log
 import at.quickme.prism.PrismApi
 import at.quickme.prism.Sample
 import at.quickme.prism.shared.AssistantConversation
+import at.quickme.prism.shared.PrismClient
 import at.quickme.prism.shared.PrismError
 import at.quickme.prism.shared.StoredEntry
 import java.io.File
@@ -49,6 +50,8 @@ data class ConversationSnapshot(
     val updatedAt: Long,
     /** The committed revision this builds on (0: new). */
     val revision: Long = 0,
+    /** The ID of the revision this version makes, new for every version queued: its retry is answered as the first time. */
+    val saveId: String = "",
     val entries: List<StoredEntry>,
     val history: List<String>,
     /** Why the replica refused it for good; it then stays on the phone, unsent. */
@@ -108,7 +111,7 @@ object ConversationStore {
                 if (tombstoned(app, s.id)) return@launch
                 val waiting = read(file(app, s.id, JSON))
                 val base = waiting?.revision ?: maxOf(s.revision, committed(app, s.id))
-                write(file(app, s.id, JSON), s.copy(revision = base, problem = waiting?.problem.orEmpty()))
+                write(file(app, s.id, JSON), s.copy(revision = base, saveId = PrismClient.requestId(), problem = waiting?.problem.orEmpty()))
             }
             send(app)
         }
@@ -153,7 +156,8 @@ object ConversationStore {
         }
         if (local != null) return local
         val s = PrismApi.call(c) { assistantConversation(id) }
-        return ConversationSnapshot(s.conversation.id, s.conversation.title, s.conversation.createdAt, s.conversation.updatedAt, s.conversation.revision, s.entries, s.history)
+        val c = s.conversation
+        return ConversationSnapshot(c.id, c.title, c.createdAt, c.updatedAt, revision = c.revision, entries = s.entries, history = s.history)
     }
 
     /** Sends what waits in the outbox (the replica opened, a screen asks); on failure it tries again later. */
@@ -213,7 +217,9 @@ object ConversationStore {
         }
         if (s.problem.isNotEmpty()) return
         val revision = try {
-            PrismApi.call(app) { saveAssistantConversation(s.id, s.revision, s.title, s.createdAt, s.updatedAt, s.entries, s.history) }
+            // A save whose answer was lost after it committed: sent again with
+            // its saveId, it is answered as the first time.
+            PrismApi.call(app) { saveAssistantConversation(s.id, s.revision, s.saveId, s.title, s.createdAt, s.updatedAt, s.entries, s.history) }
         } catch (e: PrismError) {
             when {
                 e.status == 410 -> files.withLock {

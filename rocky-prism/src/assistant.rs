@@ -83,6 +83,8 @@ struct Head {
     entry_count: i64,
     history_from: i64,
     history_to: i64,
+    /// The save that committed `row.revision` (the app's ID for it).
+    save_id: String,
 }
 
 enum Found {
@@ -217,7 +219,7 @@ fn head_of(rows: Vec<(Head, bool)>) -> Found {
 }
 
 const HEAD_COLUMNS: &str = "id, conversation_id, device, title, created_at, updated_at, \
-     revision, entry_count, history_from, history_to, deleted";
+     revision, entry_count, history_from, history_to, save_id, deleted";
 
 fn head_row(r: &Row) -> Result<(Head, bool), PrismError> {
     Ok((
@@ -234,6 +236,7 @@ fn head_row(r: &Row) -> Result<(Head, bool), PrismError> {
             entry_count: col_i64(r, "entry_count"),
             history_from: col_i64(r, "history_from"),
             history_to: col_i64(r, "history_to"),
+            save_id: col_str(r, "save_id"),
         },
         col_i64(r, "deleted") != 0,
     ))
@@ -314,10 +317,17 @@ impl PrismClient {
     /// with [`ASSISTANT_STALE`]. The first save keeps `device` and
     /// `created_at`. Returns the committed revision, `base` when nothing
     /// changed.
+    ///
+    /// `save_id` names the revision this save creates (the app picks it, one
+    /// per version it queues). When the committed revision is that save's
+    /// already, the save is answered as the first time, with that revision:
+    /// a retry of a save that committed but whose answer was lost (Rocky
+    /// timed out after the commit) succeeds instead of finding its base gone.
     pub async fn save_assistant_conversation(
         &self,
         conversation: AssistantConversationRow,
         base: i64,
+        save_id: &str,
         entries: Vec<AssistantEntry>,
         history: Vec<String>,
     ) -> Result<i64, PrismError> {
@@ -337,6 +347,11 @@ impl PrismClient {
                 "An entry or message is at most {ASSISTANT_MAX_BODY_BYTES} bytes."
             )));
         }
+        if save_id.len() > MAX_ID_BYTES {
+            return Err(PrismError::InvalidInput(
+                "A save's ID is at most 100 bytes.".into(),
+            ));
+        }
         let mut ids = BTreeSet::new();
         if let Some(e) = entries
             .iter()
@@ -355,6 +370,9 @@ impl PrismClient {
             Found::Live(head) => Some(head),
         };
         let committed = head.as_ref().map_or(0, |h| h.row.revision);
+        if !save_id.is_empty() && head.as_ref().is_some_and(|h| h.save_id == save_id) {
+            return Ok(committed);
+        }
         if base != committed {
             return Err(PrismError::Conflict(ASSISTANT_STALE.into()));
         }
@@ -454,6 +472,7 @@ impl PrismClient {
                     .map_or(conversation.clone(), |h| h.row.clone())
             },
             rid: head.as_ref().map_or(SqlValue::Null, |h| h.rid.clone()),
+            save_id: save_id.to_string(),
             entry_count: entries.len() as i64,
             history_from: new_from,
             history_to: new_to,
@@ -583,7 +602,7 @@ impl PrismClient {
                 Op::Commit(head, true) => {
                     tx.execute(
                         "UPDATE assistant_conversations SET title = ?, updated_at = ?, revision = ?, \
-                         entry_count = ?, history_from = ?, history_to = ? WHERE id = ?",
+                         entry_count = ?, history_from = ?, history_to = ?, save_id = ? WHERE id = ?",
                         params![
                             head.row.title,
                             head.row.updated_at,
@@ -591,6 +610,7 @@ impl PrismClient {
                             head.entry_count,
                             head.history_from,
                             head.history_to,
+                            head.save_id,
                             head.rid
                         ],
                     )
@@ -604,8 +624,8 @@ impl PrismClient {
                     tx.execute(
                         "INSERT INTO assistant_conversations \
                          (id, conversation_id, device, title, created_at, updated_at, revision, \
-                          entry_count, history_from, history_to) \
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          entry_count, history_from, history_to, save_id) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         params![
                             rid,
                             head.row.conversation_id,
@@ -616,7 +636,8 @@ impl PrismClient {
                             head.row.revision,
                             head.entry_count,
                             head.history_from,
-                            head.history_to
+                            head.history_to,
+                            head.save_id
                         ],
                     )
                     .await
@@ -781,6 +802,7 @@ mod tests {
             .save_assistant_conversation(
                 row.clone(),
                 0,
+                "s1",
                 vec![e("e0", "a"), e("e1", "b")],
                 vec!["m1".into(), "m2".into()],
             )
@@ -827,6 +849,7 @@ mod tests {
             .save_assistant_conversation(
                 row,
                 1,
+                "s2",
                 vec![e("e0", "a"), e("e1", "b"), e("e9", "z")],
                 vec!["m1".into(), "m2".into(), "m9".into()],
             )

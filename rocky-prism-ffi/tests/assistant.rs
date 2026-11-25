@@ -82,13 +82,25 @@ async fn conversations_are_saved_on_the_phone_and_reach_the_workers() {
         "PUT",
         "/v1/assistant/conversations/c-1",
         Some(
-            json!({"revision": 0, "title": "What's the weather?", "createdAt": 100,
-            "updatedAt": 200, "entries": entries, "history": history}),
+            json!({"revision": 0, "saveId": "s-1", "title": "What's the weather?",
+            "createdAt": 100, "updatedAt": 200, "entries": entries, "history": history}),
         ),
     )
     .await;
     assert_eq!(status, 200, "{saved}");
     assert_eq!(saved["conversation"], json!({"id": "c-1", "revision": 1}));
+    // Sent again as it was (its answer lost): the same answer.
+    let (status, again) = call(
+        &on_phone,
+        "PUT",
+        "/v1/assistant/conversations/c-1",
+        Some(
+            json!({"revision": 0, "saveId": "s-1", "title": "What's the weather?",
+            "createdAt": 100, "updatedAt": 200, "entries": entries, "history": history}),
+        ),
+    )
+    .await;
+    assert_eq!((status, &again), (200, &saved), "{again}");
     // Saved again on the revision it no longer is: refused.
     let (status, stale) = call(
         &on_phone,

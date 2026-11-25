@@ -741,10 +741,14 @@ the committed one.
   `history` the model's messages in order, each the app's own JSON as a
   string.
 - `PUT /v1/assistant/conversations/{id}` stores the conversation as it is
-  now: `{"revision", "title", "createdAt", "updatedAt", "entries",
+  now: `{"revision", "saveId", "title", "createdAt", "updatedAt", "entries",
   "history"}`, where `revision` is the committed one it builds on (0 for a
-  new conversation). It returns `{"conversation": {"id", "revision"}}` with
-  the new committed revision (the same when nothing changed). It writes only
+  new conversation) and `saveId` the app's ID for the revision it makes (a
+  new one for every version). It returns `{"conversation": {"id",
+  "revision"}}` with the new committed revision (the same when nothing
+  changed). When the committed revision is already that `saveId`'s, the
+  answer is the same as the first time: a save that committed but whose
+  answer was lost (the replica timed out) succeeds when sent again. It writes only
   the rows that changed, under the new revision, and commits it last, so a
   save cut short is never read and the same `PUT` again is safe. `409`
   (`conflict`) when the conversation moved on since `revision` (another
