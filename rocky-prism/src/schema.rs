@@ -1,8 +1,14 @@
 use crate::types::PrismError;
 use rocky_sdk::{Affinity, Column, Schema, Table};
 
+/// The schema's version. Version 2 added the assistant's tables, nothing
+/// else: an additive change, which the first issuer opening with it publishes
+/// as a `continue` seal and every other replica follows (docs/worker.md,
+/// "Schema changes").
+pub const SCHEMA_VERSION: u32 = 2;
+
 pub fn prism_schema() -> Result<Schema, PrismError> {
-    Schema::builder("prism", 1)
+    Schema::builder("prism", SCHEMA_VERSION)
         .table(
             Table::replayed("profiles")
                 .column(Column::new("slug", Affinity::Text).required())
@@ -454,6 +460,34 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                         .required()
                         .default(""),
                 ),
+        )
+        .table(
+            // The phone assistant's conversations (rocky-prism/src/assistant.rs):
+            // one row per conversation, rewritten as it goes on.
+            Table::replayed("assistant_conversations")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("device", Affinity::Text).required())
+                .column(Column::new("title", Affinity::Text).required().default(""))
+                .column(Column::new("created_at", Affinity::Integer).required())
+                .column(Column::new("updated_at", Affinity::Integer).required()),
+        )
+        .table(
+            // What a conversation shows, one row per transcript entry (the
+            // owner's words, an answer, a tool's line or card) as the app's
+            // JSON, in `position` order. Never image or file bytes.
+            Table::replayed("assistant_entries")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("entry_id", Affinity::Text).required())
+                .column(Column::new("position", Affinity::Integer).required())
+                .column(Column::new("body", Affinity::Text).required()),
+        )
+        .table(
+            // The model's history that continues a conversation, one row per
+            // message as the app's JSON, in `seq` order.
+            Table::replayed("assistant_history")
+                .column(Column::new("conversation_id", Affinity::Text).required())
+                .column(Column::new("seq", Affinity::Integer).required())
+                .column(Column::new("body", Affinity::Text).required()),
         )
         .build()
         .map_err(|err| PrismError::Storage(err.to_string()))

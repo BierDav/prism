@@ -2,7 +2,10 @@
 // harness's history behind it, and what the owner does on the cards. It
 // lives as long as the overlay; the conversation (transcript and history,
 // tool results included) is kept on the phone for the overlay's resume
-// window, so reopening within ten minutes continues it.
+// window, so reopening within ten minutes continues it. Every conversation
+// is also stored in Rocky (ConversationStore), where the history screen
+// (AssistHistory.kt) lists it, opens it and continues it with a session of
+// its own; "New chat" starts another and keeps this one.
 //
 // Without assistant_api_key it isn't configured, and the overlay starts T3
 // agents directly, as before the assistant.
@@ -16,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import at.quickme.prism.Settings
+import at.quickme.prism.assistant.core.Conversations
 import at.quickme.prism.assistant.core.Entry
 import at.quickme.prism.assistant.core.Event
 import at.quickme.prism.assistant.core.HandoffCard
@@ -28,14 +32,22 @@ import java.io.ByteArrayOutputStream
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import at.quickme.prism.shared.StoredEntry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 class AssistantSession(
     private val context: Context,
     private val capture: ScreenCapture = ScreenCapture.None,
+    /** Continue the overlay's conversation of the resume window; false: a new one. */
+    resume: Boolean = true,
 ) {
     private val app = context.applicationContext
     private val memory = AssistantMemory(app)
@@ -43,15 +55,21 @@ class AssistantSession(
     /** Whether the assistant can run: the gateway has a key. */
     val configured: Boolean get() = Settings.assistantApiKey(app).isNotEmpty()
 
-    var transcript by mutableStateOf(memory.transcript())
+    var transcript by mutableStateOf(if (resume) memory.transcript() else Transcript())
         private set
 
     /** A turn is running. */
     var running by mutableStateOf(false)
         private set
 
-    private var history: List<Message> = memory.history()
+    /** The conversation's ID in Rocky (Conversations.newId). */
+    var conversationId: String = (if (resume) memory.conversation() else null) ?: Conversations.newId()
+        private set
+    private var createdAt: Long = (if (resume) memory.createdAt() else 0L).takeIf { it > 0 } ?: nowSeconds()
+
+    private var history: List<Message> = if (resume) memory.history() else emptyList()
     private var notes = ArrayList<String>()
+    private var storing: Job? = null
 
     /** The T3 agent the overlay follows (its ID and title), for the model's context. */
     var followed: () -> Pair<String, String>? = { null }
@@ -112,6 +130,7 @@ class AssistantSession(
         } finally {
             running = false
             save()
+            store(now = true)
             harness.close()
         }
     }
@@ -163,17 +182,59 @@ class AssistantSession(
         }
     }
 
-    /** A new conversation: nothing of this one is kept. */
+    /** A new conversation; this one stays stored. */
     fun clear() {
+        store(now = true)
         transcript = Transcript()
         history = emptyList()
         notes.clear()
+        conversationId = Conversations.newId()
+        createdAt = nowSeconds()
         memory.forget()
     }
 
-    private fun save() {
-        memory.save(transcript, history)
+    /** Continues stored conversation [s] (the history screen opened it). */
+    fun open(s: ConversationSnapshot) {
+        if (running) return
+        store(now = true)
+        conversationId = s.id
+        createdAt = s.createdAt
+        transcript = Conversations.transcript(s.entries.map { it.id to it.body })
+        history = Harness.decodeEach(s.history)
+        notes.clear()
     }
+
+    private fun save() {
+        memory.save(transcript, history, conversationId, createdAt)
+        store()
+    }
+
+    /**
+     * Stores the conversation in Rocky: after a moment's quiet while a turn
+     * runs (it changes with every step), at once when [now].
+     */
+    private fun store(now: Boolean = false) {
+        storing?.cancel()
+        if (transcript.isEmpty) return
+        if (now) {
+            ConversationStore.save(app, snapshot())
+            return
+        }
+        storing = storeScope.launch {
+            delay(STORE_AFTER_MS)
+            ConversationStore.save(app, snapshot())
+        }
+    }
+
+    /** The conversation as rows (Conversations): no images or files, long texts cut. */
+    fun snapshot(): ConversationSnapshot = ConversationSnapshot(
+        id = conversationId,
+        title = Conversations.title(transcript).orEmpty(),
+        createdAt = createdAt,
+        updatedAt = nowSeconds(),
+        entries = Conversations.entryRows(transcript).map { (id, body) -> StoredEntry(id, body) },
+        history = Conversations.historyRows(Harness.encodeEach(history)),
+    )
 
     private fun problem(e: Exception): String {
         val m = e.message.orEmpty()
@@ -187,6 +248,9 @@ class AssistantSession(
 
     private companion object {
         const val TAG = "PrismAssistant"
+        const val STORE_AFTER_MS = 1500L
+        /** Outlives the overlay, so its last save still goes out. */
+        val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     }
 }
 
@@ -212,6 +276,8 @@ internal fun scaleImage(a: AssistAttachment): AssistAttachment {
 
 private const val MAX_IMAGE = 1600
 
+private fun nowSeconds() = System.currentTimeMillis() / 1000
+
 /** The conversation on the phone, for the resume window. */
 internal class AssistantMemory(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("assistant", Context.MODE_PRIVATE)
@@ -225,22 +291,36 @@ internal class AssistantMemory(context: Context) {
 
     fun history(): List<Message> = if (!fresh()) emptyList() else Harness.decode(prefs.getString(HISTORY, null) ?: return emptyList())
 
-    fun save(transcript: Transcript, history: List<Message>) {
+    /** The conversation's ID in Rocky, within the resume window. */
+    fun conversation(): String? = if (!fresh()) null else prefs.getString(ID, null)
+
+    fun createdAt(): Long = if (!fresh()) 0L else prefs.getLong(CREATED, 0L)
+
+    fun save(transcript: Transcript, history: List<Message>, id: String, createdAt: Long) {
         prefs.edit()
             .putString(TRANSCRIPT, json.encodeToString(Transcript.serializer(), transcript))
             .putString(HISTORY, Harness.encode(history))
+            .putString(ID, id)
+            .putLong(CREATED, createdAt)
             .putLong(AT, System.currentTimeMillis())
             .apply()
     }
 
+    /** Forgets conversation [id] if it is the one kept (it was deleted). */
+    fun forget(id: String) {
+        if (prefs.getString(ID, null) == id) forget()
+    }
+
     fun forget() {
-        prefs.edit().remove(TRANSCRIPT).remove(HISTORY).remove(AT).apply()
+        prefs.edit().remove(TRANSCRIPT).remove(HISTORY).remove(ID).remove(CREATED).remove(AT).apply()
     }
 
     private companion object {
         const val TRANSCRIPT = "harness_transcript"
         const val HISTORY = "harness_history"
         const val AT = "harness_at"
+        const val ID = "harness_conversation"
+        const val CREATED = "harness_created"
         /** As the overlay's own (AssistMemory): ten minutes. */
         const val RESUME_MS = 10 * 60 * 1000L
     }

@@ -186,26 +186,33 @@ fun AssistantTranscript(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 items(entries, key = { it.id }) { e ->
-                    when (e) {
-                        is Entry.User -> UserLine(e)
-                        is Entry.Answer -> MarkdownText(e.text)
-                        is Entry.Step -> StepLine(e)
-                        is Entry.Problem -> ProblemLine(e.text)
-                        is Entry.Shown -> ToolCard(
-                            e.card,
-                            agent = agent?.takeIf { e.id == handoff },
-                            onEdit = { text -> onEdit(e.id, text) },
-                            now = now,
-                        )
-                    }
+                    TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now)
                 }
-                if (running && (entries.lastOrNull() as? Entry.Step)?.running != true) {
+                if (thinking(transcript, running)) {
                     item(key = "thinking") { Thinking() }
                 }
             }
         }
     }
 }
+
+/**
+ * One entry of a transcript, as the overlay and the history screen show it;
+ * [agent] for the hand-off whose agent is followed.
+ */
+@Composable
+fun TranscriptEntry(e: Entry, agent: FollowedAgent?, onEdit: suspend (String, String) -> String?, now: (() -> Long)? = null) {
+    when (e) {
+        is Entry.User -> UserLine(e)
+        is Entry.Answer -> MarkdownText(e.text)
+        is Entry.Step -> StepLine(e)
+        is Entry.Problem -> ProblemLine(e.text)
+        is Entry.Shown -> ToolCard(e.card, agent = agent, onEdit = { text -> onEdit(e.id, text) }, now = now)
+    }
+}
+
+/** Whether "Thinking…" shows below [t]: a turn runs and no tool line says what it does. */
+fun thinking(t: Transcript, running: Boolean): Boolean = running && (t.entries.lastOrNull() as? Entry.Step)?.running != true
 
 /** What the owner said, at the right, with what they attached. */
 @Composable
@@ -262,7 +269,7 @@ private fun ProblemLine(text: String) {
 }
 
 @Composable
-private fun Thinking() {
+fun Thinking() {
     Row(verticalAlignment = Alignment.CenterVertically) {
         LoadingIndicator(Modifier.size(20.dp))
         Text("Thinking…", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 10.dp))

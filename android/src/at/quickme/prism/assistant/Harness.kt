@@ -333,7 +333,20 @@ class Harness(
          * names (the model saw them in their turn; they'd fill the phone's
          * preferences), then [sanitize]d.
          */
-        fun encode(messages: List<Message>): String {
+        fun encode(messages: List<Message>): String = json.encodeToString(listSerializer, light(messages))
+
+        /**
+         * The conversation for Rocky, one JSON per message (each a row,
+         * Conversations.historyRows); as [encode], without images and files.
+         */
+        fun encodeEach(messages: List<Message>): List<String> =
+            light(messages).map { json.encodeToString(Message.serializer(), it) }
+
+        /** The conversation from its rows; messages that don't decode are left out. */
+        fun decodeEach(rows: List<String>): List<Message> =
+            sanitize(rows.mapNotNull { runCatching { json.decodeFromString(Message.serializer(), it) }.getOrNull() })
+
+        private fun light(messages: List<Message>): List<Message> {
             val light = messages.map { m ->
                 if (m !is Message.User) m else m.copy(parts = m.parts.map { p ->
                     when {
@@ -344,7 +357,7 @@ class Harness(
                     }
                 })
             }
-            return json.encodeToString(listSerializer, sanitize(light))
+            return sanitize(light)
         }
 
         fun decode(text: String): List<Message> =

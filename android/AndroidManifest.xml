@@ -142,6 +142,11 @@
         <activity android:name=".NetbirdActivity" android:exported="false" />
         <activity android:name=".PlacementActivity" android:exported="false" />
         <activity
+            android:name=".assistant.AssistHistoryActivity"
+            android:exported="false"
+            android:label="Chats"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".T3Activity"
             android:exported="false"
             android:label="T3"
