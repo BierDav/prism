@@ -38,7 +38,16 @@ class MatrixClient(private val homeserver: String, private val token: String) {
     suspend fun rooms(fresh: Boolean = false): List<Matrix.Room> {
         requireSetUp()
         if (!fresh) rooms?.let { return it }
-        return Matrix.decodeRooms(get(Matrix.roomsSyncPath()), me()).also { rooms = it }
+        val found = try {
+            Matrix.decodeSlidingRooms(
+                Http.request("POST", Matrix.root(homeserver) + Matrix.slidingSyncPath(), Matrix.slidingSyncBody(ROOMS).toString(), headers()),
+            )
+        } catch (e: HttpException) {
+            // A homeserver without sliding sync: the (slow) full /sync.
+            if (e.status != 404 && e.status != 400) throw e
+            Matrix.decodeRooms(get(Matrix.roomsSyncPath()), me())
+        }
+        return found.also { rooms = it }
     }
 
     /** The one room [query] names (ID or name); ambiguity goes back to the model. */
@@ -95,6 +104,11 @@ class MatrixClient(private val homeserver: String, private val token: String) {
         return Matrix.eventId(
             Http.request("PUT", Matrix.base(homeserver) + Matrix.sendPath(roomId, "prism-" + UUID.randomUUID()), Matrix.edit(eventId, text).toString(), headers()),
         )
+    }
+
+    private companion object {
+        /** The most recently active rooms a request looks through (300 take about 6 s). */
+        const val ROOMS = 300
     }
 }
 
