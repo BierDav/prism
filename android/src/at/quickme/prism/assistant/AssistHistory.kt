@@ -9,6 +9,9 @@
 
 package at.quickme.prism.assistant
 
+import at.quickme.prism.assistant.a2ui.SurfaceHost
+import at.quickme.prism.assistant.a2ui.rememberSurfaceHost
+import at.quickme.prism.assistant.core.UiAction
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -250,8 +253,7 @@ private fun HistoryScreen(onClose: () -> Unit) {
                     scope.launch { shown.send(request) }
                 }
             },
-            onEdit = { entry, edited -> shown?.edit(entry, edited) },
-            onToggle = { entry, on -> shown?.toggle(entry, on) },
+            onAction = { entry, action -> shown?.act(entry, action) },
             onNew = { openConversation(null) },
             onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
                 delete(shown.conversationId)
@@ -392,7 +394,8 @@ internal fun HistoryChat(
     text: String,
     onText: (String) -> Unit,
     onSend: () -> Unit,
-    onEdit: suspend (String, String) -> String?,
+    /** What the owner did on a surface (entry, A2UI action): AssistantSession.act; null where the cards only show. */
+    onAction: (suspend (String, UiAction) -> String?)?,
     onNew: () -> Unit,
     /** Null for a chat with nothing in it yet. */
     onDelete: (() -> Unit)?,
@@ -407,13 +410,14 @@ internal fun HistoryChat(
     /** In place of the plain field: the overlay's card. */
     composer: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
-    /** Flips a card's switch (entry, new state); without it the switches only show their state. */
-    onToggle: (suspend (String, Boolean) -> String?)? = null,
+    /** The renderer, when the caller made it (previews settle it first). */
+    host: SurfaceHost? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
     var confirm by remember { mutableStateOf(false) }
     val entries = transcript.entries
+    val surfaces = host ?: rememberSurfaceHost(entries, onAction)
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
     }
@@ -483,7 +487,7 @@ internal fun HistoryChat(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    items(entries, key = { it.id }) { e -> TranscriptEntry(e, agent?.takeIf { e.id == handoff }, onEdit, now, onToggle) }
+                    items(entries, key = { it.id }) { e -> TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now) }
                     if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
                 }
             }

@@ -20,7 +20,24 @@ import android.graphics.BitmapFactory
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.content.ContentUris
+import android.content.Intent
+import android.net.Uri
+import android.provider.AlarmClock
+import android.provider.CalendarContract
+import at.quickme.prism.PrismApi
 import at.quickme.prism.Settings
+import at.quickme.prism.T3Activity
+import at.quickme.prism.assistant.core.AlarmCard
+import at.quickme.prism.assistant.core.TimerCard
+import at.quickme.prism.assistant.core.Tools
+import at.quickme.prism.assistant.core.UiAction
+import at.quickme.prism.assistant.core.UiActions
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import at.quickme.prism.assistant.core.Conversations
 import at.quickme.prism.assistant.core.Entry
 import at.quickme.prism.assistant.core.Event
@@ -103,7 +120,7 @@ class AssistantSession(
         val m = matrix.also { matrixClient = it }
         return Harness(
             Gateway(Settings.assistantUrl(app), Settings.assistantApiKey(app), Settings.assistantModel(app), Settings.deviceName(app)),
-            tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app),
+            tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app) + uiTools { id -> transcript.surface(id)?.surface },
             systemPrompt = {
                 SystemPrompt.build(
                     SystemPrompt.Context(
@@ -125,7 +142,7 @@ class AssistantSession(
      * updated as it works. Returns when the turn ended (or failed: the
      * transcript says why).
      */
-    suspend fun send(text: String, attachments: List<AssistAttachment> = emptyList()) {
+    suspend fun send(text: String, attachments: List<AssistAttachment> = emptyList(), shown: String? = null) {
         if (running) return
         running = true
         turn = currentCoroutineContext()[Job]
@@ -140,6 +157,7 @@ class AssistantSession(
                 emit = { e -> withContext(Dispatchers.Main) { if (conversationId == mine) apply(e) } },
                 saved = { if (conversationId == mine) { history = it; save() } },
                 note = note,
+                shown = shown,
             )
             if (conversationId == mine) history = result
         } catch (e: CancellationException) {
@@ -163,23 +181,22 @@ class AssistantSession(
 
     private fun apply(e: Event) {
         transcript = transcript.after(e)
-        if (e is Event.ToolFinished && e.card is HandoffCard) {
-            val id = transcript.entries.last { it is Entry.Shown && it.card == e.card }.id
-            onHandoff(id, e.card)
+        if (e is Event.ToolFinished && e.card is HandoffCard && !e.failed) {
+            transcript.latestHandoff()?.let { (id, card) -> onHandoff(id, card) }
         }
         save()
     }
 
     /** The start of entry [entryId] was refused: its card says why and it isn't asked again. */
     fun failedStart(entryId: String, why: String) {
-        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? HandoffCard ?: return
+        val card = transcript.card(entryId) as? HandoffCard ?: return
         transcript = transcript.withCard(entryId, card.copy(failed = why))
         save()
     }
 
     /** The hand-off of entry [entryId] now has its agent (it was still starting). */
     fun started(entryId: String, agentId: String, title: String) {
-        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? HandoffCard ?: return
+        val card = transcript.card(entryId) as? HandoffCard ?: return
         transcript = transcript.withCard(entryId, card.copy(agentId = agentId, title = title.ifEmpty { card.title }))
         save()
     }
@@ -190,8 +207,7 @@ class AssistantSession(
      * next turn. Returns why it failed, or null.
      */
     suspend fun edit(entryId: String, text: String): String? {
-        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? MessageCard
-            ?: return "That message is gone."
+        val card = transcript.card(entryId) as? MessageCard ?: return "That message is gone."
         if (!card.editable) return "An SMS can't be changed once sent. Ask Prism to send a correction."
         val body = text.trim()
         if (body.isEmpty() || body == card.text) return null
@@ -216,8 +232,7 @@ class AssistantSession(
      * it failed, or null.
      */
     suspend fun toggle(entryId: String, on: Boolean): String? {
-        val card = (transcript.entries.firstOrNull { it.id == entryId } as? Entry.Shown)?.card as? SettingCard
-            ?: return "That card is gone."
+        val card = transcript.card(entryId) as? SettingCard ?: return "That card is gone."
         if (card.on == on) return null
         val (name, args) = Toggles.call(card, on) ?: return "This switch can't be changed from here."
         val tool = phoneTools(context, capture).firstOrNull { it.name == name } ?: return "This switch can't be changed from here."
@@ -235,6 +250,124 @@ class AssistantSession(
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "switch on a card failed (${e.javaClass.simpleName})")
+            e.message?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }?.take(200) ?: "That didn't work."
+        }
+    }
+
+    /**
+     * The owner did [action] on entry [entryId]'s surface. What they filled
+     * in is kept with it. A card's own button is handled here, the model
+     * hearing of it in its next turn (UiActions.note); anything else, such as
+     * a pick on a surface the model composed, is the next turn, shown as what
+     * the owner did. Returns why it couldn't, or null.
+     */
+    suspend fun act(entryId: String, action: UiAction): String? {
+        val entry = transcript.entries.firstOrNull { it.id == entryId } as? Entry.Ui ?: return "That card is gone."
+        action.dataModel?.takeIf { it != entry.surface.dataModel }?.let { data ->
+            transcript = transcript.withSurface(entryId, entry.surface.copy(dataModel = data))
+            save()
+        }
+        return when (val r = UiActions.route(entry.surface, action)) {
+            is UiActions.Route.Turn -> {
+                if (running) return "Prism is still answering; try again in a moment."
+                if (!configured) return "The assistant isn't set up on this phone."
+                actionScope.launch { send(r.prompt, shown = r.shown) }
+                null
+            }
+            is UiActions.Route.Local -> local(entryId, r)
+        }
+    }
+
+    /** A card's own button ([UiActions.LOCAL]) on entry [entryId]. */
+    private suspend fun local(entryId: String, r: UiActions.Route.Local): String? {
+        val c = r.context
+        fun text(key: String) = (c[key] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
+        val mine = conversationId
+        fun did(tool: String, label: String, said: String = "") {
+            if (conversationId != mine) return
+            transcript = transcript.did(tool, label)
+            notes.add(UiActions.note(r, said))
+            save()
+        }
+        return try {
+            when (r.name) {
+                UiActions.TOGGLE -> toggle(entryId, (c["on"] as? JsonPrimitive)?.booleanOrNull ?: return "The switch sent no state.")
+                UiActions.EDIT -> edit(entryId, text("text") ?: return "The message is empty.")
+                UiActions.CALL -> {
+                    val number = text("number") ?: return "No number to call."
+                    val tool = phoneTools(context, capture).first { it.name == Tools.CALL }
+                    val out = tool.run(Args(JsonObject(mapOf("to" to JsonPrimitive(number)))))
+                    did(Tools.CALL, "Calling ${text("name") ?: number}", out.text)
+                    null
+                }
+                UiActions.MESSAGE, UiActions.REPLY -> {
+                    val address = text("number") ?: text("address") ?: return "Nowhere to write to."
+                    val who = text("name") ?: text("title") ?: address
+                    if (text("channel") == MessageCard.MATRIX) {
+                        context.launch(Intent(Intent.ACTION_VIEW, Uri.parse("https://matrix.to/#/" + Uri.encode(address))))
+                        did(Tools.MATRIX_SEND, "Replying to $who on Matrix")
+                    } else {
+                        context.launch(Intent(Intent.ACTION_SENDTO, Uri.fromParts("smsto", address, null)))
+                        did(Tools.SEND_SMS, if (r.name == UiActions.REPLY) "Replying to $who" else "New text to $who")
+                    }
+                    null
+                }
+                UiActions.SNOOZE, UiActions.DISMISS -> {
+                    val card = transcript.card(entryId) as? AlarmCard ?: return "That alarm is gone."
+                    val intent = if (r.name == UiActions.SNOOZE) Intent(AlarmClock.ACTION_SNOOZE_ALARM)
+                    else Intent(AlarmClock.ACTION_DISMISS_ALARM)
+                        .putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_TIME)
+                        .putExtra(AlarmClock.EXTRA_HOUR, card.hour)
+                        .putExtra(AlarmClock.EXTRA_MINUTES, card.minute)
+                    context.launch(intent)
+                    if (conversationId == mine) {
+                        transcript = transcript.withCard(entryId, card.copy(state = if (r.name == UiActions.SNOOZE) AlarmCard.SNOOZED else AlarmCard.DISMISSED))
+                        notes.add(UiActions.note(r.copy(card = card)))
+                        save()
+                    }
+                    null
+                }
+                UiActions.STOP_TIMER, UiActions.ADD_MINUTE -> {
+                    val card = transcript.card(entryId) as? TimerCard ?: return "That timer is gone."
+                    val now = System.currentTimeMillis()
+                    val left = (card.seconds - ((now - card.startedAt) / 1000).toInt()).coerceAtLeast(0)
+                    context.launch(Intent(AlarmClock.ACTION_DISMISS_TIMER))
+                    val next = if (r.name == UiActions.STOP_TIMER) card.copy(stoppedAt = now) else {
+                        val seconds = left + 60
+                        val set = Intent(AlarmClock.ACTION_SET_TIMER)
+                            .putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+                            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                        if (card.label.isNotEmpty()) set.putExtra(AlarmClock.EXTRA_MESSAGE, card.label)
+                        context.launch(set)
+                        card.copy(seconds = seconds, startedAt = now)
+                    }
+                    if (conversationId == mine) {
+                        transcript = transcript.withCard(entryId, next)
+                        notes.add(UiActions.note(r.copy(card = card)))
+                        save()
+                    }
+                    null
+                }
+                UiActions.OPEN_EVENT -> {
+                    val id = (c["id"] as? JsonPrimitive)?.longOrNull?.takeIf { it > 0 } ?: return "This event can't be opened."
+                    context.launch(Intent(Intent.ACTION_VIEW, ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, id)))
+                    did(Tools.CALENDAR, "Opened ${text("title") ?: "the event"}")
+                    null
+                }
+                UiActions.OPEN_T3 -> {
+                    val id = text("agentId") ?: return "This agent hasn't started yet."
+                    val agent = PrismApi.call(app) { agentActivity(id) }.agent
+                    val intent = T3Activity.intent(app, agent) ?: return "That agent has no thread to open yet."
+                    context.launch(intent)
+                    did(Tools.START_T3, "Opened ${text("title") ?: agent.title} in T3")
+                    null
+                }
+                else -> "This button does nothing here."
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "a card's action failed (${e.javaClass.simpleName})")
             e.message?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }?.take(200) ?: "That didn't work."
         }
     }
@@ -362,6 +495,8 @@ class AssistantSession(
         private const val LIVE_SESSIONS = 8
         /** Outlives the overlay, so its last save still goes out. */
         private val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        /** Turns an action on a surface starts: they go on when the screen that showed it changes. */
+        private val actionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         /** The session holding each conversation in this process. */
         private val live = LinkedHashMap<String, AssistantSession>()
 
@@ -414,7 +549,7 @@ internal class AssistantMemory(context: Context) {
 
     fun transcript(): Transcript = if (!fresh()) Transcript() else
         runCatching { json.decodeFromString(Transcript.serializer(), prefs.getString(TRANSCRIPT, null) ?: return Transcript()) }
-            .getOrDefault(Transcript()).settled()
+            .getOrDefault(Transcript()).migrated().settled()
 
     fun history(): List<Message> = if (!fresh()) emptyList() else Harness.decode(prefs.getString(HISTORY, null) ?: return emptyList())
 

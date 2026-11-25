@@ -161,7 +161,7 @@ internal fun matrixTools(matrix: MatrixClient): List<AssistantTool> = listOf(
                     "[${time.format(Date(it.at))}] ${if (it.sender == me) "Me" else it.senderName}: ${it.text}" +
                         (if (it.edited) " (edited)" else "") + if (it.sender == me) " {event ${it.eventId}}" else ""
                 },
-                ThreadCard(MessageCard.MATRIX, room.name, msgs.map { ThreadMessage(if (it.sender == me) "Me" else it.senderName, it.text, it.at, it.sender == me) }),
+                ThreadCard(MessageCard.MATRIX, room.name, msgs.map { ThreadMessage(if (it.sender == me) "Me" else it.senderName, it.text, it.at, it.sender == me) }, address = room.id),
             )
         }
     },

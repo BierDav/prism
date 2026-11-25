@@ -52,6 +52,7 @@ import at.quickme.prism.assistant.core.Card
 import at.quickme.prism.assistant.core.Event
 import at.quickme.prism.assistant.core.HandNotes
 import at.quickme.prism.assistant.core.Tools
+import at.quickme.prism.assistant.core.UiChange
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.CancellationException
@@ -62,8 +63,12 @@ import kotlinx.serialization.json.JsonObject
 /** Where the model is: the gateway's base URL, its key, the model, and this phone's name for X-Fleet-Host. */
 data class Gateway(val url: String, val apiKey: String, val model: String, val host: String)
 
-/** What a tool did: [text] for the model, a [card] for the transcript, an [image] the model should see. */
-data class ToolOutput(val text: String, val card: Card? = null, val image: AssistAttachment? = null)
+/**
+ * What a tool did: [text] for the model, a [card] for the transcript (shown
+ * as an A2UI surface), an [image] the model should see, and the surfaces
+ * show_ui creates, changes or removes ([ui]).
+ */
+data class ToolOutput(val text: String, val card: Card? = null, val image: AssistAttachment? = null, val ui: UiChange? = null)
 
 /**
  * A tool of the assistant: its name, what it does (the model reads this),
@@ -154,8 +159,10 @@ class Harness(
         saved: (List<Message>) -> Unit,
         /** What happened since the last turn that the model should know (an edit or a switch made by hand on a card: HandNotes). */
         note: String = "",
+        /** What the transcript shows the owner said, when not [text] (an action on a surface: "Picked: Anna"). */
+        shown: String? = null,
     ): List<Message> {
-        emit(Event.Said(text, attachments.map { it.name }))
+        emit(Event.Said(shown ?: text, attachments.map { it.name }))
         // The latest output of each tool call, by the tool that made it: tools
         // run one after another, so the one that just ran wrote it.
         var last: ToolOutput? = null
@@ -187,7 +194,7 @@ class Harness(
                     why = null
                     val result = executeTool(call)
                     val output = last?.takeIf { result.resultKind is ToolResultKind.Success }
-                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: why ?: result.output, output?.card, failed = output == null))
+                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: why ?: result.output, output?.card, failed = output == null, ui = output?.ui))
                     result to output?.image
                 }
                 val images = results.mapNotNull { it.second }.map(prepareImage)

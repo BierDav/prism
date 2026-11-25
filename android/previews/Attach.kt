@@ -108,8 +108,7 @@ private fun ToggledCardPreview() = Part {
     at.quickme.prism.GeminiColors {
         Box(Modifier.background(BottomSheetDefaults.ScrimColor).padding(12.dp)) {
             AssistantTranscript(
-                t, running = false, agent = null, onNew = {}, onEdit = { _, _ -> null },
-                onToggle = { _, _ -> null }, modifier = Modifier.fillMaxWidth(),
+                t, running = false, agent = null, onNew = {}, onAction = null, modifier = Modifier.fillMaxWidth(),
             )
         }
     }

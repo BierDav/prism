@@ -87,7 +87,7 @@ private val vienna = WeatherCard(
 private fun Transcript(t: Transcript, running: Boolean = false, agent: FollowedAgent? = null) = Part {
     at.quickme.prism.GeminiColors {
         Box(Modifier.background(BottomSheetDefaults.ScrimColor).padding(12.dp)) {
-            AssistantTranscript(t, running, agent, onNew = {}, onEdit = { _, _ -> null }, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 })
+            AssistantTranscript(t, running, agent, onNew = {}, onAction = null, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 })
         }
     }
 }
@@ -254,7 +254,7 @@ private fun OverlaySample(t: Transcript) = Themed {
                     onCard = { card = it },
                     selectors = {
                         AssistantTranscript(
-                            t, false, null, onNew = {}, onEdit = { _, _ -> null }, onOpen = {}, now = { NOW + 75_000 },
+                            t, false, null, onNew = {}, onAction = null, onOpen = {}, now = { NOW + 75_000 },
                             modifier = Modifier.fillMaxWidth().onGloballyPositioned { panel = it.boundsInRoot() },
                         )
                     },
@@ -286,7 +286,7 @@ private fun AssistantFullChatPreview() = Themed {
     at.quickme.prism.GeminiColors {
         HistoryChat(
             transcript = t, running = false, loading = false, error = null, configured = true, canSend = true,
-            text = "", onText = {}, onSend = {}, onEdit = { _, _ -> null }, onNew = {}, onDelete = {}, onBack = {},
+            text = "", onText = {}, onSend = {}, onAction = null, onNew = {}, onDelete = {}, onBack = {},
             now = { NOW + 75_000 }, onChats = {},
             composer = {
                 AssistComposer(

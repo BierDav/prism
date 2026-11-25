@@ -102,7 +102,7 @@ internal object Grants {
 }
 
 /** Starts [intent] as its own task, from the overlay (in front, so Android allows it). */
-private fun Context.launch(intent: Intent) {
+internal fun Context.launch(intent: Intent) {
     startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
@@ -520,7 +520,7 @@ private fun readSms(c: Context, contacts: Contacts, contact: String?, limit: Int
         val messages = rows.take(limit).reversed().map { ThreadMessage(if (it.mine) "Me" else name(it.address), it.body, it.date, it.mine) }
         ToolOutput(
             "Texts with $title, oldest first:\n" + messages.joinToString("\n") { "[${time.format(Date(it.at))}] ${it.from}: ${it.text}" },
-            ThreadCard(MessageCard.SMS, title, messages),
+            ThreadCard(MessageCard.SMS, title, messages, address = rows.first().address),
         )
     } else {
         val latest = rows.groupBy { it.thread }.values.map { it.first() }.take(limit)
@@ -602,11 +602,14 @@ private fun calendar(c: Context, days: Int): ToolOutput {
     val events = ArrayList<EventEntry>()
     c.contentResolver.query(
         uri,
-        arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END, CalendarContract.Instances.ALL_DAY, CalendarContract.Instances.EVENT_LOCATION),
+        arrayOf(
+            CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END,
+            CalendarContract.Instances.ALL_DAY, CalendarContract.Instances.EVENT_LOCATION, CalendarContract.Instances.EVENT_ID,
+        ),
         null, null, CalendarContract.Instances.BEGIN + " ASC",
     )?.use { cur ->
         while (cur.moveToNext() && events.size < 30) {
-            val e = EventEntry(cur.getString(0).orEmpty().ifBlank { "(no title)" }, cur.getLong(1), cur.getLong(2), cur.getInt(3) != 0, cur.getString(4).orEmpty())
+            val e = EventEntry(cur.getString(0).orEmpty().ifBlank { "(no title)" }, cur.getLong(1), cur.getLong(2), cur.getInt(3) != 0, cur.getString(4).orEmpty(), cur.getLong(5))
             if (e.end > now || e.allDay && e.end > now - 24 * 3600_000L) events.add(e)
         }
     }

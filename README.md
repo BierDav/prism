@@ -126,7 +126,17 @@ above it, its bubbles and fading edges). Dragging the card up grows it with
 the finger and, past a threshold, into the conversation full screen in the
 same window (a shared transition; Back shrinks it into the card again), and
 from there the Chats screen (`assistant/AssistHistory.kt`) lists the
-conversations newest first, opens one, continues it and deletes it. The Phone tab's Profiles page configures placement
+conversations newest first, opens one, continues it and deletes it. Every
+card in a conversation is an A2UI surface (a2ui.org, v1.0), drawn by Google's
+Compose renderer (androidx.a2ui) with Prism's catalog
+(`https://prism.quickme.at/a2ui/catalog/v1`: A2UI's basic components and the
+cards, `assistant/a2ui/`, `assistant/core/PrismCatalog.kt`): a tool's card is
+a surface with its component at the root, and the model composes its own with
+`show_ui` (a picker, a small form), checked against the catalog. A card's
+buttons act on the phone (call back, snooze, stop a timer, a switch, …) and
+the model hears of it in its next turn; a tap on the model's own surface is
+the next turn. The surfaces are what a conversation stores (old typed cards
+open as surfaces). The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in
