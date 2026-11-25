@@ -44,6 +44,8 @@ pub struct AppState {
     pub secrets: crate::t3::Secrets,
     /// Whether this worker's replica can serve (`/ready`); ready unless set.
     pub eligible: watch::Receiver<Eligibility>,
+    /// Where placement decisions are written, when configured.
+    pub placement_log: Option<Arc<crate::placement_log::PlacementLog>>,
 }
 
 pub type PeerHttp = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -62,6 +64,7 @@ impl AppState {
             peer_http: None,
             secrets: Arc::new(crate::auth::secret),
             eligible: watch::channel(Eligibility::Ready).1,
+            placement_log: None,
         }
     }
 
@@ -87,6 +90,8 @@ impl AppState {
     }
 
     pub fn with_config(mut self, cfg: Arc<Config>) -> Self {
+        self.placement_log =
+            crate::placement_log::PlacementLog::from_config(&cfg, &self.secrets, &self.node);
         self.cfg = cfg;
         self
     }
@@ -264,8 +269,16 @@ async fn placement_sync(
     let now = (state.now_fn)();
     let (threads, models) = (req.threads.len(), req.models.len());
     match state.client.sync_placement(machine.clone(), req, now).await {
-        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Ok(resp) => {
+            if let Some(log) = &state.placement_log {
+                log.record_sync(&machine, now, &resp);
+            }
+            (StatusCode::OK, Json(resp)).into_response()
+        }
         Err(err) => {
+            if let Some(log) = &state.placement_log {
+                log.record_failure(&machine, now, &err.to_string());
+            }
             eprintln!(
                 "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {} bytes): {err}",
                 body.len()

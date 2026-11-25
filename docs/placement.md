@@ -49,8 +49,9 @@ CREATE TABLE placement_entries (
   session_share_of_weekly DOUBLE PRECISION,   -- NULL: no weekly rule
   PRIMARY KEY (profile_id, position)
 );
--- what each host last reported (models, readings, threads), for the
--- fleet-wide load; a report older than 3 minutes no longer counts
+-- what each host last reported (models, readings, and its running
+-- threads; idle ones are not stored), for the fleet-wide load; a report
+-- older than 3 minutes no longer counts
 CREATE TABLE placement_reports (
   machine     TEXT PRIMARY KEY,
   reported_at BIGINT NOT NULL,
@@ -122,6 +123,11 @@ while its account can still run the compaction. The entry is
   that times `sessionShareOfWeekly` / 100. Without a known pace, only the
   session switch point applies.
 
+An entry is `full` when its running threads plus one more would pass the
+switch point before the session window resets, at the current pace. The
+prediction looks at most one session window (5 hours) ahead: some providers
+(gh, make, jetbrains) report a monthly quota as their session window.
+
 Two cases run into the limit instead:
 
 - The entry's weekly allowance still has to be spent (weekly slack at most
@@ -137,6 +143,51 @@ Two cases run into the limit instead:
   for the reset on the same account (above), keeping its prompt cache.
 
 The weekly window has no fixed switch point. Only its pace or 100% stops it.
+
+## Starting the next weekly window
+
+A subscription's weekly window starts with the account's first request
+after the last one ended (Codex's do; Claude's reset on a fixed weekly
+schedule). An account left unused after its reset starts its next week
+late, and that week's reset comes as much later. So the leader sends each
+account a very small prompt ("Reply with OK.", about 150 tokens) once its
+weekly window has ended, through the AI gateway the worker already uses for
+text generation (`text_generation.url`; the gateway routes `<account>/<model>`
+to that account).
+
+- An account counts when an enabled profile entry names it (the part of
+  `model` before `/`) and a fresh host report carries a weekly reading for
+  it. Switching every entry of an account off stops its prompts.
+- The window has ended when no fresh report shows a weekly reset in the
+  future. The first prompt goes out a minute after the reset; Prism tries
+  again every 10 minutes while the readings show no new window, at most 3
+  times per ended window.
+- Prism keeps, per account, the last reset it saw, when it last prompted
+  and how often (`policy` rows `weekly_activation:<account>`), and counts a
+  prompt as sent before sending it, so a lost prompt is never sent twice
+  at once.
+
+## Decision log
+
+Prism keeps no history of its rankings, so the workers write them to
+ClickHouse, `observability.placement_decisions` (selfhosted-platform's
+`manifests/cliproxy-analytics/schema.sql`, 180 days), when `placement_log_url`
+is set (`worker/src/placement_log.rs`):
+
+- `ranking`: a host's ranking of a profile whenever its pick (`next`) or
+  any entry's state changes, with every entry's state, reason, readings,
+  running threads and prediction as JSON in `ranked`;
+- `move` and `compact`: each move or in-place compaction Prism asks for, once;
+- `sync_failed`: a failed sync, at most every 10 minutes per host.
+
+Why did the default profile pick claude-1 at 08:36?
+
+```sql
+SELECT at, machine, next, ranked FROM observability.placement_decisions
+WHERE kind = 'ranking' AND profile = 'default'
+  AND at BETWEEN '2026-11-23 08:00:00' AND '2026-11-23 08:40:00'
+ORDER BY at
+```
 
 ## T3 ⇄ Prism: `POST /v1/placement/sync`
 
@@ -235,7 +286,9 @@ Response:
   plus the in-place compactions above (`to` equal to `from`).
   Prism lists a move until the host reports the thread on `to` or
   acknowledges it; it never asks for a second move of the same thread
-  within 2 minutes.
+  within 2 minutes. Each running thread a sync moves counts on its target
+  before the next thread's target is chosen, so evacuating an account
+  spreads its threads instead of filling the first runnable entry.
 
 - `actions.textGeneration`: the profile T3's text generation (thread
   titles, branch names, commit messages and other generated text) runs in,

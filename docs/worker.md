@@ -455,14 +455,14 @@ Beyond the network settings above:
 
 | Variable | Use |
 | --- | --- |
-| `PRISM_CONFIG` | The config file (default `/config/config.json`; without it and without the file, defaults). The worker reads `push`, `cluster_machine`, `machines`, `ssh_runners`, `ssh_user`, `t3_url`, `t3_workspace`, `machine_instructions`, `alertmanager_url`, `reconcile_grace_seconds`, `reconcile_uptime_seconds`, `netbird_domain`, `t3_web_port`, `metrics_url`, `metrics_user`, `telemetry_url`, `telemetry_user`, `text_generation`, `android_publishers` and `devices`. |
+| `PRISM_CONFIG` | The config file (default `/config/config.json`; without it and without the file, defaults). The worker reads `push`, `cluster_machine`, `machines`, `ssh_runners`, `ssh_user`, `t3_url`, `t3_workspace`, `machine_instructions`, `alertmanager_url`, `reconcile_grace_seconds`, `reconcile_uptime_seconds`, `netbird_domain`, `t3_web_port`, `metrics_url`, `metrics_user`, `telemetry_url`, `telemetry_user`, `placement_log_url`, `text_generation`, `android_publishers` and `devices`. |
 | `PRISM_EVENT_KEY(_FILE)` | The key machine tokens and the admin token derive from. `prism` in the pod reads it too. |
 | `T3_ACCESS_TOKEN(_FILE)` | Prism's session with the cluster machine's T3 (or the secret its `t3_token` names). |
 | `PRISM_PUSH_TOKEN(_FILE)` | ntfy's publish token. |
 | `PRISM_ALERTS_TOKEN(_FILE)` | Optional: the bearer token Alertmanager's webhook must carry. |
 | `PRISM_METRICS_PASSWORD(_FILE)` | Password for ClickHouse PromQL basic auth (`metrics_user`). |
 | `PRISM_TEXT_GENERATION_KEY(_FILE)` | API key for OpenAI-compatible text generation (magic picks). |
-| `PRISM_TELEMETRY_PASSWORD(_FILE)` | The phone's telemetry password (`telemetry_user`, default `prism_phone`): what `POST /v1/telemetry/write` checks and sends on to `telemetry_url`. |
+| `PRISM_TELEMETRY_PASSWORD(_FILE)` | The phone's telemetry password (`telemetry_user`, default `prism_phone`): what `POST /v1/telemetry/write` checks and sends on to `telemetry_url`, and what the workers write their placement decisions with (`placement_log_url`, `docs/placement.md`). |
 | `PRISM_LEADER_LEASE` | The Lease's name (default `prism-worker-leader`). |
 | `PRISM_LEADER_NAMESPACE` | Its namespace (default: the pod's own). |
 | `KUBERNETES_SERVICE_HOST`, `KUBERNETES_SERVICE_PORT` | Set by Kubernetes; with the service-account token they make the worker campaign. |

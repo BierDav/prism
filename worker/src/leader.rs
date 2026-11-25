@@ -351,7 +351,31 @@ impl LeaderWork {
         // The scans call every T3 and may wait on an offline one for
         // minutes; they run beside the requests and pushes, never before them
         // (Go runs each on its own timer).
-        tokio::join!(self.lead_requests(), self.lead_scans());
+        // Prompting accounts waits on the AI gateway, so it runs on its own
+        // timer too.
+        tokio::join!(
+            self.lead_requests(),
+            self.lead_scans(),
+            self.lead_weekly_activations()
+        );
+    }
+
+    async fn lead_weekly_activations(&self) {
+        let mut ticker = tokio::time::interval(crate::activate::ACTIVATE_EVERY);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(err) = crate::activate::activate_weekly_windows(
+                &self.client,
+                &self.cfg,
+                &self.secrets,
+                (self.now)(),
+            )
+            .await
+            {
+                eprintln!("prism-worker: starting weekly windows failed; retrying: {err}");
+            }
+        }
     }
 
     async fn lead_requests(&self) {

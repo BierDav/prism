@@ -306,9 +306,13 @@ pub fn decide_entry(
 
     let mut predicted_session_percent = None;
     if let (Some(sess), Some(burn)) = (&session, load.burn_per_thread_per_hour) {
+        // Some providers report a monthly quota as their "session" window
+        // (gh, make, jetbrains). Threads don't run for a month at the current
+        // pace, so the prediction looks at most one session window ahead.
         let hours_left = parse_placement_time(&sess.resets_at)
             .map(|reset| ((reset - now).num_milliseconds() as f64 / 3_600_000.0).max(0.0))
-            .unwrap_or(PLACEMENT_SESSION_HOURS);
+            .unwrap_or(PLACEMENT_SESSION_HOURS)
+            .min(PLACEMENT_SESSION_HOURS);
         let pred = sess.used_percent + burn * f64::from(load.running + 1) * hours_left;
         predicted_session_percent = Some(pred);
         base.predicted_session_percent = predicted_session_percent;

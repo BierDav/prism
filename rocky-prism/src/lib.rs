@@ -6,6 +6,7 @@ pub mod phase3;
 pub mod rank;
 pub mod schema;
 pub mod types;
+pub mod weekly;
 
 pub use alerts::*;
 pub use client::{PrismClient, retry_unavailable};
@@ -20,3 +21,4 @@ pub use rank::{
 };
 pub use schema::prism_schema;
 pub use types::*;
+pub use weekly::{WeeklyActivation, account_of};

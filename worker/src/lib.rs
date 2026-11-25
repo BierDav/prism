@@ -2,6 +2,7 @@
 //! the apps' replica (`rocky-prism-ffi`) runs the same request handling with
 //! a device's own T3 sessions when the workers are unreachable (`direct`).
 
+pub mod activate;
 pub mod admin;
 pub mod agents;
 pub mod android;
@@ -18,6 +19,7 @@ pub mod machines;
 pub mod magic;
 pub mod metrics;
 pub mod pairing;
+pub mod placement_log;
 pub mod provision;
 pub mod push;
 pub mod questions;
