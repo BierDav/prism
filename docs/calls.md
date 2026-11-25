@@ -84,9 +84,10 @@ LE L2CAP channel (`listenUsingInsecureL2capChannel`, a PSM Android
 assigns) and advertises it: a legacy, connectable advertisement without a
 name, with
 
-- one 128-bit service UUID, made like the hotspot's (docs/hotspot.md) with
+- one 128-bit service UUID, made like the hotspot's (docs/hotspot.md) but
+  with the call key `K` (below; the bridge never sees `hotspot_key`) and
   the label `"prism-call-ble/v1"`: bytes 0..3 `51 52 28 f6`, bytes 4..15
-  `HMAC-SHA256(hotspot_key, "prism-call-ble/v1" ‖ u64be(window))[0..12]`,
+  `HMAC-SHA256(K, "prism-call-ble/v1" ‖ u64be(window))[0..12]`,
   `window = floor(unix seconds / 30)`, new at every window;
 - manufacturer data, company `0xffff`: the PSM, u16 little-endian.
 
@@ -151,6 +152,7 @@ self-test`): with `hotspot_key` 00..1f, `nm` = 16 × 0xa1 and
 - Mac → phone key = `e217c291c386519a354b1495f052bfa3ee077d449a732034e729b15ed389e0a1`
 - Mac → phone frame 0, type 3, `{"type":"answer"}`: `1460883d130b6181c25fdaf6e9590c9ab3944501a65af93501ef0fa7e62e2e8b85`
 - phone → Mac frame 1, the same: `82c2303e6af04e6dbef747805e1be4ecdecd0470cdb1f26aac9213a56f64603c11`
+- the Bluetooth service UUID of window 59999999: `515228f6-c9ae-4dcc-2ab1-bb010abf3a07`
 
 ADPCM: the samples `round(8000 · sin(2π · 440 · i / 16000))`, `i` = 0..639,
 encoded from predictor 0, index 0 as two frames:
