@@ -1,7 +1,8 @@
 // The hotspot page (Hotspot.kt, docs/hotspot.md), from the Phone tab and the
-// Hotspot tile's long press (QS_TILE_PREFERENCES): the mode, switching an
-// instant hotspot on or off now, the devices on the hotspot, and its name,
-// password, security, band and visibility.
+// Hotspot tile's long press (QS_TILE_PREFERENCES): the mode ("Always on", the
+// same switch as the tile), switching an instant hotspot on or off now, the
+// devices on the hotspot, and its name, password, security, band and
+// visibility.
 //
 // The configuration and the devices come from the shell (HotspotTool's
 // "info"), every 3 s while the page is in front; without Prism's shell access
@@ -219,7 +220,7 @@ internal fun HotspotContent(
         ) {
             item {
                 SettingToggle(
-                    title = "Keep it on",
+                    title = "Always on",
                     detail = if (normal) "On all the time, for every device with the password"
                         else "Instant: comes on when your Mac asks, for one device, and goes off 2 minutes after it left",
                     checked = normal,
