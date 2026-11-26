@@ -92,7 +92,18 @@ private struct MenuIcon: View {
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
             }
         }
-        .accessibilityLabel(store.openCritical > 0 ? "Prism, \(store.openCritical) critical alerts" : "Prism")
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        var parts = ["Prism"]
+        if store.openCritical > 0 {
+            parts.append("\(store.openCritical) critical \(store.openCritical == 1 ? "alert" : "alerts")")
+        }
+        if !approver.pending.isEmpty {
+            parts.append("\(approver.pending.count) pending \(approver.pending.count == 1 ? "approval" : "approvals")")
+        }
+        return parts.joined(separator: ", ")
     }
 
 }
@@ -159,9 +170,7 @@ struct PopoutView: View {
                     .padding(.bottom, 6)
             }
             if hotspot.keyFile != nil {
-                HotspotRow(hotspot: hotspot, wifi: hotspot.wifi)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 10)
+                HotspotBanner(hotspot: hotspot, wifi: hotspot.wifi, showWifiProblem: tab != .wifi)
             }
             Picker("", selection: $tab) {
                 Text(store.alerts.isEmpty ? "Alerts" : "Alerts (\(store.alerts.count))").tag(Tab.alerts)
@@ -182,10 +191,24 @@ struct PopoutView: View {
             case .machines: MachinesView(store: store)
             case .profiles: ProfilesView(store: store)
             case .approvals: ApprovalTab(approver: approver)
-            case .wifi: WiFiView(wifi: hotspot.wifi, networks: hotspot.wifi.networks, hotspotConfigured: hotspot.keyFile != nil)
+            case .wifi: WiFiView(hotspot: hotspot, wifi: hotspot.wifi, networks: hotspot.wifi.networks)
             }
         }
+        .background { tabShortcuts }
         .frame(width: 400)
+    }
+
+    private var tabShortcuts: some View {
+        Group {
+            Button("") { tab = .alerts }.keyboardShortcut("1", modifiers: .command)
+            Button("") { tab = .machines }.keyboardShortcut("2", modifiers: .command)
+            Button("") { tab = .profiles }.keyboardShortcut("3", modifiers: .command)
+            Button("") { tab = .approvals }.keyboardShortcut("4", modifiers: .command)
+            Button("") { tab = .wifi }.keyboardShortcut("5", modifiers: .command)
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 
     private var header: some View {
@@ -198,6 +221,7 @@ struct PopoutView: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 32, height: 32)
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Prism").font(.headline)
                 Text(subtitle)
@@ -207,7 +231,37 @@ struct PopoutView: View {
             }
             Spacer(minLength: 8)
             ServerStatus(store: store)
+            Menu {
+                Button("Refresh") {
+                    store.refresh()
+                    store.checkServerHealth()
+                }
+                .disabled(!store.connected && store.connection != .connecting && !isFailed)
+                Button("Copy Public Key") {
+                    if let key = approver.key?.publicKeyLine {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(key, forType: .string)
+                    }
+                }
+                .disabled(approver.key == nil)
+                Divider()
+                Button("Quit Prism") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q", modifiers: .command)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("More options")
+            .help("More options")
         }
+    }
+
+    private var isFailed: Bool {
+        if case .failed = store.connection { return true }
+        return false
     }
 
     /// Red while a critical alert is open, else this Mac's colour.
@@ -225,29 +279,53 @@ struct PopoutView: View {
     }
 }
 
-/// "Ask the phone for its hotspot" (Hotspot.swift), or what it is doing:
-/// asking while the Mac is offline or after the request, joining the hotspot,
-/// on it and leaving it for a reliable Wi-Fi (WiFiSwitch.swift), or why it
-/// can't.
-private struct HotspotRow: View {
+/// Active hotspot status above the tabs: shown only while asking, joining,
+/// switching, on the hotspot, or when there is a problem to surface. The idle
+/// "Ask the phone for its hotspot" action lives in the Wi-Fi tab.
+private struct HotspotBanner: View {
     @ObservedObject var hotspot: Hotspot
     @ObservedObject var wifi: WiFiSwitch
+    let showWifiProblem: Bool
+
+    private var hasStatus: Bool {
+        hotspot.advertising != nil || wifi.joining || wifi.state != .away
+    }
+
+    private var visibleWifiProblem: String? {
+        showWifiProblem ? wifi.problem : nil
+    }
+
+    private var visible: Bool {
+        hasStatus || hotspot.problem != nil || visibleWifiProblem != nil || (wifi.joinError != nil && wifi.joining)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            row
-            if let error = wifi.joinError, wifi.joining {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
+        if visible {
+            VStack(alignment: .leading, spacing: 4) {
+                if hasStatus {
+                    row
+                }
+                if let problem = hotspot.problem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                if let error = wifi.joinError, wifi.joining {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                if let problem = visibleWifiProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
             }
-            if let problem = wifi.problem {
-                Text(problem)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
         }
     }
 
@@ -276,29 +354,9 @@ private struct HotspotRow: View {
                     status("Looking for the phone's hotspot to join it…")
                 } else if wifi.state == .onHotspot {
                     status(wifi.current.phoneHotspot ? "On the phone's hotspot" : "On a hotspot (metered Wi-Fi)")
-                } else {
-                    askButton
                 }
             }
             Spacer(minLength: 0)
-        }
-    }
-
-    @ViewBuilder private var askButton: some View {
-        Button {
-            wifi.askedFromMenu()
-        } label: {
-            Label("Ask the phone for its hotspot", systemImage: "personalhotspot")
-                .font(.caption)
-        }
-        .buttonStyle(.borderless)
-        .help("Advertise over Bluetooth for 3 minutes; the phone starts its hotspot, and this Mac joins it")
-        if let problem = hotspot.problem {
-            Text(problem)
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
     }
 
@@ -318,6 +376,8 @@ private struct ServerStatus: View {
             Circle()
                 .fill(tint)
                 .frame(width: 7, height: 7)
+                .accessibilityElement()
+                .accessibilityLabel(text)
                 .help(text)
             Button {
                 store.refresh()
@@ -327,8 +387,10 @@ private struct ServerStatus: View {
                     .font(.system(size: 12, weight: .medium))
             }
             .buttonStyle(.borderless)
+            .keyboardShortcut("r", modifiers: .command)
             .disabled(!store.connected && store.connection != .connecting && !isFailed)
-            .help("Refresh")
+            .accessibilityLabel("Refresh")
+            .help("Refresh (⌘R)")
         }
     }
 
@@ -375,6 +437,7 @@ private struct ServerStatus: View {
 /// last decisions, this Mac's public key.
 struct ApprovalTab: View {
     @ObservedObject var approver: Approver
+    @State private var copiedKey = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -385,22 +448,28 @@ struct ApprovalTab: View {
             history
             Divider()
             publicKey
-                .padding(14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
         }
     }
 
-    private func heading(_ text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 4)
+    private func heading(_ text: String, count: Int? = nil) -> some View {
+        HStack(spacing: 6) {
+            SectionLabel(text)
+            if let count, count > 0 {
+                Text("\(count)")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
     }
 
     private var pending: some View {
         VStack(alignment: .leading, spacing: 0) {
-            heading("Waiting for you")
+            heading("Waiting for you", count: approver.pending.count)
             ForEach(approver.pending) { request in
                 PendingRow(request: request) { approver.show(request.id) }
             }
@@ -410,7 +479,7 @@ struct ApprovalTab: View {
 
     private var history: some View {
         VStack(alignment: .leading, spacing: 0) {
-            heading("Recent decisions")
+            heading("Recent decisions", count: approver.history.isEmpty ? nil : approver.history.count)
             if approver.history.isEmpty {
                 Text("No decisions yet.")
                     .font(.callout)
@@ -434,9 +503,28 @@ struct ApprovalTab: View {
 
     private var publicKey: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("This Mac's public key")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                SectionLabel("This Mac's public key")
+                Spacer()
+                if let key = approver.key?.publicKeyLine {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(key, forType: .string)
+                        copiedKey = true
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(1500))
+                            copiedKey = false
+                        }
+                    } label: {
+                        Label(copiedKey ? "Copied" : "Copy", systemImage: copiedKey ? "checkmark" : "doc.on.doc")
+                            .font(.caption2.weight(.medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(copiedKey ? .green : .secondary)
+                    .accessibilityLabel("Copy public key")
+                    .help("Copy this Mac's public key")
+                }
+            }
             Text(approver.key?.publicKeyLine ?? "No key")
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(1)

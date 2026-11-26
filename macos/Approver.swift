@@ -188,11 +188,23 @@ final class Approver: ObservableObject {
         onQueueChange?()
     }
 
-    /// Brings `id` into the dialog (the popout's list).
+    /// Brings `id` into the dialog (the popout's list or the dialog's stepper).
     func show(_ id: String) {
         guard pending.contains(where: { $0.id == id }) else { return }
+        if let previous = current, previous.id != id, previous.phase != .signing {
+            previous.renewContext()
+            previous.phase = .queued
+            previous.notice = nil
+        }
         chosenID = id
         onQueueChange?()
+    }
+
+    /// Moves to the previous or next pending approval in the dialog.
+    func step(_ delta: Int) {
+        guard pending.count > 1, let current, let index = pending.firstIndex(where: { $0 === current }) else { return }
+        let next = pending[(index + delta + pending.count) % pending.count]
+        show(next.id)
     }
 
     private static func now() -> Int64 { Int64(Date().timeIntervalSince1970) }

@@ -7,16 +7,24 @@
 import SwiftUI
 
 struct WiFiView: View {
+    @ObservedObject var hotspot: Hotspot
     @ObservedObject var wifi: WiFiSwitch
     @ObservedObject var networks: WiFiNetworks
-    let hotspotConfigured: Bool
 
+    @State private var addingReliable = false
     @State private var typed = ""
+    @State private var addingHotspot = false
     @State private var typedHotspot = ""
     @State private var known: [String] = []
     @State private var passwordFor: String?
     @State private var password = ""
     @State private var savedPasswords: Set<String> = []
+
+    private var hotspotConfigured: Bool { hotspot.keyFile != nil }
+
+    private var canAskForHotspot: Bool {
+        hotspotConfigured && hotspot.advertising == nil && !wifi.joining && wifi.state == .away && !wifi.current.phoneHotspot
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -33,6 +41,7 @@ struct WiFiView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            Divider()
             reliableSection
             Divider()
             hotspotSection
@@ -49,15 +58,26 @@ struct WiFiView: View {
     // MARK: - Now
 
     private var currentRow: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: wifi.current.hotspot ? "personalhotspot" : wifi.current.onWiFi ? "wifi" : "wifi.slash")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(currentTitle).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Text(currentDetail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer(minLength: 4)
+            if canAskForHotspot {
+                Button {
+                    wifi.askedFromMenu()
+                } label: {
+                    Label("Ask phone", systemImage: "personalhotspot")
+                }
+                .buttonStyle(PillStyle(width: nil, compact: true))
+                .accessibilityLabel("Ask the phone for its hotspot")
+                .help("Advertise over Bluetooth for 3 minutes; the phone starts its hotspot, and this Mac joins it")
+            }
         }
     }
 
@@ -86,7 +106,23 @@ struct WiFiView: View {
 
     private var reliableSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            heading("Reliable networks", help: "The Mac leaves a hotspot for one of these when it is in range at -70 dBm or better.")
+            HStack(spacing: 6) {
+                SectionLabel("Reliable networks")
+                    .help("The Mac leaves a hotspot for one of these when it is in range at -70 dBm or better.")
+                if !networks.list.isEmpty {
+                    Text("\(networks.list.count)")
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 4)
+                addMenu(
+                    label: "Add",
+                    accessibilityLabel: "Add reliable network",
+                    exclude: Set(networks.reliable.keys),
+                    onManual: { addingReliable = true },
+                    add: { networks.addReliable($0) }
+                )
+            }
             if networks.list.isEmpty {
                 Text("None yet. Add the networks that have working internet.")
                     .font(.callout)
@@ -100,16 +136,28 @@ struct WiFiView: View {
                         }
                     }
                 }
+                .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: 200)
                 .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 6) {
-                TextField("Network name", text: $typed)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(addTyped)
-                Button("Add", action: addTyped)
-                    .disabled(WiFiNetworks.clean(typed) == nil)
-                addMenu(title: "Add", exclude: Set(networks.reliable.keys)) { networks.addReliable($0) }
+            if addingReliable {
+                HStack(spacing: 6) {
+                    TextField("Network name", text: $typed)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addTyped)
+                    Button("Add", action: addTyped)
+                        .disabled(WiFiNetworks.clean(typed) == nil)
+                    Button {
+                        typed = ""
+                        addingReliable = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Cancel adding network")
+                }
             }
             Toggle("Add networks with working internet automatically", isOn: $networks.learns)
                 .font(.caption)
@@ -124,6 +172,7 @@ struct WiFiView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .frame(width: 16)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(network.ssid).font(.callout).lineLimit(1).truncationMode(.middle)
                 Text(detail(network)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -132,21 +181,18 @@ struct WiFiView: View {
             if let rssi = wifi.nearby[network.ssid] {
                 Text("\(rssi) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-            Menu {
-                Button("This is the phone's hotspot") { networks.addHotspot(network.ssid) }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("More")
             Button("Remove \(network.ssid)", systemImage: "minus.circle") { networks.removeReliable(network.ssid) }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Remove \(network.ssid)")
                 .help("Remove; Prism won't add it again on its own")
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button("This is the phone's hotspot") { networks.addHotspot(network.ssid) }
+            Divider()
+            Button("Remove", role: .destructive) { networks.removeReliable(network.ssid) }
+        }
     }
 
     private func detail(_ network: WiFiNetworks.Reliable) -> String {
@@ -164,13 +210,30 @@ struct WiFiView: View {
         guard let ssid = WiFiNetworks.clean(typed) else { return }
         networks.addReliable(ssid)
         typed = ""
+        addingReliable = false
     }
 
     // MARK: - The phone's hotspot
 
     private var hotspotSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            heading("The phone's hotspot", help: "Prism joins one of these itself after asking the phone, and never treats them as reliable networks.")
+            HStack(spacing: 6) {
+                SectionLabel("The phone's hotspot")
+                    .help("Prism joins one of these itself after asking the phone, and never treats them as reliable networks.")
+                if !networks.hotspots.isEmpty {
+                    Text("\(networks.hotspots.count)")
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 4)
+                addMenu(
+                    label: "Add",
+                    accessibilityLabel: "Add phone hotspot",
+                    exclude: Set(networks.hotspots),
+                    onManual: { addingHotspot = true },
+                    add: { networks.addHotspot($0) }
+                )
+            }
             if networks.hotspots.isEmpty {
                 Text("Not known yet. Add its name, or join it once: Prism recognises an Android hotspot.")
                     .font(.callout)
@@ -181,13 +244,24 @@ struct WiFiView: View {
             ForEach(networks.hotspots, id: \.self) { ssid in
                 hotspotRow(ssid)
             }
-            HStack(spacing: 6) {
-                TextField("Hotspot name", text: $typedHotspot)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(addTypedHotspot)
-                Button("Add", action: addTypedHotspot)
-                    .disabled(WiFiNetworks.clean(typedHotspot) == nil)
-                addMenu(title: "Add", exclude: Set(networks.hotspots)) { networks.addHotspot($0) }
+            if addingHotspot {
+                HStack(spacing: 6) {
+                    TextField("Hotspot name", text: $typedHotspot)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addTypedHotspot)
+                    Button("Add", action: addTypedHotspot)
+                        .disabled(WiFiNetworks.clean(typedHotspot) == nil)
+                    Button {
+                        typedHotspot = ""
+                        addingHotspot = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Cancel adding hotspot")
+                }
             }
         }
     }
@@ -199,6 +273,7 @@ struct WiFiView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(ssid).font(.callout).lineLimit(1).truncationMode(.middle)
                     Text(savedPasswords.contains(ssid) ? "Password saved in Prism" : "Joined with the password macOS knows")
@@ -215,6 +290,7 @@ struct WiFiView: View {
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Password for \(ssid)")
                 .help("Save the hotspot's password in Prism, for when macOS can't join it on its own")
                 Button("Remove \(ssid)", systemImage: "minus.circle") {
                     networks.removeHotspot(ssid)
@@ -222,6 +298,7 @@ struct WiFiView: View {
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Remove \(ssid)")
                 .help("Remove")
             }
             if passwordFor == ssid {
@@ -256,20 +333,20 @@ struct WiFiView: View {
         guard let ssid = WiFiNetworks.clean(typedHotspot) else { return }
         networks.addHotspot(ssid)
         typedHotspot = ""
+        addingHotspot = false
     }
 
     // MARK: - Shared
 
-    private func heading(_ text: String, help: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .help(help)
-    }
-
-    /// "Add" with the current network, nearby ones (after a scan) and the
-    /// networks macOS knows, without those in `exclude`.
-    private func addMenu(title: String, exclude: Set<String>, add: @escaping (String) -> Void) -> some View {
+    /// A single "Add" pull-down offering the current network, nearby ones
+    /// (after a scan), networks macOS knows, or typing a name manually.
+    private func addMenu(
+        label: String,
+        accessibilityLabel: String,
+        exclude: Set<String>,
+        onManual: @escaping () -> Void,
+        add: @escaping (String) -> Void
+    ) -> some View {
         let nearby = wifi.nearby.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key).filter { !exclude.contains($0) }
         let known = known.filter { !exclude.contains($0) && !nearby.contains($0) }
         return Menu {
@@ -290,11 +367,29 @@ struct WiFiView: View {
                     }
                 }
             }
+            Divider()
+            Button("Enter name…", action: onManual)
         } label: {
-            Image(systemName: "plus")
+            HStack(spacing: 4) {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(label)
+                    .font(.caption.weight(.medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 20)
+            .background(Capsule().fill(.quaternary))
+            .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
+            .contentShape(Capsule())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .help("Add the current, a nearby or a known network")
+        .accessibilityLabel(accessibilityLabel)
+        .help("Add a current, nearby, known, or typed network")
     }
 }

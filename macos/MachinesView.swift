@@ -37,24 +37,42 @@ struct MachinesView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !store.connected {
-            EmptyState(symbol: "server.rack", title: "Not connected", detail: "Connect to the Prism server on the Alerts tab.")
-        } else if let hosts = store.hostMetrics {
-            if hosts.isEmpty {
-                EmptyState(symbol: "server.rack", title: "No metrics", detail: "No machine has reported metrics in the last week.")
+        switch store.connection {
+        case .notConfigured:
+            EmptyState(symbol: "antenna.radiowaves.left.and.right.slash", title: "Not connected to Prism",
+                       detail: "fleet sets this Mac's Rocky provisioning in its Prism configuration.")
+        case .failed(let text) where store.hostMetrics == nil:
+            EmptyState(symbol: "exclamationmark.icloud", title: "Prism's replica did not open", detail: text, tint: .orange)
+        case .connecting where store.hostMetrics == nil:
+            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Waiting for Prism's replica…", detail: nil)
+        default:
+            if let hosts = store.hostMetrics {
+                if hosts.isEmpty {
+                    EmptyState(symbol: "server.rack", title: "No metrics", detail: "No machine has reported metrics in the last week.")
+                } else {
+                    list(hosts)
+                }
+            } else if let error = store.metricsError {
+                EmptyState(symbol: "exclamationmark.icloud", title: "No metrics", detail: error, tint: .orange)
             } else {
-                list(hosts)
+                EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Loading…", detail: nil)
             }
-        } else if let error = store.metricsError {
-            EmptyState(symbol: "exclamationmark.icloud", title: "No metrics", detail: error, tint: .orange)
-        } else {
-            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Loading…", detail: nil)
         }
     }
 
     private func list(_ hosts: [HostMetrics]) -> some View {
         let now = store.metricsTime ?? Date()
-        let groups = [("Online", hosts.filter(\.online)), ("Offline", hosts.filter { !$0.online })].filter { !$0.1.isEmpty }
+        let online = hosts.filter(\.online)
+        let attention = online
+            .filter { Self.attentionLevel($0) >= 1 }
+            .sorted { Self.severityScore($0) > Self.severityScore($1) }
+        let healthy = online.filter { Self.attentionLevel($0) == 0 }
+        let offline = hosts.filter { !$0.online }
+        let groups: [(String, [HostMetrics])] = [
+            ("Needs attention", attention),
+            ("Online", healthy),
+            ("Offline", offline),
+        ].filter { !$0.1.isEmpty }
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if let error = store.metricsError {
@@ -87,6 +105,22 @@ struct MachinesView: View {
         .frame(maxHeight: 520)
         .fixedSize(horizontal: false, vertical: true)
     }
+
+    /// Worst metric severity level (0 normal, 1 high, 2 critical) across CPU, memory and filesystems.
+    private static func attentionLevel(_ host: HostMetrics) -> Int {
+        let shares = [host.cpuShare, host.memory?.fraction, host.disk?.usage.fraction]
+            + host.filesystems.map(\.usage.fraction)
+        return shares.compactMap { $0.map(HostText.level) }.max() ?? 0
+    }
+
+    /// Sort key for hosts needing attention: highest severity level first, then worst share.
+    private static func severityScore(_ host: HostMetrics) -> (Int, Double) {
+        let shares = ([host.cpuShare, host.memory?.fraction, host.disk?.usage.fraction]
+            + host.filesystems.map(\.usage.fraction)).compactMap { $0 }
+        let level = shares.map(HostText.level).max() ?? 0
+        let worst = shares.max() ?? 0
+        return (level, worst)
+    }
 }
 
 private struct HostRow: View {
@@ -98,25 +132,29 @@ private struct HostRow: View {
 
     var body: some View {
         Button(action: toggle) {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 header
                 if host.online {
-                    Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
-                    Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
-                    Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
-                    facts
-                }
-                if host.cpuHistory.contains(where: { $0 != nil }) {
-                    Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
-                }
-                if expanded {
-                    details
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    if expanded {
+                        Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
+                        Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
+                        Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
+                        facts
+                        if host.cpuHistory.contains(where: { $0 != nil }) {
+                            Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
+                        }
+                        details
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        compactMeters
+                    }
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(expanded ? "Collapse host metrics" : "Expand host metrics and filesystems")
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(expanded ? Color.primary.opacity(0.05) : hovering ? Color.primary.opacity(0.04) : .clear)
@@ -129,12 +167,38 @@ private struct HostRow: View {
             Circle()
                 .fill(host.online ? Color.green : Color.secondary)
                 .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
             Text(about)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+            if !expanded, let battery = host.battery {
+                HStack(spacing: 2) {
+                    Image(systemName: battery.charging ? "battery.100percent.bolt" : "battery.50percent")
+                    Text(HostText.percent(battery.level)).monospacedDigit()
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            if host.online {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private var compactMeters: some View {
+        let worstDisk = ([host.disk?.usage.fraction] + host.filesystems.map(\.usage.fraction))
+            .compactMap { $0 }.max()
+        return HStack(spacing: 10) {
+            CompactMeter(label: "CPU", share: host.cpuShare)
+            CompactMeter(label: "Mem", share: host.memory?.fraction)
+            CompactMeter(label: "Disk", share: worstDisk)
         }
     }
 
@@ -222,6 +286,50 @@ private struct WindowReader: NSViewRepresentable {
     }
 
     func updateNSView(_ probe: Probe, context: Context) { probe.found = found }
+}
+
+/// A compact single-column mini-meter for the collapsed host row.
+private struct CompactMeter: View {
+    let label: String
+    let share: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                Text(share.map(HostText.percent) ?? "–")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(level == 0 ? Color.primary : tint)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    if let share, share > 0 {
+                        Capsule()
+                            .fill(tint)
+                            .frame(width: geo.size.width * min(1, max(0.03, share)))
+                    }
+                }
+            }
+            .frame(height: 4)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(share.map(HostText.percent) ?? "unknown")")
+    }
+
+    private var level: Int { share.map(HostText.level) ?? 0 }
+
+    private var tint: Color {
+        switch level {
+        case 2: .red
+        case 1: .orange
+        default: .accentColor
+        }
+    }
 }
 
 /// A share as a labelled bar; orange when high, red when nearly full, the number always in text.

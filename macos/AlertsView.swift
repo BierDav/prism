@@ -1,10 +1,8 @@
 // The popout's Alerts tab: the open alerts and machine events grouped by
-// category, each with its severity, the agents it started (Open in T3), and
-// the quick actions: fix and a free-text instruction. An alert leaves the
-// list only when its condition clears.
-// Below them, "Do…" starts an agent for any task on the machine picked next
-// to it (or the cluster), and the model and reasoning pickers choose what
-// new agents run with.
+// category (most severe groups first), each with its severity, the agents it
+// started (Open in T3), and the quick actions: fix and a free-text
+// instruction. An alert leaves the list only when its condition clears.
+// Below them, the model and reasoning pickers choose what new agents run with.
 
 import AppKit
 import PrismShared
@@ -15,39 +13,39 @@ struct AlertsView: View {
     /// The alert open at the start (`prism preview --expand N`).
     @MainActor static var initiallyExpanded: Int64?
     @State private var expanded: Int64? = AlertsView.initiallyExpanded
-    @State private var task = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
             if let error = store.actionError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                HStack(alignment: .top, spacing: 6) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button { store.actionError = nil } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss error")
+                    .help("Dismiss")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+            }
+            if store.connected, store.modelSettings != nil {
+                Divider()
+                AgentChoices(store: store)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .onTapGesture { store.actionError = nil }
+                    .padding(.vertical, 9)
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 7) {
-                if store.connected {
-                    AgentChoices(store: store)
-                }
-                DoField(text: $task, placeholder: placeholder, enabled: store.connected && !store.busy.contains(0)) {
-                    let (machine, text) = Self.parseTask(task)
-                    store.perform(.task(text, machine: machine ?? store.doTarget), on: nil)
-                    task = ""
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
         }
         .onAppear { store.loadChoices() }
-    }
-
-    private var placeholder: String {
-        if let machine = store.doTarget { return "Do… on \(machine), e.g. clean up the Nix store" }
-        return "Do… on the cluster, or @machine …"
     }
 
     @ViewBuilder
@@ -103,17 +101,8 @@ struct AlertsView: View {
             .padding(.bottom, 8)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .frame(maxHeight: 460)
+        .frame(maxHeight: 500)
         .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// "@machine what to do" names the machine; anything else goes to the
-    /// picked target.
-    static func parseTask(_ text: String) -> (String?, String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("@"), let space = trimmed.firstIndex(where: \.isWhitespace) else { return (nil, trimmed) }
-        let machine = String(trimmed[trimmed.index(after: trimmed.startIndex)..<space])
-        return (machine, trimmed[space...].trimmingCharacters(in: .whitespaces))
     }
 }
 
@@ -153,6 +142,7 @@ struct SeverityIcon: View {
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(Self.tint(severity))
             .frame(width: 18)
+            .accessibilityLabel(severity.name.capitalized)
             .help(severity.name.capitalized)
     }
 
@@ -188,6 +178,8 @@ private struct AlertRow: View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) { summaryLine }
                 .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                .accessibilityHint(expanded ? "Collapse alert details" : "Expand alert details")
             if expanded {
                 details
                     .padding(.top, 8)
@@ -222,6 +214,11 @@ private struct AlertRow: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .accessibilityHidden(true)
                 }
                 HStack(spacing: 6) {
                     if !alert.host.isEmpty {
@@ -281,8 +278,10 @@ private struct AlertRow: View {
             .disabled(!enabled)
             DoField(text: $instruction, placeholder: "Tell an agent what to do about #\(alert.id)…",
                     enabled: enabled) {
-                store.perform(.fix(instruction), on: alert)
-                instruction = ""
+                let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+                store.perform(.fix(text), on: alert) {
+                    instruction = ""
+                }
             }
         }
         .padding(.leading, 27)
@@ -291,14 +290,15 @@ private struct AlertRow: View {
 
 // MARK: - Choices for new agents
 
-/// The machine "Do…" works on, and the model and reasoning level of new
-/// agents, as small menus in a row.
+/// The model and reasoning level of new agents, as small menus in a row.
 private struct AgentChoices: View {
     @ObservedObject var store: PrismStore
 
     var body: some View {
         HStack(spacing: 6) {
-            targetMenu
+            Text("New agents")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Spacer(minLength: 4)
             if store.savingModel {
                 ProgressView().controlSize(.mini)
@@ -310,42 +310,6 @@ private struct AgentChoices: View {
                 }
             }
         }
-    }
-
-    private var targetMenu: some View {
-        Menu {
-            Toggle(isOn: selected(nil)) { Label("Cluster", systemImage: "circle.hexagongrid") }
-            Section(store.loadingMachines && store.machines.isEmpty ? "Machines (loading…)" : "Machines") {
-                ForEach(store.machines) { machine in
-                    Toggle(isOn: selected(machine.name)) {
-                        Text(machine.name)
-                        Text(Self.status(machine))
-                    }
-                    .disabled(!machine.reachable && store.doTarget != machine.name)
-                }
-            }
-            Divider()
-            Button { store.loadMachines() } label: { Label("Reload machines", systemImage: "arrow.clockwise") }
-                .disabled(store.loadingMachines)
-        } label: {
-            HStack(spacing: 4) {
-                if let machine = store.doTarget {
-                    HostBadge(host: machine)
-                } else {
-                    ClusterBadge()
-                }
-                if store.loadingMachines {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Chevron()
-                }
-            }
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Where \"Do…\" starts the agent")
     }
 
     private func modelMenu(_ settings: ModelSettings) -> some View {
@@ -368,6 +332,7 @@ private struct AgentChoices: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(store.savingModel || settings.models.isEmpty)
+        .accessibilityLabel("Model for new agents: \(settings.model.shortName)")
         .help("Model for new agents: \(settings.model.model)")
     }
 
@@ -392,16 +357,8 @@ private struct AgentChoices: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(store.savingModel)
+        .accessibilityLabel("Reasoning level: \(reasoning.label)")
         .help("Reasoning level for new agents")
-    }
-
-    private func selected(_ name: String?) -> Binding<Bool> {
-        Binding(get: { store.doTarget == name }, set: { if $0 { store.doTarget = name } })
-    }
-
-    static func status(_ machine: Machine) -> String {
-        let route = machine.route == "ssh" ? "over SSH" : machine.route == "link" ? "through a link" : ""
-        return [machine.state, route, machine.detail].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -462,6 +419,7 @@ struct DoField: View {
             }
             .buttonStyle(.plain)
             .disabled(!ready)
+            .accessibilityLabel("Start agent")
             .help("Start an agent")
         }
         .padding(.leading, 9)

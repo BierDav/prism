@@ -97,6 +97,7 @@ private struct RequestView: View {
     let position: Int
     let count: Int
     @State private var armed = false
+    @State private var nudgeSensor = false
 
     private var approval: Approval { request.approval }
 
@@ -187,13 +188,36 @@ private struct RequestView: View {
             }
             Spacer(minLength: 8)
             if count > 1 {
-                Text("\(position) of \(count)")
-                    .font(.caption.weight(.semibold).monospacedDigit())
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(.quaternary, in: Capsule())
-                    .foregroundStyle(.secondary)
-                    .help("\(count - 1) more waiting")
+                HStack(spacing: 2) {
+                    Button { approver.step(-1) } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("[", modifiers: .command)
+                    .accessibilityLabel("Previous approval")
+                    .help("Previous approval (⌘[)")
+                    Text("\(position) of \(count)")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, 3)
+                    Button { approver.step(1) } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("]", modifiers: .command)
+                    .accessibilityLabel("Next approval")
+                    .help("Next approval (⌘])")
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
+                .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
+                .foregroundStyle(.secondary)
             }
         }
     }
@@ -271,19 +295,31 @@ private struct RequestView: View {
     }
 
     // The sensor prompt, always in the view tree so Touch ID shows here and
-    // never as a system sheet: a pill the size of Deny, or, when Touch ID is
-    // not there, the ways to go on.
+    // never as a system sheet: styled as a status indicator (not a clickable
+    // button), or, when Touch ID is unavailable, the fallback buttons.
     private var touchArea: some View {
         HStack(spacing: request.phase == .needsAction ? 0 : 7) {
-            TouchIDPrompt(context: request.context)
-                .id(ObjectIdentifier(request.context))
-                .frame(width: request.phase == .needsAction ? 0 : 16, height: 16)
-                .opacity(request.phase == .needsAction ? 0 : 1)
+            ZStack {
+                if request.phase == .queued {
+                    Image(systemName: "touchid")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.pink)
+                }
+                TouchIDPrompt(context: request.context)
+                    .id(ObjectIdentifier(request.context))
+                    .opacity(request.phase == .queued || request.phase == .needsAction ? 0 : 1)
+            }
+            .frame(width: request.phase == .needsAction ? 0 : 16, height: 16)
+            .scaleEffect(nudgeSensor ? 1.18 : 1)
             switch request.phase {
             case .queued, .waitingForTouch:
-                Text("Approve")
+                Text(nudgeSensor ? "Touch the sensor" : "Approve with Touch ID")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(nudgeSensor ? .primary : .secondary)
             case .signing:
                 Text("Signing…")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.secondary)
             case .needsAction:
                 HStack(spacing: 10) {
                     Button("Use Password…") { approver.approveWithPassword(request) }
@@ -293,8 +329,29 @@ private struct RequestView: View {
                 }
             }
         }
-        .modifier(PillShape(width: request.phase == .needsAction ? nil : PillStyle.width, visible: request.phase != .needsAction))
-        .help(request.phase == .needsAction ? "" : "Touch the Touch ID sensor to approve")
+        .padding(.horizontal, request.phase == .needsAction ? 0 : 12)
+        .frame(height: 30)
+        .overlay {
+            if request.phase != .needsAction {
+                Capsule()
+                    .strokeBorder(
+                        nudgeSensor ? AnyShapeStyle(Color.pink.opacity(0.6)) : AnyShapeStyle(.separator),
+                        style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                    )
+            }
+        }
+        .contentShape(Capsule())
+        .onTapGesture {
+            guard request.phase == .queued || request.phase == .waitingForTouch else { return }
+            withAnimation(.snappy(duration: 0.2)) { nudgeSensor = true }
+            Task {
+                try? await Task.sleep(for: .milliseconds(1800))
+                withAnimation(.smooth(duration: 0.25)) { nudgeSensor = false }
+            }
+        }
+        .accessibilityElement(children: request.phase == .needsAction ? .contain : .combine)
+        .accessibilityHint(request.phase == .needsAction ? "" : "Rest your finger on the Touch ID sensor to approve")
+        .help(request.phase == .needsAction ? "" : "Rest your finger on the Touch ID sensor to approve")
         .animation(.smooth(duration: 0.2), value: request.phase)
     }
 }
@@ -486,16 +543,16 @@ private struct Countdown: View {
 /// and dark mode (red is left out: it would read as a warning).
 enum HostColor {
     private static let palette: [Color] = [
-        Color(red: 0.20, green: 0.48, blue: 0.96),  // blue
-        Color(red: 0.55, green: 0.33, blue: 0.90),  // purple
-        Color(red: 0.93, green: 0.45, blue: 0.13),  // orange
-        Color(red: 0.08, green: 0.62, blue: 0.56),  // teal
-        Color(red: 0.86, green: 0.27, blue: 0.56),  // pink
-        Color(red: 0.24, green: 0.63, blue: 0.28),  // green
-        Color(red: 0.36, green: 0.36, blue: 0.86),  // indigo
-        Color(red: 0.70, green: 0.50, blue: 0.10),  // amber
-        Color(red: 0.10, green: 0.55, blue: 0.80),  // cyan
-        Color(red: 0.42, green: 0.58, blue: 0.10),  // olive
+        Color(red: 0.13, green: 0.39, blue: 0.85),  // blue
+        Color(red: 0.47, green: 0.25, blue: 0.80),  // purple
+        Color(red: 0.74, green: 0.31, blue: 0.04),  // orange
+        Color(red: 0.03, green: 0.47, blue: 0.43),  // teal
+        Color(red: 0.74, green: 0.17, blue: 0.44),  // pink
+        Color(red: 0.14, green: 0.48, blue: 0.19),  // green
+        Color(red: 0.29, green: 0.29, blue: 0.78),  // indigo
+        Color(red: 0.58, green: 0.38, blue: 0.03),  // amber
+        Color(red: 0.05, green: 0.44, blue: 0.67),  // cyan
+        Color(red: 0.33, green: 0.46, blue: 0.05),  // olive
     ]
 
     static func of(_ host: String) -> Color {
@@ -522,6 +579,6 @@ struct HostBadge: View {
         .foregroundStyle(.white)
         .padding(.horizontal, size == .large ? 10 : 6)
         .padding(.vertical, size == .large ? 4 : 2)
-        .background(HostColor.of(host).gradient, in: Capsule())
+        .background(HostColor.of(host), in: Capsule())
     }
 }

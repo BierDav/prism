@@ -50,13 +50,11 @@ every five minutes, and every host then deploys `main` on its own.
 The menu-bar popout's tabs:
 
 - **Alerts**: the server's open alerts and machine events, grouped by
-  category with their severity; per alert the agents it started (Open in T3)
-  and the quick actions fix and a free-text instruction;
-  below them "Do…" starts an agent for any task, on the cluster or a machine
-  picked from the server's machines. The model and reasoning level for new
-  agents are picked there too. The menu-bar glyph shows the number of open
-  critical alerts, and new alerts and agents' questions come as
-  notifications.
+  category (most severe groups first) with their severity; per alert the agents
+  it started (Open in T3) and the quick actions fix and a free-text instruction.
+  The model and reasoning level for new agents are picked below them. The
+  menu-bar glyph shows the number of open critical alerts, and new alerts and
+  agents' questions come as notifications.
 - **Machines**: every fleet host's and cluster node's CPU, memory, disk,
   network, load, uptime and battery, with the last two hours of CPU and
   memory (`GET /v1/machines/metrics`); click a host for its filesystems.

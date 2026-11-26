@@ -151,7 +151,7 @@ final class PrismStore: ObservableObject {
 
     @Published private(set) var placement: Placement?
     @Published private(set) var savingProfiles = false
-    @Published private(set) var profilesError: String?
+    @Published var profilesError: String?
 
     let config: RockyConfig?
     private let device: String
@@ -182,9 +182,23 @@ final class PrismStore: ObservableObject {
     var openCritical: Int { alerts.filter { $0.level == .critical }.count }
     var connected: Bool { connection == .connected }
 
-    /// Alerts by category in the contract's order, within one the most
-    /// severe and then the newest first.
-    var grouped: [AlertGroup] { ApiKt.groupAlerts(alerts: alerts, now: epochNow()) }
+    /// Alerts by category, most severe groups first (critical before warning
+    /// before info), keeping the contract's category order as a tie-breaker.
+    var grouped: [AlertGroup] {
+        let groups = ApiKt.groupAlerts(alerts: alerts, now: epochNow())
+        func rank(_ severity: Severity) -> Int {
+            switch severity {
+            case .critical: 0
+            case .info: 2
+            default: 1
+            }
+        }
+        return groups.enumerated().sorted { lhs, rhs in
+            let l = lhs.element.alerts.map { rank($0.level) }.min() ?? 3
+            let r = rhs.element.alerts.map { rank($0.level) }.min() ?? 3
+            return l != r ? l < r : lhs.offset < rhs.offset
+        }.map(\.element)
+    }
 
     /// `push: false` (preview) reads no push and leaves its catch-up point alone.
     func start(push usePush: Bool = true) {
@@ -345,7 +359,7 @@ final class PrismStore: ObservableObject {
 
     // MARK: - Actions
 
-    func perform(_ action: PrismAction, on alert: PrismAlert?) {
+    func perform(_ action: PrismAction, on alert: PrismAlert?, onSuccess: (@MainActor () -> Void)? = nil) {
         guard let client else { return }
         let busyID = alert?.id ?? 0
         guard !busy.contains(busyID) else { return }
@@ -364,6 +378,7 @@ final class PrismStore: ObservableObject {
                 default:
                     return
                 }
+                onSuccess?()
                 refresh()
             } catch {
                 actionError = error.text
@@ -374,13 +389,11 @@ final class PrismStore: ObservableObject {
 
     // MARK: - Choices for new agents
 
-    /// Loads the model settings and the machines when the popout opens.
-    /// The machine list asks every machine's T3 (up to 10 s), so it is never
-    /// polled: at most every two minutes unless `force`.
+    /// Loads the model settings when the popout opens (at most once a minute
+    /// unless `force`).
     func loadChoices(force: Bool = false) {
         guard client != nil, connected else { return }
         if force || modelLoaded.map({ Date().timeIntervalSince($0) > 60 }) ?? true { loadModel() }
-        if force || machinesLoaded.map({ Date().timeIntervalSince($0) > 120 }) ?? true { loadMachines() }
     }
 
     private func loadModel() {
