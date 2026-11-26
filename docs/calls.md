@@ -234,10 +234,14 @@ Each side acks every 5th audio frame it receives on a link, both ways:
 
 `n` counts the audio frames received on this link so far. The sender times
 each ack against when frame `n` went out; the least of those times over the
-last 5–10 s is the path's own delay. While an ack comes more than 100 ms
-later than that, frames wait in buffers on the way (an LE link that slowed
-down, a busy network), and the sender sends only every other frame until
-they drain: gaps, rather than a delay that only grows. A link whose round
+last 5–10 s is the path's own delay. While acks come more than 250 ms
+later than that, three in a row, frames wait in buffers on the way (an LE
+link that slowed down, a busy network), and the sender leaves out one frame
+in four until they drain: short gaps, rather than a delay that only grows.
+
+Each side plays what it receives through an adaptive jitter buffer: after a
+gap it waits for 2–6 frames (more after each gap, fewer after 10 s without
+one) and covers the gap with the last frame fading out. A link whose round
 trip (ping) stays over 1.5 s anyway is closed by the Mac, and the phone
 connects again with empty buffers.
 

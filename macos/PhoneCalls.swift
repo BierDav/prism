@@ -287,10 +287,10 @@ final class PhoneCalls: ObservableObject {
                 return String(format: "peak %.0f dBFS", 20 * log10(p / 32768))
             }
             log("calls: audio: delay about \(shown) ms (hear \(hear), speak \(speak), round trip \(rtt) ms);"
-                + " from the phone \(mac.received) frames (\(dB(mac.receivedPeak))), dropped \(mac.dropped), shed \(mac.trimmed), gaps \(mac.concealed), paced out \(link?.skipped ?? 0) of ours, \(json["skipped"] ?? "?") of the phone's;"
+                + " from the phone \(mac.received) frames (\(dB(mac.receivedPeak))), dropped \(mac.dropped), shed \(mac.trimmed), gaps \(mac.concealed), buffer \(mac.playQueued)/\(mac.playTarget), paced out \(link?.skipped ?? 0) of ours, \(json["skipped"] ?? "?") of the phone's;"
                 + " to the phone \(mac.sent) frames (\(dB(mac.sentPeak)));"
                 + " the phone recorded \(json["recorded"] ?? "?") (\(dB(json["recordedPeak"])))"
-                + " and played \(json["played"] ?? "?") (\(dB(json["playedPeak"]))), queued \(phoneQueued), shed \(json["trimmed"] ?? "?"), mode \(json["mode"] ?? "?")")
+                + " and played \(json["played"] ?? "?") (\(dB(json["playedPeak"]))), queued \(phoneQueued)/\(json["target"] ?? "?"), gaps \(json["gaps"] ?? "?"), shed \(json["trimmed"] ?? "?"), mode \(json["mode"] ?? "?")")
         }
     }
 
@@ -559,29 +559,34 @@ final class AudioLink: @unchecked Sendable {
 /// Paces a link's audio by its delay (docs/calls.md, "Acks"): the receiver
 /// acks every 5th audio frame with the count it has, and the sender times
 /// each ack against when that frame went out. The least of those times over
-/// the last 5–10 s is the path's own delay; more than `behind` over it means
-/// frames wait in buffers on the way (an LE link that slowed down, a busy
-/// network), and the sender then sends every other frame until it drains.
+/// the last 5–10 s is the path's own delay; more than `behind` over it for
+/// `sustained` acks means frames wait in buffers on the way (an LE link that
+/// slowed down, a busy network), and the sender then leaves out one frame in
+/// four until it drains.
 /// One per link, on its queue.
 struct Pace {
     static let ackEvery = 5
-    static let behind = 100
+    /// Late by this much, for `sustained` acks in a row (300 ms), is a
+    /// backlog, not the link's unevenness.
+    static let behind = 250
+    static let sustained = 3
     private var sentAt = [Int](repeating: 0, count: 256)
     private var sent = 0
     private var least = Int.max
     private var leastBefore = Int.max
     private var since = 0
-    private var over = 0
-    private var skip = false
+    private var late = 0
+    private var turn = 0
     var skipped = 0
 
     private static func now() -> Int { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) }
 
     /// Whether the next frame goes out; counts it if so.
     mutating func shouldSend() -> Bool {
-        if over > Self.behind {
-            skip.toggle()
-            if skip {
+        // Backed up: one frame in four stays home until it drains.
+        if late >= Self.sustained {
+            turn += 1
+            if turn % 4 == 0 {
                 skipped += 1
                 return false
             }
@@ -602,7 +607,7 @@ struct Pace {
             since = now
         }
         least = min(least, age)
-        over = age - min(least, leastBefore)
+        late = age - min(least, leastBefore) > Self.behind ? late + 1 : 0
     }
 }
 
@@ -1399,11 +1404,18 @@ final class CallAudio: @unchecked Sendable {
     private static let frameBytes = 640
     /// Playback falls at most this many frames behind (200 ms).
     private static let maxQueued = 10
-    /// The frames the player keeps at least over a second (the one playing
-    /// and one waiting): more is delay a burst left behind, which play()
-    /// sheds.
-    private static let slack = 2
+    /// The jitter buffer (play()): after a gap it waits for `target` frames
+    /// (the one playing included) before it plays again; a gap raises the
+    /// target, 10 s without one lowers it. Over a second it sheds frames
+    /// that stay above the target, the rest of a burst.
+    private static let minTarget = 2
+    private static let maxTarget = 6
     private static let window = 50
+    private static let calmFrames = 500
+    private var target = CallAudio.minTarget
+    private var calm = 0
+    /// Frames held while the buffer fills after a gap.
+    private var holding: [AVAudioPCMBuffer] = []
 
     // The engine and its player, under the lock: the watchdog builds new
     // ones when macOS's audio stalls.
@@ -1458,8 +1470,8 @@ final class CallAudio: @unchecked Sendable {
 
     struct Stats {
         var received: Int, receivedPeak: Int, dropped: Int, trimmed: Int, concealed: Int, sent: Int, sentPeak: Int
-        /// Frames waiting for the player now.
-        var playQueued: Int
+        /// Frames waiting for the player now, and the jitter buffer's target.
+        var playQueued: Int, playTarget: Int
         /// The audio devices' own delay, ms.
         var outputLatency: Int, inputLatency: Int
     }
@@ -1471,7 +1483,7 @@ final class CallAudio: @unchecked Sendable {
         lock.withLock {
             defer { received = 0; receivedPeak = 0; dropped = 0; trimmed = 0; concealed = 0; sent = 0; sentPeak = 0 }
             return Stats(received: received, receivedPeak: Int(receivedPeak), dropped: dropped, trimmed: trimmed, concealed: concealed, sent: sent,
-                         sentPeak: Int(sentPeak), playQueued: queued, outputLatency: outputLatency, inputLatency: inputLatency)
+                         sentPeak: Int(sentPeak), playQueued: queued, playTarget: target, outputLatency: outputLatency, inputLatency: inputLatency)
         }
     }
 
@@ -1590,6 +1602,8 @@ final class CallAudio: @unchecked Sendable {
             self.voiceProcessing = voiceProcessing
             generation += 1
             queued = 0
+            holding = []
+            afterGap = true
             lastInput = CACurrentMediaTime()
             outputLatency = output
             inputLatency = latency
@@ -1678,37 +1692,10 @@ final class CallAudio: @unchecked Sendable {
         frames.forEach(send)
     }
 
-    /// A frame from the phone, scheduled on the player; the oldest go when it falls behind.
+    /// A frame from the phone, into the jitter buffer; the oldest go when it falls behind.
     func play(_ frame: Data) {
-        let target: (AVAudioPlayerNode, Int, Bool)? = lock.withLock {
-            guard running else { return nil }
-            received += 1
-            receivedTotal += 1
-            guard queued < Self.maxQueued else {
-                dropped += 1
-                afterGap = true
-                return nil
-            }
-            least = min(least, queued)
-            seen += 1
-            if seen == Self.window {
-                shed += max(0, least - Self.slack)
-                least = .max
-                seen = 0
-            }
-            if shed > 0 {
-                shed -= 1
-                trimmed += 1
-                afterGap = true
-                return nil
-            }
-            queued += 1
-            defer { afterGap = false }
-            return (player, generation, afterGap)
-        }
-        guard let (player, generation, fadeIn) = target else { return }
         let count = frame.count / 2
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(count)),
+        guard count > 0, let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(count)),
               let channel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = AVAudioFrameCount(count)
         var peak: Int16 = 0
@@ -1720,29 +1707,77 @@ final class CallAudio: @unchecked Sendable {
                 channel[i] = Float(s) / 32768
             }
         }
-        if fadeIn {
-            for i in 0..<min(Self.fade, count) { channel[i] *= Float(i) / Float(Self.fade) }
-        }
-        let samples = Array(UnsafeBufferPointer(start: channel, count: count))
-        lock.withLock {
+        let release: (AVAudioPlayerNode, Int, [AVAudioPCMBuffer])? = lock.withLock {
+            guard running else { return nil }
+            received += 1
+            receivedTotal += 1
             receivedPeak = max(receivedPeak, peak)
-            lastFrame = samples
-        }
-        player.scheduleBuffer(buffer) { [weak self] in
-            guard let self else { return }
-            let conceal: [Float]? = self.lock.withLock {
-                guard self.generation == generation else { return nil }
-                self.queued -= 1
-                self.playedTotal += 1
-                // Nothing more to play: the last frame again, fading out,
-                // rather than a hard stop.
-                guard self.running, self.queued == 0, !self.afterGap else { return nil }
-                self.afterGap = true
-                self.concealed += 1
-                return self.lastFrame
+            guard queued + holding.count < Self.maxQueued else {
+                dropped += 1
+                afterGap = true
+                return nil
             }
-            if let conceal { self.fadeOut(conceal, on: player) }
+            if holding.isEmpty, !afterGap {
+                least = min(least, queued)
+                seen += 1
+                if seen == Self.window {
+                    shed += max(0, least - target)
+                    least = .max
+                    seen = 0
+                }
+                if shed > 0 {
+                    shed -= 1
+                    trimmed += 1
+                    return nil
+                }
+            }
+            calm += 1
+            if calm >= Self.calmFrames {
+                calm = 0
+                target = max(Self.minTarget, target - 1)
+            }
+            holding.append(buffer)
+            // After a gap: wait until the buffer holds `target` frames.
+            if afterGap, queued + holding.count < target { return nil }
+            if afterGap {
+                // Fades in, rather than starting mid-wave with a click.
+                if let first = holding.first?.floatChannelData?[0] {
+                    let n = Int(holding[0].frameLength)
+                    for i in 0..<min(Self.fade, n) { first[i] *= Float(i) / Float(Self.fade) }
+                }
+                afterGap = false
+            }
+            let out = holding
+            holding = []
+            queued += out.count
+            if let last = out.last?.floatChannelData?[0] {
+                lastFrame = Array(UnsafeBufferPointer(start: last, count: Int(out.last!.frameLength)))
+            }
+            return (player, generation, out)
         }
+        guard let (player, generation, buffers) = release else { return }
+        for buffer in buffers {
+            player.scheduleBuffer(buffer) { [weak self] in
+                self?.played(player, generation: generation)
+            }
+        }
+    }
+
+    /// A frame finished: when it was the last, a gap begins. The last frame
+    /// plays again fading out, and the buffer waits for more next time.
+    private func played(_ player: AVAudioPlayerNode, generation: Int) {
+        let conceal: [Float]? = lock.withLock {
+            guard self.generation == generation else { return nil }
+            queued -= 1
+            playedTotal += 1
+            guard running, queued == 0, !afterGap else { return nil }
+            afterGap = true
+            concealed += 1
+            calm = 0
+            target = min(Self.maxTarget, target + 1)
+            return lastFrame
+        }
+        if let conceal { fadeOut(conceal, on: player) }
     }
 
     private func fadeOut(_ samples: [Float], on player: AVAudioPlayerNode) {

@@ -108,8 +108,10 @@ object CallBridge {
      * Frames the queue for the call keeps at least, over a second: more than
      * that is delay a burst left behind, which the queue sheds (Pipe).
      */
-    private const val SLACK_FRAMES = 1
     private const val WINDOW_FRAMES = 50
+    private const val MIN_TARGET = 2
+    private const val MAX_TARGET = 6
+    private const val CALM_FRAMES = 500
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val RETRY_MS = 2_000L
 
@@ -502,11 +504,26 @@ object CallBridge {
         private val played = AtomicInteger()
         private val playedPeak = AtomicInteger()
         private val trimmed = AtomicInteger()
+        private val gaps = AtomicInteger()
+        @Volatile var target = MIN_TARGET
+
+        /** `pcm` (16-bit little-endian) fading from 0.6 to silence. */
+        private fun fadeOut(pcm: ByteArray): ByteArray {
+            val out = ByteArray(pcm.size)
+            val n = pcm.size / 2
+            for (i in 0 until n) {
+                val s = (pcm[2 * i].toInt() and 0xff) or (pcm[2 * i + 1].toInt() shl 8)
+                val v = (s * 0.6f * (1f - i.toFloat() / n)).toInt()
+                out[2 * i] = v.toByte()
+                out[2 * i + 1] = (v shr 8).toByte()
+            }
+            return out
+        }
 
         /** Recorded, its peak, played, its peak (0..32768), frames queued for the call, frames shed; and starts over. */
         fun stats(): IntArray = intArrayOf(
             recorded.getAndSet(0), recordedPeak.getAndSet(0),
-            played.getAndSet(0), playedPeak.getAndSet(0), incoming.size, trimmed.getAndSet(0),
+            played.getAndSet(0), playedPeak.getAndSet(0), incoming.size, trimmed.getAndSet(0), gaps.getAndSet(0), target,
         )
 
         private fun peak(pcm: ByteArray, length: Int): Int {
@@ -540,24 +557,53 @@ object CallBridge {
                 }
             }, "call-downlink")
             threads += Thread({
-                // The fewest frames left waiting over the window: a jitter
-                // buffer that keeps SLACK_FRAMES for the link's unevenness
-                // and sheds what's left of a burst.
+                // An adaptive jitter buffer: after a gap it waits for
+                // `target` frames before playing again, keeping the call's
+                // track fed meanwhile (the last frame fading out, then
+                // silence) so it doesn't stop; a gap raises the target, 10 s
+                // without one lowers it. Over a second it sheds frames that
+                // stay above the target, the rest of a burst.
                 var least = Int.MAX_VALUE
                 var seen = 0
+                var calm = 0
+                var buffering = true
+                var last: ByteArray? = null
+                val silence = ByteArray(CallLink.FRAME_BYTES)
                 while (running) {
+                    if (buffering) {
+                        if (incoming.size < target) {
+                            val fill = last?.let { fadeOut(it) } ?: silence
+                            last = null
+                            // Blocks for about a frame once the track is full: the pace.
+                            if (track.write(fill, 0, fill.size, AudioTrack.WRITE_BLOCKING) < 0) return@Thread
+                            continue
+                        }
+                        buffering = false
+                    }
                     val frame = try {
-                        incoming.poll(100, TimeUnit.MILLISECONDS)
+                        incoming.poll(30, TimeUnit.MILLISECONDS)
                     } catch (e: InterruptedException) {
                         return@Thread
-                    } ?: continue
+                    }
+                    if (frame == null) {
+                        gaps.incrementAndGet()
+                        buffering = true
+                        target = minOf(MAX_TARGET, target + 1)
+                        calm = 0
+                        continue
+                    }
                     least = minOf(least, incoming.size)
                     if (++seen == WINDOW_FRAMES) {
-                        repeat(least - SLACK_FRAMES) { if (incoming.poll() != null) trimmed.incrementAndGet() }
+                        repeat(least - (target - 1)) { if (incoming.poll() != null) trimmed.incrementAndGet() }
                         least = Int.MAX_VALUE
                         seen = 0
                     }
+                    if (++calm >= CALM_FRAMES) {
+                        calm = 0
+                        target = maxOf(MIN_TARGET, target - 1)
+                    }
                     if (track.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING) < 0) return@Thread
+                    last = frame
                     played.incrementAndGet()
                     playedPeak.accumulateAndGet(peak(frame, frame.size)) { a, b -> maxOf(a, b) }
                 }
@@ -958,7 +1004,7 @@ object CallBridge {
     private fun pong(l: Link, ping: JSONObject) {
         val reply = JSONObject().put("type", "pong").put("t", ping.opt("t")).put("skipped", l.pace.takeSkipped())
         pipe?.stats()?.let { s ->
-            reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4]).put("trimmed", s[5])
+            reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4]).put("trimmed", s[5]).put("gaps", s[6]).put("target", s[7])
                 .put("mode", audio.mode)
         }
         val bytes = reply.toString().toByteArray(Charsets.UTF_8)
@@ -1005,8 +1051,9 @@ object CallBridge {
      * receiver acks every 5th audio frame with the count it has, and the
      * sender times each ack against when that frame went out. The least of
      * those times over the last 5–10 s is the path's own delay; more than
-     * BEHIND_MS over it means frames wait in buffers on the way, and the
-     * sender then sends every other frame until it drains.
+     * BEHIND_MS over it for SUSTAINED acks means frames wait in buffers on
+     * the way, and the sender then leaves out one frame in four until it
+     * drains.
      */
     class Pace {
         private val sentAt = LongArray(256)
@@ -1014,14 +1061,14 @@ object CallBridge {
         private var least = Long.MAX_VALUE
         private var leastBefore = Long.MAX_VALUE
         private var since = 0L
-        private var over = 0L
-        private var skip = false
+        private var late = 0
+        private var turn = 0
         private var skipped = 0
 
         @Synchronized fun shouldSend(): Boolean {
-            if (over > BEHIND_MS) {
-                skip = !skip
-                if (skip) {
+            // Backed up: one frame in four stays home until it drains.
+            if (late >= SUSTAINED) {
+                if (++turn % 4 == 0) {
                     skipped++
                     return false
                 }
@@ -1041,14 +1088,16 @@ object CallBridge {
                 since = now
             }
             least = minOf(least, age)
-            over = age - minOf(least, leastBefore)
+            late = if (age - minOf(least, leastBefore) > BEHIND_MS) late + 1 else 0
         }
 
         @Synchronized fun takeSkipped(): Int = skipped.also { skipped = 0 }
 
         companion object {
             const val ACK_EVERY = 5
-            const val BEHIND_MS = 100L
+            /** Late by this much, for SUSTAINED acks in a row (300 ms), is a backlog, not the link's unevenness. */
+            const val BEHIND_MS = 250L
+            const val SUSTAINED = 3
         }
     }
 }
