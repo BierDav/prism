@@ -93,13 +93,36 @@ private const val PLATE_OVERFLOW_DP = 48f
 /** One cycle of the card's clock, as Gemini loops it. */
 private const val PLATE_TIMER_LOOP = 13.736f
 
+/**
+ * Gemini's "energy" colour for [primary]: the colour its glow, its card's
+ * edge glow and dots are drawn in. Gemini derives it from the palette with
+ * its own algorithm, and it is never grey: on the owner's near-grey palette
+ * its card's rim still reads blue. Here: the primary, its saturation raised
+ * to at least 0.3 (Google blue's hue where it has none), its brightness kept.
+ */
+internal fun energyColor(primary: Color): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(primary.toArgb(), hsv)
+    if (hsv[1] >= ENERGY_MIN_SATURATION) return primary
+    if (hsv[1] < 0.04f) hsv[0] = GOOGLE_BLUE_HUE
+    hsv[1] = ENERGY_MIN_SATURATION
+    return Color(android.graphics.Color.HSVToColor((primary.alpha * 255).toInt(), hsv))
+}
+
+private const val ENERGY_MIN_SATURATION = 0.3f
+private const val GOOGLE_BLUE_HUE = 217f
+
 /** The card's colours, from the overlay's scheme. */
 internal class PlateColors(scheme: ColorScheme, val dark: Boolean) {
     val center = if (dark) Color.Black else Color.White
     val base = scheme.surfaceContainer
     val surfaceMid = scheme.surfaceVariant
     val primary = scheme.primary
-    val edge = lerp(center, surfaceMid, if (dark) 0.4f else 0.6f)
+    val energy = energyColor(scheme.primary)
+    // Gemini's edge in the dark: black towards its surface energy colour
+    // (0.4), which is lighter than any Material surface; matched to the
+    // owner's screenshot with the outline (tone 60) at 0.35. Light as before.
+    val edge = if (dark) lerp(center, scheme.outline, 0.35f) else lerp(center, surfaceMid, 0.6f)
     val midStop = if (dark) 0.3846f else 0.5547f
     val rimAlpha = if (dark) 0.12f else 0.06f
     val outsideDots = if (dark) 0.48f else 0.58f
@@ -154,13 +177,15 @@ private class SamsyPlate(private val colors: PlateColors, private val density: F
         shader.setFloatUniform("u_dotSpacing", 0.52f)
         shader.setColorUniform("u_baseColor", colors.base.toArgb())
         shader.setColorUniform("u_dodgeColor", colors.surfaceMid.toArgb())
-        shader.setColorUniform("u_particleColor", colors.primary.toArgb())
-        shader.setColorUniform("u_outsideParticleColor", colors.primary.toArgb())
-        shader.setColorUniform("u_processingColor1", lerp(colors.center, colors.primary, 0.5f).toArgb())
-        shader.setColorUniform("u_processingColor2", colors.primary.toArgb())
+        // As Gemini's factory (cckb) sets them: the dots, the shimmer and the
+        // ambient edge glow in the energy colour, the bottom rim in the primary.
+        shader.setColorUniform("u_particleColor", colors.energy.toArgb())
+        shader.setColorUniform("u_outsideParticleColor", colors.energy.toArgb())
+        shader.setColorUniform("u_processingColor1", lerp(colors.center, colors.energy, 0.5f).toArgb())
+        shader.setColorUniform("u_processingColor2", colors.energy.toArgb())
         shader.setColorUniform("u_bgCenterColor", colors.center.toArgb())
         shader.setColorUniform("u_bgEdgeColor", colors.edge.toArgb())
-        shader.setColorUniform("u_innerShadowAmbientColor", colors.primary.toArgb())
+        shader.setColorUniform("u_innerShadowAmbientColor", colors.energy.toArgb())
         shader.setColorUniform("u_innerShadowBottomColor", colors.primary.toArgb())
         shader.setFloatUniform("u_bgMidStop", colors.midStop)
         shader.setFloatUniform("u_innerShadowRimAlpha", colors.rimAlpha)

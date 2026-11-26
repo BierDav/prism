@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- The assistant's voice input (Voice.kt); granted by Prism itself as the Device Owner. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- The assistant overlay's camera in its + menu (AssistCamera.kt); granted by Prism itself as the Device Owner. -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -141,6 +143,11 @@
 
         <activity android:name=".NetbirdActivity" android:exported="false" />
         <activity android:name=".PlacementActivity" android:exported="false" />
+        <activity
+            android:name=".assistant.AssistHistoryActivity"
+            android:exported="false"
+            android:label="Chats"
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".T3Activity"
             android:exported="false"

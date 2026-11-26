@@ -704,3 +704,31 @@ object T3Links {
 
     private const val HEX = "0123456789ABCDEF"
 }
+
+/**
+ * A conversation of the phone's assistant, as the history lists it
+ * (`/v1/assistant/conversations`); times in Unix seconds.
+ */
+@Serializable
+data class AssistantConversation(
+    val id: String,
+    /** The device it was started on. */
+    val device: String = "",
+    val title: String = "",
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+    /** The committed revision, which the next save names as its base. */
+    val revision: Long = 0,
+)
+
+/** One stored transcript entry: its ID and the app's JSON of it. */
+@Serializable
+data class StoredEntry(val id: String, val body: String)
+
+/** A whole stored conversation: its entries and the model's history (each message's JSON), in order. */
+@Serializable
+data class StoredConversation(
+    val conversation: AssistantConversation,
+    val entries: List<StoredEntry> = emptyList(),
+    val history: List<String> = emptyList(),
+)

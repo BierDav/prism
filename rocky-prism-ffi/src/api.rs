@@ -23,9 +23,10 @@
 
 use crate::{ReplicaError, now_unix, retrying};
 use rocky_prism::{
-    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, AgentRow, AlertActionRequest, AlertFilter,
-    AlertView, PlacementPolicy, PrismClient, PrismError, PutPlacementProfileRequest, QuestionRow,
-    RequestOutcome, RequestTable, SetPlacementActionsRequest, sha256_hex,
+    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, ASSISTANT_DELETED, AgentRow, AlertActionRequest,
+    AlertFilter, AlertView, AssistantConversationRow, AssistantEntry, PlacementPolicy, PrismClient,
+    PrismError, PutPlacementProfileRequest, QuestionRow, RequestOutcome, RequestTable,
+    SetPlacementActionsRequest, sha256_hex,
 };
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
@@ -68,6 +69,8 @@ pub struct ApiResponse {
 /// Agents and alerts that ended within this long count as recent.
 const RECENT_SECS: i64 = 7 * 24 * 60 * 60;
 const AGENT_LIMIT: usize = 200;
+/// The most assistant conversations one list returns.
+const CONVERSATION_LIMIT: usize = 500;
 const CLUSTER_TARGET: &str = "cluster";
 const AGENT_TASKS: [&str; 5] = ["alert", "fix", "deploy", "retire", "do"];
 const MAX_TEXT_CHARS: usize = 10_000;
@@ -405,6 +408,25 @@ impl Api {
             ("PUT", ["v1", "settings", "model"]) => self.set_model(&body).await,
             ("PUT", ["v1", "settings", "reasoning"]) => self.set_reasoning(&body).await,
             ("GET", ["v1", "android", "settings"]) => self.android_settings().await,
+            ("GET", ["v1", "assistant", "conversations"]) => {
+                self.assistant_conversations(query(&q, "limit")).await
+            }
+            ("GET", ["v1", "assistant", "conversations", id]) => {
+                let c = self.client.assistant_conversation(id).await?;
+                ok(json!({
+                    "conversation": conversation_json(&c.conversation),
+                    "entries": c.entries.iter().map(|e| json!({"id": e.entry_id, "body": e.body})).collect::<Vec<_>>(),
+                    "history": c.history,
+                }))
+            }
+            ("PUT", ["v1", "assistant", "conversations", id]) => {
+                self.save_assistant_conversation(id, &body).await
+            }
+            ("DELETE", ["v1", "assistant", "conversations", id]) => {
+                let (c, id, now) = (&self.client, id.to_string(), now_unix());
+                retrying(|| c.delete_assistant_conversation(&id, &self.device, now)).await?;
+                ok(json!({"ok": true}))
+            }
             ("GET", ["v1", "placement"]) => self.placement().await,
             ("PUT", ["v1", "placement", "profiles", id]) => {
                 let req: PutPlacementProfileRequest = serde_json::from_value(body)?;
@@ -1368,6 +1390,77 @@ impl Api {
         }
     }
 
+    // --- The assistant's conversations -----------------------------------------
+
+    /// `GET /v1/assistant/conversations`: every device's, newest first.
+    async fn assistant_conversations(&self, limit: Option<&str>) -> Result<Reply, ApiError> {
+        let limit = match limit {
+            None => CONVERSATION_LIMIT,
+            Some(n) => n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=CONVERSATION_LIMIT).contains(n))
+                .ok_or_else(|| ApiError::invalid(format!("limit is 1 to {CONVERSATION_LIMIT}.")))?,
+        };
+        let list = self.client.list_assistant_conversations(limit).await?;
+        ok(json!({"conversations": list.iter().map(conversation_json).collect::<Vec<_>>()}))
+    }
+
+    /// `PUT /v1/assistant/conversations/{id}`: the conversation as it is now
+    /// (the `revision` it builds on, the `saveId` of the revision it makes,
+    /// `title`, `createdAt`, `updatedAt`, `entries` `[{id, body}]`, `history`
+    /// `[body]`); this device started it if it is new. Answers
+    /// `{"conversation": {id, revision}}` with the committed revision, also
+    /// to a retry of the save that committed it; 409 when it changed since
+    /// `revision`, 410 once deleted.
+    async fn save_assistant_conversation(&self, id: &str, body: &Value) -> Result<Reply, ApiError> {
+        let entries: Vec<AssistantEntry> = body
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|e| AssistantEntry {
+                entry_id: str_field(e, "id"),
+                body: str_field(e, "body"),
+            })
+            .collect();
+        let history: Vec<String> =
+            serde_json::from_value(body.get("history").cloned().unwrap_or(json!([])))?;
+        let now = now_unix();
+        let at = |key: &str| body.get(key).and_then(Value::as_i64).unwrap_or(now);
+        let row = AssistantConversationRow {
+            conversation_id: id.to_string(),
+            device: self.device.clone(),
+            title: str_field(body, "title"),
+            created_at: at("createdAt"),
+            updated_at: at("updatedAt"),
+            revision: 0,
+        };
+        let base = body.get("revision").and_then(Value::as_i64).unwrap_or(0);
+        let save_id = str_field(body, "saveId");
+        let c = &self.client;
+        let saved = retrying(|| {
+            c.save_assistant_conversation(
+                row.clone(),
+                base,
+                &save_id,
+                entries.clone(),
+                history.clone(),
+            )
+        })
+        .await;
+        match saved {
+            Ok(revision) => ok(json!({"conversation": {"id": id, "revision": revision}})),
+            // The tombstone of a deleted conversation: the app drops its copy.
+            Err(ReplicaError::Conflict(m)) if m == ASSISTANT_DELETED => Err(ApiError {
+                status: 410,
+                code: "gone",
+                message: m,
+            }),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     // --- Placement ------------------------------------------------------------
 
     async fn placement_value(&self) -> Result<Value, ApiError> {
@@ -1410,6 +1503,18 @@ fn pending_detail(reply: Reply, unreachable: &Option<String>) -> Reply {
         body: detailed(reply.body, unreachable),
         ..reply
     }
+}
+
+/// A conversation as the API shows it.
+fn conversation_json(c: &AssistantConversationRow) -> Value {
+    json!({
+        "id": c.conversation_id,
+        "device": c.device,
+        "title": c.title,
+        "createdAt": c.created_at,
+        "updatedAt": c.updated_at,
+        "revision": c.revision,
+    })
 }
 
 /// The `settings` key of a model's reasoning level: each model keeps its own.

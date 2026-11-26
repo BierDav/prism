@@ -7,6 +7,6 @@
 app.cash.paparazzi:paparazzi:2.0.0-alpha05.1
 com.android.tools.layoutlib:layoutlib-runtime:16.2.3
 com.android.tools.layoutlib:layoutlib-resources:16.2.3
-androidx.compose.ui:ui-tooling-preview:1.12.0
+androidx.compose.ui:ui-tooling-preview:1.13.0
 # Moshi's reflection, at the version of Kotlin's standard library.
 org.jetbrains.kotlin:kotlin-reflect:2.4.21

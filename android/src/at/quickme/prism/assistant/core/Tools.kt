@@ -39,6 +39,7 @@ object Tools {
     const val LIST_T3 = "list_t3_threads"
     const val SEND_T3 = "send_to_t3_thread"
     const val T3_PROJECTS = "list_t3_projects"
+    const val SHOW_UI = "show_ui"
 
     /** What the transcript says while [tool] runs with [args]. */
     fun label(tool: String, args: JsonObject = JsonObject(emptyMap())): String {
@@ -69,6 +70,7 @@ object Tools {
             LIST_T3 -> "Looking at T3 threads"
             SEND_T3 -> "Sending to the T3 thread"
             T3_PROJECTS -> "Looking at the projects"
+            SHOW_UI -> "Putting it on screen"
             else -> tool.replace('_', ' ')
         }
     }

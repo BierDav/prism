@@ -19,7 +19,11 @@
 }:
 let
   lib = pkgs.lib;
-  platform = "36";
+  # The platform the code compiles against (android.jar): 37.1, as Google's
+  # A2UI renderer (deps/roots.txt) asks (its AARs' minCompileSdk 37.1). The
+  # app still targets 36: a compile SDK changes no behaviour, a target does.
+  platform = "37.1";
+  targetSdk = "36";
   buildTools = "37.0.0";
   minSdk = "31";
   sdk =
@@ -229,7 +233,7 @@ let
       # The app's sources with shared/'s (commonMain, jvmMain) in one module.
       ${shared.kotlincArgs.jvm} build/kotlin.args $(find src -name '*.kt') $javaSources
       # kotlinc's default heap (512 MB) no longer holds the app with Compose.
-      JAVA_OPTS="-Xmx3g -Xss4m" kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
+      JAVA_OPTS="-Xmx3g -Xms256m -Xss4m" kotlinc -no-jdk -no-reflect -no-stdlib -jvm-target 17 -Werror \
         -Xplugin=${kotlin}/lib/compose-compiler-plugin.jar \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3Api \
         -opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi \
@@ -294,7 +298,7 @@ let
         ${tools}/aapt2 compile --dir ${appRes} -o build/res/app.zip
         ${tools}/aapt2 link -o build/base.apk -I ${androidJar} \
           --manifest build/AndroidManifest.xml --auto-add-overlay \
-          --min-sdk-version ${minSdk} --target-sdk-version ${platform} \
+          --min-sdk-version ${minSdk} --target-sdk-version ${targetSdk} \
           --version-code ${toString versionCode} --version-name ${versionName} \
           ${
             lib.optionalString (
@@ -599,6 +603,9 @@ in
         run() { java -cp classes:${kotlin}/lib/kotlin-stdlib.jar:${serializationJars} "$@"; }
         run CoreTestKt
         run AssistantTestKt
+        run ConversationsTestKt
+        run A2uiTestKt
+        run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
         run MetricsTestKt remote-write.bin

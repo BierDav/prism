@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod assistant;
 pub mod client;
 #[cfg(feature = "coordinator")]
 pub mod coordinator;
@@ -12,6 +13,7 @@ pub mod types;
 pub mod weekly;
 
 pub use alerts::*;
+pub use assistant::*;
 pub use client::{PrismClient, retry_unavailable};
 pub use enroll::{DeviceProvisioning, PrismRoot, is_valid_device_name, peer_contact};
 pub use events::*;
@@ -23,7 +25,7 @@ pub use rank::{
     placement_move_target, placement_waits_for_reset, rank_placement_profile, same_placement_entry,
     selection_for_entry, usable_hours,
 };
-pub use schema::prism_schema;
+pub use schema::{SCHEMA_VERSION, prism_schema};
 pub use seal::{RootSigner, SealStatus};
 pub use types::*;
 pub use weekly::{WeeklyActivation, account_of};

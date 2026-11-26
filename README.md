@@ -118,7 +118,26 @@ overlay asks again with the same request ID until the agent exists), and the
 overlay stays: it follows the agent live,
 its words and steps, from its T3 thread (`AssistConversation.kt`,
 `GET /v1/agents/{id}/activity`), and what you send next goes to the same
-thread (`POST /v1/agents/{id}/messages`); + starts a new request. The Phone tab's Profiles page configures placement
+thread (`POST /v1/agents/{id}/messages`); + starts a new request. The
+assistant's conversations are kept in Prism's replica (`assistant_*`
+tables, so on every device and across reinstalls); "New chat" starts another
+and keeps the last. The answer panel above the card is Gemini's (its controls
+above it, its bubbles and fading edges). Dragging the card up grows it with
+the finger and, past a threshold, into the conversation full screen in the
+same window (a shared transition; Back shrinks it into the card again), and
+from there the Chats screen (`assistant/AssistHistory.kt`) lists the
+conversations newest first, opens one, continues it and deletes it. Every
+card in a conversation is an A2UI surface (a2ui.org, v1.0), drawn by Google's
+Compose renderer (androidx.a2ui) with Prism's catalog
+(`https://prism.quickme.at/a2ui/catalog/v1`: A2UI's basic components and the
+cards, `assistant/a2ui/`, `assistant/core/PrismCatalog.kt`): a tool's card is
+a surface with its component at the root, and the model composes its own with
+`show_ui` (a picker, a small form), checked against the catalog. Only the
+buttons of a card a tool made act on the phone (call back, a switch, open the
+alarms in Clock, …), and the model hears of it in its next turn; anything on
+a surface the model composed is only ever the next turn, and `show_ui` can't
+change a tool's card. The surfaces are what a conversation stores (old typed cards
+open as surfaces). The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in
