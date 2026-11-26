@@ -175,7 +175,7 @@ pub async fn open_replica(directory: String, dial: bool) -> Result<Arc<Replica>,
 
 /// The route a phone or a Mac advertises: nobody dials it (`prism-worker
 /// peer -` mints the workers' contact for it with the same placeholder).
-const DIAL_ONLY: &str = "127.0.0.1:9";
+const DIAL_ONLY: &str = "tcp://127.0.0.1:9";
 
 /// A phone's or a Mac's network: it dials the workers' routes
 /// (`wss://prism.quickme.at/rocky/<pod>`, docs/worker.md) and syncs over the
@@ -204,11 +204,10 @@ pub async fn open_provisioned_replica(
         let attachment = device_attachment().await?;
         let network = rocky_sdk::Network::Borrowed(attachment.transport());
         let opened = async {
-            let (client, _) = PrismClient::open_provisioned_with_peers(
+            let (client, _) = PrismClient::open_invited_with_peers(
                 directory,
                 provisioning,
                 Some(network),
-                None,
                 peers,
             )
             .await?;
@@ -369,7 +368,7 @@ impl Replica {
         on_runtime(async move {
             let events = client.observe(tables).await?;
             Ok(Arc::new(Changes {
-                events: Arc::new(events),
+                events: Arc::new(tokio::sync::Mutex::new(events)),
             }))
         })
         .await
@@ -379,7 +378,7 @@ impl Replica {
 /// A stream of the replica's changes (`Replica.changes`).
 #[derive(uniffi::Object)]
 pub struct Changes {
-    events: Arc<rocky_sdk::TableEvents>,
+    events: Arc<tokio::sync::Mutex<rocky_sdk::TableEvents>>,
 }
 
 #[uniffi::export]
@@ -390,6 +389,8 @@ impl Changes {
         let events = Arc::clone(&self.events);
         on_runtime(async move {
             let change = events
+                .lock()
+                .await
                 .next()
                 .await
                 .map_err(|err| ReplicaError::Storage(err.to_string()))?;

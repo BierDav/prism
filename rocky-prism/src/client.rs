@@ -1,4 +1,4 @@
-use crate::enroll::{contact_node, decode_provisioning};
+use crate::enroll::{contact_node, load_identity, save_identity, save_root};
 use crate::rank::{
     PLACEMENT_BURN_WINDOW_SECS, PROFILE_ENTRY_INSTANCE, compute_burn_rate,
     expand_profile_references, guess_driver, is_profile_entry, live_used, model_key,
@@ -23,7 +23,9 @@ use crate::weekly::{
     weekly_activation_step,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use rocky_sdk::{Configuration, Database, Network, SqlFailure, SqlValue, params};
+use rocky_sdk::{
+    Access, Configuration, Database, InvitationCode, Invite, Network, SqlValue, SyncMode, params,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -70,14 +72,6 @@ const POLICY_WEEKLY_ACTIVATION: &str = "weekly_activation:";
 /// `account_limit:<account>`.
 const POLICY_ACCOUNT_LIMIT: &str = "account_limit:";
 
-/// How much synced history a replica keeps before it refuses writes and
-/// incoming frames ("storage queue is full"). Rocky prunes history only
-/// behind a final seal, which needs trusted workers and a coordinator
-/// (`crate::seal`); until a database has both, history only grows: Rocky's
-/// default of 64 MiB filled within about a day. Rocky keeps this limit in
-/// memory, so every open sets it again.
-const RETAINED_HISTORY_BYTES: usize = 512 * 1024 * 1024;
-
 pub struct PrismClient {
     pub(crate) db: Arc<Database>,
     /// Serialises this process's alert writes (webhooks, reconciliation, actions).
@@ -94,146 +88,38 @@ pub struct PrismClient {
 
 impl PrismClient {
     /// Opens an existing Rocky database at `directory`, or creates a new one if absent/empty.
-    ///
-    /// A database created here is its own root and can't sync with enrolled
-    /// devices: for local runs and tests. Enrolled devices use
-    /// [`PrismClient::open_provisioned`].
     pub async fn open_or_create(
         directory: String,
         network: Option<Network>,
     ) -> Result<Self, PrismError> {
-        Self::open_with(&directory, network, None, First::Create).await
+        Self::open_with(&directory, network, First::Create).await
     }
 
-    /// Opens the enrolled device at `directory`. The first open (an absent or
-    /// empty directory) installs the device from `provisioning`, minted by
-    /// [`crate::PrismRoot::provision`], with no round trip to anyone; later
-    /// opens reuse the directory and ignore `provisioning`.
-    ///
-    /// With a network, the device syncs with its peers ([`PrismClient::add_peers`])
-    /// on its own. Nothing is seeded: every device would seed its own copy of
-    /// the default profiles, and they would all sync.
-    pub async fn open_provisioned(
+    /// Opens an existing Rocky database at `directory`, or joins an existing
+    /// database using `invitation` (from [`PrismClient::invite`]) if the
+    /// directory is absent/empty or has an unfinished join.
+    pub async fn open_invited(
         directory: String,
-        provisioning: String,
+        invitation: String,
         network: Option<Network>,
-    ) -> Result<Self, PrismError> {
-        Self::open_provisioned_with(directory, provisioning, network, None).await
-    }
-
-    /// [`PrismClient::open_provisioned`], composing `coordination`: how a
-    /// trusted device reaches the coordinator that makes its seals final
-    /// (`crate::seal`). Devices that are not trusted need none.
-    pub async fn open_provisioned_with(
-        directory: String,
-        provisioning: String,
-        network: Option<Network>,
-        coordination: Option<rocky_sdk::CoordinatorSlot>,
     ) -> Result<Self, PrismError> {
         let networked = network.is_some();
-        let provisioning = decode_provisioning(&provisioning)?;
-        let existed = !dir_is_empty(&directory);
-        let mut client = Self::open_with(
-            &directory,
-            network.clone(),
-            coordination.clone(),
-            First::Join(&provisioning),
-        )
-        .await?;
-        // A replica of another database (Prism's database was created anew
-        // and the device got a new provisioning): Rocky would keep opening
-        // the old one and ignore the provisioning. Its rows belong to a
-        // database nobody syncs any more, so drop it and enroll again.
-        if existed && client.belongs_elsewhere(&provisioning).await {
-            eprintln!(
-                "rocky-prism: the replica in {directory} belongs to another database \
-                 than its provisioning; enrolling again"
-            );
-            client.close().await?;
-            std::fs::remove_dir_all(&directory).map_err(storage_err)?;
-            client = Self::open_with(
-                &directory,
-                network,
-                coordination,
-                First::Join(&provisioning),
-            )
-            .await?;
-        }
+        let client = Self::open_with(&directory, network, First::Join(invitation.trim())).await?;
         if networked {
-            let session = client.db.session();
-            let enabled = session.set_automatic_sync(true).await;
-            session.close().await;
-            enabled.map_err(storage_err)?;
+            client.db.set_sync(SyncMode::Live).await.map_err(storage_err)?;
         }
         Ok(client)
     }
 
-    /// Whether this replica belongs to another database than
-    /// `provisioning` (`rocky://provision/...`): their publishers differ.
-    /// False when either can't be read, so a replica is never dropped on a
-    /// guess.
-    async fn belongs_elsewhere(&self, provisioning: &str) -> bool {
-        let session = self.db.session();
-        let contact = session.contact().await;
-        session.close().await;
-        match (
-            crate::enroll::publisher_of(provisioning),
-            contact
-                .ok()
-                .as_deref()
-                .and_then(crate::enroll::publisher_of),
-        ) {
-            (Some(wanted), Some(have)) => wanted != have,
-            _ => false,
-        }
-    }
-
-    /// [`PrismClient::open_provisioned_with`], then [`PrismClient::add_peers`]:
-    /// how a device starts. Returns the client and how many peers it added.
-    ///
-    /// A replica of another database can't always tell which database it
-    /// belongs to (an old, incomplete one may not produce its own contact),
-    /// but it refuses the peers: "the contact belongs to another domain".
-    /// When the provisioning and the peers agree on a database and the
-    /// replica refuses them, the replica is the stale one: it is dropped and
-    /// the device enrolls again. A peer list that disagrees with the
-    /// provisioning never drops a replica.
-    pub async fn open_provisioned_with_peers(
+    /// [`PrismClient::open_invited`], then [`PrismClient::add_peers`].
+    /// Returns the client and how many peers it added.
+    pub async fn open_invited_with_peers(
         directory: String,
-        provisioning: String,
+        invitation: String,
         network: Option<Network>,
-        coordination: Option<rocky_sdk::CoordinatorSlot>,
         peers: Vec<String>,
     ) -> Result<(Self, u32), PrismError> {
-        let client = Self::open_provisioned_with(
-            directory.clone(),
-            provisioning.clone(),
-            network.clone(),
-            coordination.clone(),
-        )
-        .await?;
-        let err = match client.add_peers(peers.clone()).await {
-            Ok(added) => return Ok((client, added)),
-            Err(err) => err,
-        };
-        let wanted = crate::enroll::publisher_of(&decode_provisioning(&provisioning)?);
-        let agree = wanted.is_some()
-            && !peers.is_empty()
-            && peers
-                .iter()
-                .all(|peer| crate::enroll::publisher_of(peer) == wanted);
-        if !(agree && err.to_string().contains("another domain")) {
-            let _ = client.close().await;
-            return Err(err);
-        }
-        eprintln!(
-            "rocky-prism: the replica in {directory} refuses its provisioning's peers \
-             ({err}); enrolling again"
-        );
-        client.close().await?;
-        std::fs::remove_dir_all(&directory).map_err(storage_err)?;
-        let client =
-            Self::open_provisioned_with(directory, provisioning, network, coordination).await?;
+        let client = Self::open_invited(directory, invitation, network).await?;
         let added = client.add_peers(peers).await?;
         Ok((client, added))
     }
@@ -241,40 +127,53 @@ impl PrismClient {
     async fn open_with(
         directory: &str,
         network: Option<Network>,
-        coordination: Option<rocky_sdk::CoordinatorSlot>,
         first: First<'_>,
     ) -> Result<Self, PrismError> {
+        let dir_path = Path::new(directory);
         let schema = prism_schema()?;
         let mut config = Configuration::new(directory, &schema).map_err(storage_err)?;
         if let Some(net) = network {
             config = config.network(net);
         }
-        config = match coordination {
-            Some(rocky_sdk::CoordinatorSlot::Client(client)) => config.coordination(client),
-            Some(rocky_sdk::CoordinatorSlot::Connector(connector)) => {
-                config.coordinator_connector(connector)
-            }
-            None => config,
-        };
-        let is_empty = dir_is_empty(directory);
-        let opened = match (is_empty, first) {
-            (false, _) => config.open().await,
-            (true, First::Create) => config.create().await,
-            (true, First::Join(provisioning)) => config.join(provisioning).await,
+        if let Some(identity) = load_identity(dir_path)? {
+            config = config.identity(identity);
         }
-        .map_err(storage_err)?;
-        let session = opened.database.session();
-        let raised = session
-            .set_retention_limits(rocky_sdk::RetentionLimits {
-                hard_bytes: RETAINED_HISTORY_BYTES,
-                ..rocky_sdk::RetentionLimits::default()
-            })
-            .await;
-        session.close().await;
-        raised.map_err(storage_err)?;
-        crate::seal::spawn_compaction(&opened.database);
+        let is_empty = dir_is_empty(directory);
+        let db = match (is_empty, first) {
+            (false, First::Join(invitation)) => match config.open().await {
+                Ok(db) => db,
+                Err(err) if matches!(err.kind(), rocky_sdk::ErrorKind::JoinUnfinished) => {
+                    let code: InvitationCode = invitation
+                        .parse()
+                        .map_err(|e| PrismError::InvalidInput(format!("invalid invitation code: {e}")))?;
+                    let opened = config.join(&code).await.map_err(storage_err)?;
+                    if let Some(identity) = &opened.identity {
+                        save_identity(dir_path, identity)?;
+                    }
+                    opened.database
+                }
+                Err(err) => return Err(storage_err(err)),
+            },
+            (false, First::Create) => config.open().await.map_err(storage_err)?,
+            (true, First::Create) => {
+                let created = config.create().await.map_err(storage_err)?;
+                save_identity(dir_path, &created.owner)?;
+                save_root(dir_path, &created.root)?;
+                created.database
+            }
+            (true, First::Join(invitation)) => {
+                let code: InvitationCode = invitation
+                    .parse()
+                    .map_err(|e| PrismError::InvalidInput(format!("invalid invitation code: {e}")))?;
+                let opened = config.join(&code).await.map_err(storage_err)?;
+                if let Some(identity) = &opened.identity {
+                    save_identity(dir_path, identity)?;
+                }
+                opened.database
+            }
+        };
         Ok(Self {
-            db: opened.database,
+            db: Arc::new(db),
             alerts_lock: tokio::sync::Mutex::new(()),
             events_lock: tokio::sync::Mutex::new(()),
             samples: std::sync::Mutex::default(),
@@ -282,17 +181,26 @@ impl PrismClient {
         })
     }
 
-    /// Composes `coordination` into the open database: how a trusted device
-    /// reaches the coordinator that makes its seals final (`crate::seal`).
-    /// For a replica opened without one, e.g. after its open lost a seal race.
-    pub async fn coordinate(&self, coordination: rocky_sdk::CoordinatorSlot) -> Result<(), PrismError> {
-        match coordination {
-            rocky_sdk::CoordinatorSlot::Client(client) => self.db.coordinate(Some(client)).await,
-            rocky_sdk::CoordinatorSlot::Connector(connector) => {
-                self.db.connect_coordinator(Some(connector)).await
-            }
+    /// Issues an invitation code that lets a new device join this database
+    /// with full access while this device is online.
+    pub async fn invite(&self, label: Option<&str>) -> Result<String, PrismError> {
+        let mut invite = Invite::new(Access::Full);
+        if let Some(label) = label {
+            invite = invite.label(label);
         }
-        .map_err(storage_err)
+        let issued = self.db.invite(invite).await.map_err(storage_err)?;
+        Ok(issued.code.to_string())
+    }
+
+    /// This device's peer contact URI (`rocky://peer/...`).
+    pub async fn contact(&self) -> Result<String, PrismError> {
+        Ok(self.db.contact().await.map_err(storage_err)?.uri)
+    }
+
+    /// Runs one sync pass with known peers.
+    pub async fn sync_now(&self) -> Result<(), PrismError> {
+        self.db.sync_now().await.map_err(storage_err)?;
+        Ok(())
     }
 
     /// This device's Rocky node key, hex.
@@ -301,39 +209,30 @@ impl PrismClient {
     }
 
     async fn own_node(&self) -> Result<rocky_sdk::PublicKey, PrismError> {
-        let session = self.db.session();
-        let info = session.info().await.map_err(storage_err);
-        session.close().await;
-        Ok(info?.node)
+        let me = self.db.me().await.map_err(storage_err)?;
+        Ok(me.device.key())
     }
 
-    /// Adds the peers this device syncs with, as peer contacts
-    /// ([`crate::peer_contact`]). A contact naming this device is skipped, so
-    /// every worker can get the same list. Returns how many were added.
+    /// Adds the peers this device syncs with, as peer contacts. A contact
+    /// naming this device is skipped, so every worker can get the same list.
+    /// Returns how many were added.
     pub async fn add_peers(&self, contacts: Vec<String>) -> Result<u32, PrismError> {
         let own = serde_json::to_value(self.own_node().await?).map_err(storage_err)?;
-        let session = self.db.session();
         let mut added = 0;
-        let mut result = Ok(());
         for contact in &contacts {
             match contact_node(contact) {
                 Ok(node) if node == own => continue,
                 Ok(_) => {}
-                Err(err) => {
-                    result = Err(err);
-                    break;
-                }
+                Err(err) => return Err(err),
             }
-            if let Err(err) = session.add_peer(contact.trim()).await {
-                result = Err(PrismError::InvalidInput(format!(
+            if let Err(err) = self.db.add_peer(contact.trim()).await {
+                return Err(PrismError::InvalidInput(format!(
                     "could not add a peer: {err}"
                 )));
-                break;
             }
             added += 1;
         }
-        session.close().await;
-        result.map(|()| added)
+        Ok(added)
     }
 
     pub async fn close(self) -> Result<(), PrismError> {
@@ -346,7 +245,13 @@ impl PrismClient {
         &self,
         tables: Option<Vec<String>>,
     ) -> Result<rocky_sdk::TableEvents, PrismError> {
-        self.db.observe_tables(tables).await.map_err(storage_err)
+        let refs: Vec<&str> = tables
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
+            .collect();
+        self.db.observe(&refs).await.map_err(storage_err)
     }
 
     pub async fn ping(&self) -> Result<(), PrismError> {
@@ -359,13 +264,9 @@ impl PrismClient {
         Ok(())
     }
 
-    /// Rocky's own view of this replica: its alerts (a seal it skipped, an
-    /// unreachable coordinator), what blocks reads, and how it coordinates.
+    /// Rocky's own view of this replica: its alerts, blockers, and sync state.
     pub async fn rocky_status(&self) -> Result<rocky_sdk::DatabaseStatus, PrismError> {
-        let session = self.db.session();
-        let status = session.status().await;
-        session.close().await;
-        status.map_err(storage_err)
+        self.db.status().await.map_err(storage_err)
     }
 
     /// Handles `POST /v1/placement/sync` from a T3 host with the host's own
@@ -464,98 +365,105 @@ impl PrismClient {
             || changed_models.is_some()
             || refresh.is_some()
         {
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            for ack in &acks {
-                let aid = tx.next_id("move_acks", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
-                    params![aid, ack.id.clone(), machine.clone(), ack.state.clone(), now_unix],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            if same_threads.is_none() {
-                self.write_report(&mut tx, &machine, &req, &models_json, &threads, now_unix)
-                    .await?;
-            } else if let Some(stored) = changed_models {
-                // Usage and catalog changes don't invalidate the thread snapshot.
-                tx.execute(
-                    "UPDATE hosts SET seen_at = ?, models_json = ? WHERE id = ?",
-                    params![now_unix, models_json, stored.id.clone()],
-                )
-                .await
-                .map_err(storage_err)?;
-            } else if let Some(stored) = refresh {
-                tx.execute(
-                    "UPDATE hosts SET seen_at = ? WHERE id = ?",
-                    params![now_unix, stored.id.clone()],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            tx.commit().await.map_err(storage_err)?;
+            let machine_w = machine.clone();
+            let env_id_w = req.environment_id.clone();
+            let write_full = same_threads.is_none();
+            let changed_id = changed_models.map(|s| s.id.clone());
+            let refresh_id = refresh.map(|s| s.id.clone());
+            self.db
+                .write(async move |tx| {
+                    for ack in &acks {
+                        let aid = tx.next_id("move_acks").await?;
+                        tx.execute(
+                            "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
+                            params![aid, ack.id.clone(), machine_w.clone(), ack.state.clone(), now_unix],
+                        )
+                        .await?;
+                    }
+                    if write_full {
+                        write_report_tx(tx, &machine_w, &env_id_w, &models_json, &threads, now_unix)
+                            .await?;
+                    } else if let Some(id) = changed_id {
+                        // Usage and catalog changes don't invalidate the thread snapshot.
+                        tx.execute(
+                            "UPDATE hosts SET seen_at = ?, models_json = ? WHERE id = ?",
+                            params![now_unix, models_json, id],
+                        )
+                        .await?;
+                    } else if let Some(id) = refresh_id {
+                        tx.execute(
+                            "UPDATE hosts SET seen_at = ? WHERE id = ?",
+                            params![now_unix, id],
+                        )
+                        .await?;
+                    }
+                    Ok::<_, PrismError>(())
+                })
+                .await?;
         }
         self.after_report(machine, req, now_unix, now_time, usage)
             .await
     }
+}
 
-    /// Replaces this host's `hosts` row and its `threads` rows.
-    async fn write_report(
-        &self,
-        tx: &mut rocky_sdk::Transaction,
-        machine: &str,
-        req: &PlacementSyncRequest,
-        models_json: &str,
-        threads: &[StoredThread],
-        now_unix: i64,
-    ) -> Result<(), PrismError> {
-        let machine = machine.to_string();
-        let models_json = models_json.to_string();
-        tx.execute("DELETE FROM hosts WHERE name = ?", params![machine.clone()])
-            .await
-            .map_err(storage_err)?;
-        let hid = tx.next_id("hosts", vec![]).await.map_err(storage_err)?;
-        let report = hid.to_string();
+/// Replaces this host's `hosts` row and its `threads` rows.
+async fn write_report_tx(
+    tx: &mut rocky_sdk::Transaction,
+    machine: &str,
+    environment_id: &str,
+    models_json: &str,
+    threads: &[StoredThread],
+    now_unix: i64,
+) -> Result<(), PrismError> {
+    let machine = machine.to_string();
+    let models_json = models_json.to_string();
+    tx.execute("DELETE FROM hosts WHERE name = ?", params![machine.clone()])
+        .await
+        .map_err(storage_err)?;
+    let hid = tx.next_id("hosts").await.map_err(storage_err)?;
+    let report = hid.to_string();
+    tx.execute(
+        "INSERT INTO hosts (id, name, seen_at, environment_id, models_json) VALUES (?, ?, ?, ?, ?)",
+        params![
+            hid,
+            machine.clone(),
+            now_unix,
+            environment_id.to_string(),
+            models_json,
+        ],
+    )
+    .await
+    .map_err(storage_err)?;
+    tx.execute(
+        "DELETE FROM threads WHERE host = ?",
+        params![machine.clone()],
+    )
+    .await
+    .map_err(storage_err)?;
+    for thread in threads {
+        let tid = tx.next_id("threads").await.map_err(storage_err)?;
         tx.execute(
-            "INSERT INTO hosts (id, name, seen_at, environment_id, models_json) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO threads (id, host, thread_id, title, profile, selection_json, model, running, updated_at, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                hid,
+                tid,
                 machine.clone(),
+                thread.thread_id.clone(),
+                thread.title.clone(),
+                thread.profile.clone(),
+                thread.selection_json.clone(),
+                thread.model.clone(),
+                thread.running,
                 now_unix,
-                req.environment_id.clone(),
-                models_json,
+                report.clone(),
             ],
         )
         .await
         .map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM threads WHERE host = ?",
-            params![machine.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        for thread in threads {
-            let tid = tx.next_id("threads", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO threads (id, host, thread_id, title, profile, selection_json, model, running, updated_at, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    tid,
-                    machine.clone(),
-                    thread.thread_id.clone(),
-                    thread.title.clone(),
-                    thread.profile.clone(),
-                    thread.selection_json.clone(),
-                    thread.model.clone(),
-                    thread.running,
-                    now_unix,
-                    report.clone(),
-                ],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        Ok(())
     }
+    Ok(())
+}
+
+impl PrismClient {
 
     /// The rest of a placement sync, after this host's report is stored.
     async fn after_report(
@@ -854,51 +762,49 @@ impl PrismClient {
 
         if !moves_to_drop.is_empty() || !moves_to_continue.is_empty() || !moves_to_insert.is_empty()
         {
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            let closed = moves_to_drop
-                .into_iter()
-                .map(|id| (id, "dropped"))
-                .chain(moves_to_continue.into_iter().map(|id| (id, "continued")));
-            for (id, state) in closed {
-                let aid = tx.next_id("move_acks", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
-                    params![aid, id, machine.clone(), state, now_unix],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            for m in moves_to_insert {
-                let from_json = serde_json::to_string(&m.from).map_err(storage_err)?;
-                let to_json = serde_json::to_string(&m.to).map_err(storage_err)?;
-                tx.execute(
-                    "DELETE FROM instructions WHERE instruction_id = ?",
-                    params![m.id.clone()],
-                )
-                .await
-                .map_err(storage_err)?;
-                let iid = tx
-                    .next_id("instructions", vec![])
-                    .await
-                    .map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, ?, ?, 'move', ?, ?, ?, ?, ?, NULL)",
-                    params![
-                        iid,
-                        m.id,
-                        m.machine,
-                        m.thread_id,
-                        from_json,
-                        to_json,
-                        m.reason,
-                        m.state,
-                        m.at,
-                    ],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            tx.commit().await.map_err(storage_err)?;
+            let machine_w = machine.clone();
+            self.db
+                .write(async move |tx| {
+                    let closed = moves_to_drop
+                        .into_iter()
+                        .map(|id| (id, "dropped"))
+                        .chain(moves_to_continue.into_iter().map(|id| (id, "continued")));
+                    for (id, state) in closed {
+                        let aid = tx.next_id("move_acks").await?;
+                        tx.execute(
+                            "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
+                            params![aid, id, machine_w.clone(), state, now_unix],
+                        )
+                        .await?;
+                    }
+                    for m in moves_to_insert {
+                        let from_json = serde_json::to_string(&m.from).map_err(storage_err)?;
+                        let to_json = serde_json::to_string(&m.to).map_err(storage_err)?;
+                        tx.execute(
+                            "DELETE FROM instructions WHERE instruction_id = ?",
+                            params![m.id.clone()],
+                        )
+                        .await?;
+                        let iid = tx.next_id("instructions").await?;
+                        tx.execute(
+                            "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, ?, ?, 'move', ?, ?, ?, ?, ?, NULL)",
+                            params![
+                                iid,
+                                m.id,
+                                m.machine,
+                                m.thread_id,
+                                from_json,
+                                to_json,
+                                m.reason,
+                                m.state,
+                                m.at,
+                            ],
+                        )
+                        .await?;
+                    }
+                    Ok::<_, PrismError>(())
+                })
+                .await?;
         }
 
         Ok(PlacementSyncResponse {
@@ -1380,70 +1286,67 @@ impl PrismClient {
             .max()
             .map_or(0, |m| m + 1);
 
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        let mut previous_by_position = BTreeMap::new();
-        if let Some(profile) = previous {
-            if profile.label != label {
-                tx.execute(
-                    "UPDATE profiles SET label = ? WHERE slug = ?",
-                    params![label, id.clone()],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            for row in &profile.entries {
-                // Multiple replicas can have inserted different entries at
-                // the same position. Treat such a position as changed.
-                previous_by_position
-                    .entry(row.position)
-                    .and_modify(|entry| *entry = None)
-                    .or_insert(Some(row));
-            }
-            for (&position, &old) in &previous_by_position {
-                if old.is_some() && old == entries.get(position as usize) {
-                    continue;
+        let previous = previous.cloned();
+        self.db
+            .write(async move |tx| {
+                let mut previous_by_position = BTreeMap::new();
+                if let Some(profile) = &previous {
+                    if profile.label != label {
+                        tx.execute(
+                            "UPDATE profiles SET label = ? WHERE slug = ?",
+                            params![label.clone(), id.clone()],
+                        )
+                        .await?;
+                    }
+                    for row in &profile.entries {
+                        // Multiple replicas can have inserted different entries at
+                        // the same position. Treat such a position as changed.
+                        previous_by_position
+                            .entry(row.position)
+                            .and_modify(|entry| *entry = None)
+                            .or_insert(Some(row));
+                    }
+                    for (&position, &old) in &previous_by_position {
+                        if old.is_some() && old == entries.get(position as usize) {
+                            continue;
+                        }
+                        tx.execute(
+                            "DELETE FROM profile_entries WHERE profile = ? AND position = ?",
+                            params![id.clone(), position],
+                        )
+                        .await?;
+                    }
+                } else {
+                    let pid = tx.next_id("profiles").await?;
+                    tx.execute(
+                        "INSERT INTO profiles (id, slug, label, position) VALUES (?, ?, ?, ?)",
+                        params![pid, id.clone(), label, next_pos],
+                    )
+                    .await?;
                 }
-                tx.execute(
-                    "DELETE FROM profile_entries WHERE profile = ? AND position = ?",
-                    params![id.clone(), position],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-        } else {
-            let pid = tx.next_id("profiles", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO profiles (id, slug, label, position) VALUES (?, ?, ?, ?)",
-                params![pid, id.clone(), label, next_pos],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        for (i, e) in entries.iter().enumerate() {
-            if previous_by_position.get(&e.position) == Some(&Some(e)) {
-                continue;
-            }
-            let eid = tx
-                .next_id("profile_entries", vec![])
-                .await
-                .map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO profile_entries (id, profile, position, instance_id, model, reasoning, enabled, session_share_of_weekly) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    eid,
-                    id.clone(),
-                    i as i32,
-                    e.instance_id.clone(),
-                    e.model.clone(),
-                    e.reasoning.clone(),
-                    e.enabled,
-                    opt_f64_to_sql(e.session_share_of_weekly)?,
-                ],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
+                for (i, e) in entries.iter().enumerate() {
+                    if previous_by_position.get(&e.position) == Some(&Some(e)) {
+                        continue;
+                    }
+                    let eid = tx.next_id("profile_entries").await?;
+                    tx.execute(
+                        "INSERT INTO profile_entries (id, profile, position, instance_id, model, reasoning, enabled, session_share_of_weekly) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            eid,
+                            id.clone(),
+                            i as i32,
+                            e.instance_id.clone(),
+                            e.model.clone(),
+                            e.reasoning.clone(),
+                            e.enabled,
+                            opt_f64_to_sql(e.session_share_of_weekly)?,
+                        ],
+                    )
+                    .await?;
+                }
+                Ok::<_, PrismError>(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -1489,17 +1392,18 @@ impl PrismClient {
                 users.join(", ")
             )));
         }
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM profile_entries WHERE profile = ?",
-            params![id.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.execute("DELETE FROM profiles WHERE slug = ?", params![id])
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM profile_entries WHERE profile = ?",
+                    params![id.clone()],
+                )
+                .await?;
+                tx.execute("DELETE FROM profiles WHERE slug = ?", params![id])
+                    .await
+            })
             .await
             .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1522,16 +1426,19 @@ impl PrismClient {
                 "Order must list every profile.".into(),
             ));
         }
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for (i, id) in ids.into_iter().enumerate() {
-            tx.execute(
-                "UPDATE profiles SET position = ? WHERE slug = ?",
-                params![i as i32, id],
-            )
+        self.db
+            .write(async move |tx| {
+                for (i, id) in ids.into_iter().enumerate() {
+                    tx.execute(
+                        "UPDATE profiles SET position = ? WHERE slug = ?",
+                        params![i as i32, id],
+                    )
+                    .await?;
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
             .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1543,21 +1450,22 @@ impl PrismClient {
                 "Unknown profile {profile_id:?}."
             )));
         }
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM actions WHERE action = ?",
-            params![ACTION_ALERT_FIX],
-        )
-        .await
-        .map_err(storage_err)?;
-        let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-            params![aid, ACTION_ALERT_FIX, profile_id],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM actions WHERE action = ?",
+                    params![ACTION_ALERT_FIX],
+                )
+                .await?;
+                let aid = tx.next_id("actions").await?;
+                tx.execute(
+                    "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
+                    params![aid, ACTION_ALERT_FIX, profile_id],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1603,57 +1511,55 @@ impl PrismClient {
             roles_to_set = Some(roles);
         }
 
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        if let Some(af) = req.alert_fix {
-            tx.execute(
-                "DELETE FROM actions WHERE action = ?",
-                params![ACTION_ALERT_FIX],
-            )
+        self.db
+            .write(async move |tx| {
+                if let Some(af) = req.alert_fix {
+                    tx.execute(
+                        "DELETE FROM actions WHERE action = ?",
+                        params![ACTION_ALERT_FIX],
+                    )
+                    .await?;
+                    let aid = tx.next_id("actions").await?;
+                    tx.execute(
+                        "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
+                        params![aid, ACTION_ALERT_FIX, af.trim()],
+                    )
+                    .await?;
+                }
+                if let Some(tg) = req.text_generation {
+                    tx.execute(
+                        "DELETE FROM actions WHERE action = ?",
+                        params![ACTION_TEXT_GENERATION],
+                    )
+                    .await?;
+                    let trimmed = tg.trim();
+                    if !trimmed.is_empty() {
+                        let aid = tx.next_id("actions").await?;
+                        tx.execute(
+                            "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
+                            params![aid, ACTION_TEXT_GENERATION, trimmed],
+                        )
+                        .await?;
+                    }
+                }
+                if let Some(roles) = roles_to_set {
+                    for role in PLACEMENT_ROLES {
+                        tx.execute("DELETE FROM actions WHERE action = ?", params![*role])
+                            .await?;
+                    }
+                    for (role, profile) in roles {
+                        let aid = tx.next_id("actions").await?;
+                        tx.execute(
+                            "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
+                            params![aid, role, profile],
+                        )
+                        .await?;
+                    }
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
             .map_err(storage_err)?;
-            let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-                params![aid, ACTION_ALERT_FIX, af.trim()],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        if let Some(tg) = req.text_generation {
-            tx.execute(
-                "DELETE FROM actions WHERE action = ?",
-                params![ACTION_TEXT_GENERATION],
-            )
-            .await
-            .map_err(storage_err)?;
-            let trimmed = tg.trim();
-            if !trimmed.is_empty() {
-                let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-                    params![aid, ACTION_TEXT_GENERATION, trimmed],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-        }
-        if let Some(roles) = roles_to_set {
-            for role in PLACEMENT_ROLES {
-                tx.execute("DELETE FROM actions WHERE action = ?", params![*role])
-                    .await
-                    .map_err(storage_err)?;
-            }
-            for (role, profile) in roles {
-                let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-                    params![aid, role, profile],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-        }
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1690,69 +1596,65 @@ impl PrismClient {
             }
         }
 
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for key in [
-            POLICY_SWITCH_AT,
-            POLICY_WEEKLY_SLACK,
-            POLICY_WEEKLY_MOVE_SLACK,
-            POLICY_ACTIVE_HOURS,
-        ] {
-            tx.execute("DELETE FROM policy WHERE key = ?", params![key])
-                .await
-                .map_err(storage_err)?;
-        }
-        let pid1 = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-            params![pid1, POLICY_SWITCH_AT, policy.switch_at_percent.to_string()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let pid2 = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-            params![
-                pid2,
-                POLICY_WEEKLY_SLACK,
-                policy.weekly_slack_sessions.to_string()
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        if let Some(slack) = policy.weekly_move_slack_sessions {
-            let pid = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-                params![pid, POLICY_WEEKLY_MOVE_SLACK, slack.to_string()],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        if let Some(ah) = &policy.active_hours {
-            let ah_json = serde_json::to_string(ah).map_err(storage_err)?;
-            let pid3 = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-                params![pid3, POLICY_ACTIVE_HOURS, ah_json],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        for role in PLACEMENT_ROLES {
-            tx.execute("DELETE FROM actions WHERE action = ?", params![*role])
-                .await
-                .map_err(storage_err)?;
-        }
-        for (role, profile) in policy.role_profiles {
-            let aid = tx.next_id("actions", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
-                params![aid, role, profile],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
+        self.db
+            .write(async move |tx| {
+                for key in [
+                    POLICY_SWITCH_AT,
+                    POLICY_WEEKLY_SLACK,
+                    POLICY_WEEKLY_MOVE_SLACK,
+                    POLICY_ACTIVE_HOURS,
+                ] {
+                    tx.execute("DELETE FROM policy WHERE key = ?", params![key])
+                        .await?;
+                }
+                let pid1 = tx.next_id("policy").await?;
+                tx.execute(
+                    "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                    params![pid1, POLICY_SWITCH_AT, policy.switch_at_percent.to_string()],
+                )
+                .await?;
+                let pid2 = tx.next_id("policy").await?;
+                tx.execute(
+                    "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                    params![
+                        pid2,
+                        POLICY_WEEKLY_SLACK,
+                        policy.weekly_slack_sessions.to_string()
+                    ],
+                )
+                .await?;
+                if let Some(slack) = policy.weekly_move_slack_sessions {
+                    let pid = tx.next_id("policy").await?;
+                    tx.execute(
+                        "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                        params![pid, POLICY_WEEKLY_MOVE_SLACK, slack.to_string()],
+                    )
+                    .await?;
+                }
+                if let Some(ah) = &policy.active_hours {
+                    let ah_json = serde_json::to_string(ah).map_err(storage_err)?;
+                    let pid3 = tx.next_id("policy").await?;
+                    tx.execute(
+                        "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                        params![pid3, POLICY_ACTIVE_HOURS, ah_json],
+                    )
+                    .await?;
+                }
+                for role in PLACEMENT_ROLES {
+                    tx.execute("DELETE FROM actions WHERE action = ?", params![*role])
+                        .await?;
+                }
+                for (role, profile) in policy.role_profiles {
+                    let aid = tx.next_id("actions").await?;
+                    tx.execute(
+                        "INSERT INTO actions (id, action, profile) VALUES (?, ?, ?)",
+                        params![aid, role, profile],
+                    )
+                    .await?;
+                }
+                Ok::<_, PrismError>(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -1796,21 +1698,22 @@ impl PrismClient {
             }
         }
         let key = format!("{POLICY_ACCOUNT_LIMIT}{account}");
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
-            .await
-            .map_err(storage_err)?;
-        if let Some(limit) = limit {
-            let value = serde_json::to_string(&limit).map_err(storage_err)?;
-            let id = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-                params![id, key, value],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
+        self.db
+            .write(async move |tx| {
+                tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
+                    .await?;
+                if let Some(limit) = limit {
+                    let value = serde_json::to_string(&limit).map_err(storage_err)?;
+                    let id = tx.next_id("policy").await?;
+                    tx.execute(
+                        "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                        params![id, key, value],
+                    )
+                    .await?;
+                }
+                Ok::<_, PrismError>(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -1906,22 +1809,23 @@ impl PrismClient {
             }
         }
         if !writes.is_empty() {
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            for (account, state) in writes {
-                let key = format!("{POLICY_WEEKLY_ACTIVATION}{account}");
-                let value = serde_json::to_string(&state).map_err(storage_err)?;
-                tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
-                    .await
-                    .map_err(storage_err)?;
-                let id = tx.next_id("policy", vec![]).await.map_err(storage_err)?;
-                tx.execute(
-                    "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
-                    params![id, key, value],
-                )
-                .await
-                .map_err(storage_err)?;
-            }
-            tx.commit().await.map_err(storage_err)?;
+            self.db
+                .write(async move |tx| {
+                    for (account, state) in writes {
+                        let key = format!("{POLICY_WEEKLY_ACTIVATION}{account}");
+                        let value = serde_json::to_string(&state).map_err(storage_err)?;
+                        tx.execute("DELETE FROM policy WHERE key = ?", params![key.clone()])
+                            .await?;
+                        let id = tx.next_id("policy").await?;
+                        tx.execute(
+                            "INSERT INTO policy (id, key, value) VALUES (?, ?, ?)",
+                            params![id, key, value],
+                        )
+                        .await?;
+                    }
+                    Ok::<_, PrismError>(())
+                })
+                .await?;
         }
         Ok(due)
     }
@@ -2495,11 +2399,10 @@ fn same_threads(a: &[StoredThread], b: &[StoredThread]) -> bool {
 
 pub(crate) fn storage_err<E: std::fmt::Display + 'static>(err: E) -> PrismError {
     let any: &dyn std::any::Any = &err;
-    let sql = any.downcast_ref::<SqlFailure>().or_else(|| {
-        any.downcast_ref::<rocky_sdk::Failure>()
-            .and_then(|failure| failure.downcast_ref::<SqlFailure>())
-    });
-    if sql.is_some_and(|failure| failure.retryable) {
+    if any
+        .downcast_ref::<rocky_sdk::Error>()
+        .is_some_and(rocky_sdk::Error::retryable)
+    {
         PrismError::Unavailable(err.to_string())
     } else {
         PrismError::Storage(err.to_string())
@@ -2743,25 +2646,30 @@ mod tests {
         let models_json =
             serde_json::to_string(&request(50.0, seen_at, Vec::new()).models).expect("json");
         let sel_json = serde_json::to_string(&sel(DAVID)).expect("json");
-        let mut tx = client.db.transaction().await.expect("tx");
-        let hid = tx.next_id("hosts", vec![]).await.expect("id");
-        let report = hid.to_string();
-        tx.execute(
-            "INSERT INTO hosts (id, name, seen_at, environment_id, models_json) VALUES (?, ?, ?, '', ?)",
-            params![hid, host, seen_at, models_json],
-        )
-        .await
-        .expect("insert host");
-        for t in threads {
-            let tid = tx.next_id("threads", vec![]).await.expect("id");
-            tx.execute(
-                "INSERT INTO threads (id, host, thread_id, title, profile, selection_json, model, running, updated_at, report) VALUES (?, ?, ?, '', 'coding', ?, ?, 1, ?, ?)",
-                params![tid, host, *t, sel_json.clone(), DAVID, seen_at, report.clone()],
-            )
+        let host = host.to_owned();
+        let threads: Vec<String> = threads.iter().map(|t| (*t).to_owned()).collect();
+        client
+            .db
+            .write(async move |tx| {
+                let hid = tx.next_id("hosts").await?;
+                let report = hid.to_string();
+                tx.execute(
+                    "INSERT INTO hosts (id, name, seen_at, environment_id, models_json) VALUES (?, ?, ?, '', ?)",
+                    params![hid, host.clone(), seen_at, models_json],
+                )
+                .await?;
+                for t in threads {
+                    let tid = tx.next_id("threads").await?;
+                    tx.execute(
+                        "INSERT INTO threads (id, host, thread_id, title, profile, selection_json, model, running, updated_at, report) VALUES (?, ?, ?, '', 'coding', ?, ?, 1, ?, ?)",
+                        params![tid, host.clone(), t, sel_json.clone(), DAVID, seen_at, report.clone()],
+                    )
+                    .await?;
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
-            .expect("insert thread");
-        }
-        tx.commit().await.expect("commit");
+            .expect("commit");
     }
 
     /// Adds a burn-rate sample for claude-david with one thread running.
@@ -2780,15 +2688,20 @@ mod tests {
     async fn insert_move(client: &PrismClient, id: &str, thread_id: &str, created_at: i64) {
         let from = serde_json::to_string(&sel(DAVID)).expect("json");
         let to = serde_json::to_string(&sel("claude-1/claude-opus-5-5")).expect("json");
-        let mut tx = client.db.transaction().await.expect("tx");
-        let iid = tx.next_id("instructions", vec![]).await.expect("id");
-        tx.execute(
-            "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, 'host-a', ?, 'move', ?, ?, 'full', 'asked', ?, NULL)",
-            params![iid, id, thread_id, from, to, created_at],
-        )
-        .await
-        .expect("insert move");
-        tx.commit().await.expect("commit");
+        let id = id.to_owned();
+        let thread_id = thread_id.to_owned();
+        client
+            .db
+            .write(async move |tx| {
+                let iid = tx.next_id("instructions").await?;
+                tx.execute(
+                    "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, 'host-a', ?, 'move', ?, ?, 'full', 'asked', ?, NULL)",
+                    params![iid, id, thread_id, from, to, created_at],
+                )
+                .await
+            })
+            .await
+            .expect("commit");
     }
 
     /// Saves the profile `id` with `models` (Claude accounts), all enabled.
@@ -3202,39 +3115,11 @@ mod tests {
 mod retry_tests {
     use super::*;
 
-    fn failure(retryable: bool) -> SqlFailure {
-        SqlFailure {
-            code: 1,
-            message: "SQL session: hosts is not available: Incomplete".into(),
-            retryable,
-        }
-    }
-
-    #[test]
-    fn storage_err_keeps_rockys_retryable_flag() {
-        assert!(matches!(
-            storage_err(failure(true)),
-            PrismError::Unavailable(_)
-        ));
-        assert!(matches!(
-            storage_err(failure(false)),
-            PrismError::Storage(_)
-        ));
-        let boxed: rocky_sdk::Failure = Box::new(failure(true));
-        assert!(matches!(storage_err(boxed), PrismError::Unavailable(_)));
-        assert!(matches!(storage_err("plain"), PrismError::Storage(_)));
-    }
-
     #[test]
     fn incomplete_is_told_apart_from_a_busy_database() {
-        assert!(storage_err(failure(true)).is_incomplete());
-        assert!(storage_err(failure(false)).is_incomplete());
-        let busy = SqlFailure {
-            code: 4,
-            message: "SQL session: transaction was rolled back: Preempted".into(),
-            retryable: true,
-        };
-        assert!(!storage_err(busy).is_incomplete());
+        assert!(PrismError::Unavailable("hosts is not available: Incomplete".into()).is_incomplete());
+        assert!(PrismError::Storage("hosts is not available: Incomplete".into()).is_incomplete());
+        assert!(!PrismError::Unavailable("transaction was rolled back: Preempted".into()).is_incomplete());
         assert!(!PrismError::NotFound.is_incomplete());
     }
 

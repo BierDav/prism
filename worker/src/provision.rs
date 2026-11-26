@@ -1,53 +1,21 @@
-//! Enrollment from fleet: `prism-worker init`, `provision` and `peer`, and
-//! opening the worker's own database from its provisioning.
-//!
-//! - `prism-worker init [FILE]` creates the Prism database once and writes its
-//!   root (`prism-root-v1:...`) to FILE (never overwriting) or stdout.
-//! - `prism-worker provision DEVICE` reads the root from `PRISM_ROOT_FILE` (or
-//!   `PRISM_ROOT`) and prints DEVICE's provisioning (`prism-device-v1:...`).
-//! - `prism-worker peer ADDRESS` reads a device's provisioning on stdin and
-//!   prints its peer contact at ADDRESS (`wss://prism.quickme.at/rocky/<pod>`
-//!   or an in-cluster `host:port`). `peer -` is for a device nobody can dial
-//!   (a phone or a Mac): workers sync with it only over the links it opens,
-//!   but they must know it as a peer to sync at all.
-//!
-//! - `prism-worker coordinate [--revision N] WORKER_URL...` is the rollout
-//!   Job that makes the workers seal, and `prism-worker seal WORKER_URL...`
-//!   prints where each stands (`coordination.rs`).
-//!
-//! At startup the worker opens from `PRISM_WORKER_PROVISIONING(_FILE)` and adds
-//! the contacts in `PRISM_WORKER_PEERS(_FILE)`. Without a provisioning it
-//! creates a database of its own, as before.
+//! Worker startup enrollment: opening an existing replica, creating a new
+//! database, or joining an existing database via an online invitation code
+//! (`PRISM_WORKER_INVITATION(_FILE)`) and adding peers (`PRISM_WORKER_PEERS(_FILE)`).
 
 use crate::auth;
-use rocky_prism::{PrismClient, PrismRoot, peer_contact};
+use rocky_prism::PrismClient;
 use rocky_sdk::Network;
-use std::io::{Read, Write};
+use std::io::Write;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const USAGE: &str = "usage: prism-worker [init [FILE] | provision DEVICE | peer ADDRESS|- \
-                     | coordinate [--revision N] WORKER_URL... | seal WORKER_URL...]";
+const USAGE: &str = "usage: prism-worker";
 
 /// Runs the subcommand in `args` (as from `std::env::args`), if there is one.
 pub async fn command(args: &[String]) -> Option<Result<(), Failure>> {
     let args: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     let done = match args.as_slice() {
         [] => return None,
-        ["init"] => init(None).await,
-        ["init", file] => init(Some(file)).await,
-        ["provision", device] => provision(device, |key| std::env::var(key).ok())
-            .await
-            .and_then(print),
-        ["peer", address] => peer(address, std::io::stdin()).await.and_then(print),
-        #[cfg(feature = "coordinator")]
-        ["coordinate", rest @ ..] => {
-            crate::coordination::command(rest, |key| std::env::var(key).ok()).await
-        }
-        #[cfg(feature = "coordinator")]
-        ["seal", urls @ ..] => {
-            crate::coordination::seal_command(urls, |key| std::env::var(key).ok()).await
-        }
         ["help" | "-h" | "--help"] => print(USAGE.into()),
         _ => Err(USAGE.into()),
     };
@@ -61,116 +29,36 @@ fn print(text: String) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn init(file: Option<&str>) -> Result<(), Failure> {
-    let root = PrismRoot::create().await?.encode();
-    let Some(file) = file else {
-        return print(root);
-    };
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut out = options
-        .open(file)
-        .map_err(|err| format!("{file}: {err} (init never overwrites a root)"))?;
-    writeln!(out, "{root}")?;
-    out.sync_all()?;
-    eprintln!("prism-worker: wrote the Prism root to {file}");
-    Ok(())
-}
-
-async fn provision(device: &str, env: impl Fn(&str) -> Option<String>) -> Result<String, Failure> {
-    let root = auth::secret_from("PRISM_ROOT", env)
-        .ok_or("set PRISM_ROOT_FILE (or PRISM_ROOT) to the root from `prism-worker init`")?;
-    let minted = PrismRoot::parse(&root)?.provision(device).await?;
-    eprintln!(
-        "prism-worker: provisioned {} (node {})",
-        minted.device, minted.node
-    );
-    Ok(minted.provisioning)
-}
-
-/// The route of a device nobody dials: refused at once wherever it's tried.
-const DIAL_ONLY: &str = "127.0.0.1:9";
-
-async fn peer(address: &str, mut input: impl Read) -> Result<String, Failure> {
-    let address = if address == "-" { DIAL_ONLY } else { address };
-    let mut provisioning = String::new();
-    input.read_to_string(&mut provisioning)?;
-    let provisioning = provisioning.trim();
-    if provisioning.is_empty() {
-        return Err("pipe the device's provisioning into `prism-worker peer`".into());
-    }
-    let advertised = rocky_tcp::Attachment::external(address);
-    let contact = peer_contact(provisioning, Network::Borrowed(advertised.transport())).await;
-    advertised.close().await;
-    Ok(contact?)
-}
-
-/// Opens the worker's database at `data_dir`: from its provisioning on the
-/// first start, reusing the directory afterwards. `coordination` is how its
-/// seals reach the coordinator, when it has one (`coordination.rs`).
-pub async fn open(
-    data_dir: String,
-    network: Network,
-    coordination: Option<rocky_sdk::CoordinatorSlot>,
-) -> Result<PrismClient, Failure> {
-    let first = open_from(data_dir.clone(), network.clone(), coordination.clone(), auth::secret).await;
-    let (Err(err), Some(slot)) = (&first, coordination) else {
-        return first;
-    };
-    if !lost_seal_race(&err.to_string()) {
-        return first;
-    }
-    // Opening the same replica again would lose the same way: the seal that
-    // won isn't here yet, and peers sync only once the open is done. Without
-    // the coordinator the newer schema waits (Rocky skips its publication),
-    // so the open finishes and syncs; then the coordinator joins, and a seal
-    // that loses from now on is only skipped. A persisted chain that is
-    // really broken fails this open too, and the worker exits as before.
-    eprintln!("prism-worker: the open lost a seal race; opening without the coordinator first: {err}");
-    let client = open_from(data_dir, network, None, auth::secret).await?;
-    client.coordinate(slot).await?;
-    Ok(client)
-}
-
-/// Whether an open failed only because another node's seal got to the tip
-/// first. Rocky publishes a newer schema as a seal while it opens the
-/// replica (rocky-sdk `publish_schema_at_open`) and fails the open when
-/// another seal ends the tip first, or when its chain link was just
-/// settled away.
-fn lost_seal_race(message: &str) -> bool {
-    message.contains("another seal ended the tip's coordinated log first")
-        || message.contains("a tip statement's predecessor is missing or does not match")
+/// Opens the worker's database at `data_dir`: from `PRISM_WORKER_INVITATION`
+/// on the first start if configured, otherwise opening or creating a database
+/// in `data_dir`.
+pub async fn open(data_dir: String, network: Network) -> Result<PrismClient, Failure> {
+    open_from(data_dir, network, auth::secret).await
 }
 
 async fn open_from(
     data_dir: String,
     network: Network,
-    coordination: Option<rocky_sdk::CoordinatorSlot>,
     secret: impl Fn(&str) -> Option<String>,
 ) -> Result<PrismClient, Failure> {
     let peers: Vec<String> = secret("PRISM_WORKER_PEERS")
         .map(|list| list.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
-    let Some(provisioning) = secret("PRISM_WORKER_PROVISIONING") else {
+    let Some(invitation) = secret("PRISM_WORKER_INVITATION") else {
+        let client = PrismClient::open_or_create(data_dir, Some(network)).await?;
         if !peers.is_empty() {
-            return Err("PRISM_WORKER_PEERS needs PRISM_WORKER_PROVISIONING: \
-                        a database the worker created itself syncs with no one"
-                .into());
+            let added = client.add_peers(peers).await?;
+            eprintln!(
+                "prism-worker: opened as node {}, {added} peer(s)",
+                client.node().await?
+            );
         }
-        return Ok(PrismClient::open_or_create(data_dir, Some(network)).await?);
+        return Ok(client);
     };
-    let (client, added) = PrismClient::open_provisioned_with_peers(
-        data_dir,
-        provisioning,
-        Some(network),
-        coordination,
-        peers,
-    )
-    .await?;
+    let (client, added) =
+        PrismClient::open_invited_with_peers(data_dir, invitation, Some(network), peers).await?;
     eprintln!(
-        "prism-worker: enrolled as node {}, {added} peer(s)",
+        "prism-worker: joined as node {}, {added} peer(s)",
         client.node().await?
     );
     Ok(client)
@@ -179,21 +67,6 @@ async fn open_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_a_lost_seal_race_is_retried() {
-        // The two errors the v2 rollout's workers exited with (2026-11-26).
-        assert!(lost_seal_race(
-            "storage error: application rejected request: sealed: another seal ended the tip's coordinated log first"
-        ));
-        assert!(lost_seal_race(
-            "storage error: replication data rejected: a tip statement's predecessor is missing or does not match"
-        ));
-        assert!(!lost_seal_race("storage error: the database is locked"));
-        assert!(!lost_seal_race(
-            "PRISM_WORKER_PEERS needs PRISM_WORKER_PROVISIONING: a database the worker created itself syncs with no one"
-        ));
-    }
     use std::collections::BTreeMap;
 
     fn env(vars: BTreeMap<&'static str, String>) -> impl Fn(&str) -> Option<String> {
@@ -209,65 +82,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_provision_peer_and_open_from_the_environment() {
+    async fn invite_and_join_from_the_environment() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let root_file = dir.path().join("prism-root");
-        let root_path = root_file.display().to_string();
-        init(Some(&root_path)).await.expect("init");
-        assert!(
-            init(Some(&root_path)).await.is_err(),
-            "init overwrote a root"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&root_file).expect("root").permissions();
-            assert_eq!(mode.mode() & 0o777, 0o600);
-        }
-
-        let root_env = BTreeMap::from([("PRISM_ROOT_FILE", root_path.clone())]);
-        let provisioning = provision("prism-worker-0", env(root_env.clone()))
+        let creator_dir = dir.path().join("creator").display().to_string();
+        let creator = open_from(creator_dir, loopback().await, env(BTreeMap::new()))
             .await
-            .expect("provision");
-        assert!(provisioning.starts_with("prism-device-v1:"));
-        assert!(provision("Bad_Name", env(root_env)).await.is_err());
-        assert!(
-            provision("prism-worker-0", env(BTreeMap::new()))
-                .await
-                .is_err()
-        );
+            .expect("creator");
+        let invitation = creator.invite(Some("prism-worker-1")).await.expect("invite");
+        let contact = creator.contact().await.expect("contact");
 
-        let contact = peer(
-            "wss://prism.example/rocky/prism-worker-0",
-            provisioning.as_bytes(),
-        )
-        .await
-        .expect("peer");
-        assert!(contact.starts_with("rocky://peer/"));
-        assert!(peer("10.0.0.1:7411", &b""[..]).await.is_err());
-
-        let data = dir.path().join("data").display().to_string();
+        let joiner_dir = dir.path().join("joiner").display().to_string();
         let start = |data: String| {
             let vars = BTreeMap::from([
-                ("PRISM_WORKER_PROVISIONING", provisioning.clone()),
+                ("PRISM_WORKER_INVITATION", invitation.clone()),
                 ("PRISM_WORKER_PEERS", contact.clone()),
             ]);
-            async move { open_from(data, loopback().await, None, env(vars)).await }
+            async move { open_from(data, loopback().await, env(vars)).await }
         };
-        let first = start(data.clone()).await.expect("first start");
+        let first = start(joiner_dir.clone()).await.expect("first start");
         let node = first.node().await.expect("node");
         first.close().await.expect("close");
-        let second = start(data).await.expect("second start");
+        let second = start(joiner_dir).await.expect("second start");
         assert_eq!(second.node().await.expect("node"), node);
         second.close().await.expect("close");
-
-        // Peers without a provisioning are a mistake, not a silent no-op.
-        let vars = BTreeMap::from([("PRISM_WORKER_PEERS", contact.clone())]);
-        let lone = dir.path().join("lone").display().to_string();
-        assert!(
-            open_from(lone, loopback().await, None, env(vars))
-                .await
-                .is_err()
-        );
+        creator.close().await.expect("close");
     }
 }

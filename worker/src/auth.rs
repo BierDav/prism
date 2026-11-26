@@ -74,7 +74,7 @@ const ADMIN_PREFIX: &str = "admin:";
 /// and the worker checks it. The CLI derives it the same way
 /// (`cli/src/token.rs`), and so does the rollout Job (`prism-worker
 /// coordinate`).
-#[cfg(any(test, feature = "coordinator"))]
+#[cfg(test)]
 pub fn admin_token(key: &[u8]) -> Option<String> {
     let mut mac = admin_mac(key)?;
     mac.update(b"prism-admin-v1");

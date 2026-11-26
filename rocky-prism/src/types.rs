@@ -27,6 +27,16 @@ pub enum PrismError {
     Unavailable(String),
 }
 
+impl From<rocky_sdk::Error> for PrismError {
+    fn from(err: rocky_sdk::Error) -> Self {
+        if err.retryable() {
+            PrismError::Unavailable(err.to_string())
+        } else {
+            PrismError::Storage(err.to_string())
+        }
+    }
+}
+
 impl PrismError {
     /// Rocky refused a read or write because this replica doesn't hold
     /// everything the table depends on yet (`Unavailable::Incomplete`). Unlike

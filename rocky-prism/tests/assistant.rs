@@ -4,7 +4,7 @@
 
 use rocky_prism::{
     ASSISTANT_DELETED, ASSISTANT_MAX_BODY_BYTES, ASSISTANT_STALE, AssistantConversationRow,
-    AssistantEntry, PrismClient, PrismError, SCHEMA_VERSION, prism_schema,
+    AssistantEntry, PrismClient, PrismError,
 };
 
 async fn open() -> (tempfile::TempDir, PrismClient) {
@@ -329,39 +329,3 @@ async fn large_conversations_go_in_small_transactions_and_oversized_rows_are_ref
     ));
 }
 
-/// A replica created with the first schema (before the assistant's tables)
-/// opens with this one and stores conversations: the change is additive.
-#[tokio::test]
-async fn a_replica_of_the_first_schema_takes_the_assistants_tables() {
-    assert_eq!(SCHEMA_VERSION, 2);
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("db");
-    let mut first = prism_schema().expect("schema");
-    first.version = 1;
-    first.tables.retain(|t| !t.name.starts_with("assistant_"));
-    let opened = rocky_sdk::Configuration::new(&path, &first)
-        .expect("config")
-        .create()
-        .await
-        .expect("create the first schema");
-    opened.database.close().await.expect("close");
-
-    // The first open publishes the new schema (an issuer, as every Prism
-    // device is) and writes to its tables at once.
-    let client = PrismClient::open_or_create(path.display().to_string(), None)
-        .await
-        .expect("open with the assistant's tables");
-    client
-        .save_assistant_conversation(
-            row("c-1", "hi", 1),
-            0,
-            "",
-            vec![entry("e0", "{}")],
-            strings(&["m"]),
-        )
-        .await
-        .expect("save");
-    let saved = client.assistant_conversation("c-1").await.expect("read");
-    client.close().await.expect("close");
-    assert_eq!(saved.history, strings(&["m"]));
-}

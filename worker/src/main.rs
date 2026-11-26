@@ -56,27 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = attachment.transport();
     let network = rocky_sdk::Network::Borrowed(Arc::clone(&transport));
 
-    // The coordinator that makes this worker's seals final, when configured.
-    #[cfg(feature = "coordinator")]
-    // Prism keeps serving without it: seals wait, everything else works.
-    let coordinator =
-        match prism_worker::coordination::link_from_env(|key| std::env::var(key).ok()).await {
-            Ok(link) => link.map(Arc::new),
-            Err(err) => {
-                eprintln!("prism-worker: no coordinator link, so this worker doesn't seal: {err}");
-                None
-            }
-        };
-    #[cfg(feature = "coordinator")]
-    let coordination = coordinator.as_ref().map(|link| link.slot());
-    #[cfg(not(feature = "coordinator"))]
-    let coordination = None;
-    let client = Arc::new(provision::open(data_dir.clone(), network, coordination).await?);
+    let client = Arc::new(provision::open(data_dir.clone(), network).await?);
     let listener = TcpListener::bind(http_bind).await?;
 
     println!(
         "prism-worker: Rocky over TCP at {}, HTTP at {}, data at {}",
-        transport.address().await?,
+        transport.address().await?.as_deref().unwrap_or("none"),
         listener.local_addr()?,
         data_dir,
     );
@@ -99,8 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cfg = Arc::new(config::Config::load_from_env()?);
     let leader = start_leader(&client, Arc::clone(&cfg), &route.node)?;
     let state = AppState::new(Arc::clone(&client), event_key);
-    #[cfg(feature = "coordinator")]
-    let state = state.with_coordinator(coordinator.clone());
     let app = router(
         state
             .with_node(route.node.clone())
@@ -122,10 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = client.close().await;
     }
     attachment.close().await;
-    #[cfg(feature = "coordinator")]
-    if let Some(link) = coordinator {
-        link.close().await;
-    }
     Ok(())
 }
 

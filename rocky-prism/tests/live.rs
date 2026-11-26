@@ -25,14 +25,14 @@ async fn loopback() -> (rocky_tcp::Attachment, String) {
     (attachment, address)
 }
 
-async fn open(dir: &Path, provisioning: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
-    PrismClient::open_provisioned(
+async fn open(dir: &Path, invitation: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
+    PrismClient::open_invited(
         dir.display().to_string(),
-        provisioning.to_owned(),
+        invitation.to_owned(),
         Some(Network::Borrowed(attachment.transport())),
     )
     .await
-    .expect("open from provisioning")
+    .expect("open from invitation")
 }
 
 async fn profile_ids(client: &PrismClient) -> Vec<String> {

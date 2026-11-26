@@ -1,9 +1,7 @@
 //! Phones and Macs only dial: the workers can't reach them. Rows still flow
-//! from one such device to another through a worker, as long as the worker
-//! knows them as peers (`prism-worker peer -`); Rocky syncs only with known
-//! peers.
+//! from one such device to another through a worker.
 
-use rocky_prism::{PrismClient, PrismError, PrismRoot, PutPlacementProfileRequest, peer_contact};
+use rocky_prism::{PrismClient, PrismError, PutPlacementProfileRequest};
 use rocky_sdk::Network;
 use std::{
     net::SocketAddr,
@@ -13,37 +11,23 @@ use std::{
 
 const SYNC_WAIT: Duration = Duration::from_secs(60);
 
-async fn loopback() -> (rocky_tcp::Attachment, String) {
-    let attachment = rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
+async fn loopback() -> rocky_tcp::Attachment {
+    rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
         .start()
         .await
-        .expect("rocky-tcp on loopback");
-    let address = attachment.local_addr().expect("bound address").to_string();
-    (attachment, address)
+        .expect("rocky-tcp on loopback")
 }
 
-async fn contact(provisioning: &str, address: &str) -> String {
-    let advertised = rocky_tcp::Attachment::external(address);
-    let contact = peer_contact(provisioning, Network::Borrowed(advertised.transport()))
-        .await
-        .expect("peer contact");
-    advertised.close().await;
-    contact
-}
-
-async fn open(dir: &Path, provisioning: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
-    PrismClient::open_provisioned(
+async fn open(dir: &Path, invitation: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
+    PrismClient::open_invited(
         dir.display().to_string(),
-        provisioning.to_owned(),
+        invitation.to_owned(),
         Some(Network::Borrowed(attachment.transport())),
     )
     .await
-    .expect("open from provisioning")
+    .expect("open from invitation")
 }
 
-/// The profiles `client` sees, or `None` while its replica is briefly
-/// unavailable (`PrismError::Unavailable`, e.g. a session Rocky revoked while
-/// it imports synced rows), which callers retry.
 async fn profile_ids(client: &PrismClient) -> Option<Vec<String>> {
     let view = match client.placement_view("cluster".into(), 0).await {
         Ok(view) => view,
@@ -86,7 +70,7 @@ async fn wait_for(client: &PrismClient, expected: &[&str]) {
 
 async fn unreachable() -> rocky_tcp::Attachment {
     rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .advertise("127.0.0.1:9")
+        .advertise("tcp://127.0.0.1:9")
         .start()
         .await
         .expect("rocky-tcp on loopback")
@@ -95,24 +79,19 @@ async fn unreachable() -> rocky_tcp::Attachment {
 #[tokio::test(flavor = "multi_thread")]
 async fn rows_flow_between_dial_only_devices_through_a_worker() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = PrismRoot::create().await.expect("root");
-    let w = root.provision("prism-worker-0").await.expect("w");
-    let a = root.provision("phone").await.expect("a");
-    let b = root.provision("mac").await.expect("b");
-    let (attach_w, addr_w) = loopback().await;
+    let attach_w = loopback().await;
     let attach_a = unreachable().await;
     let attach_b = unreachable().await;
-    let worker = open(&dir.path().join("w"), &w.provisioning, &attach_w).await;
-    let client_a = open(&dir.path().join("a"), &a.provisioning, &attach_a).await;
-    let client_b = open(&dir.path().join("b"), &b.provisioning, &attach_b).await;
-    let peers = vec![contact(&w.provisioning, &addr_w).await];
-    client_a.add_peers(peers.clone()).await.expect("peers a");
-    client_b.add_peers(peers).await.expect("peers b");
-    let devices = vec![
-        contact(&a.provisioning, "127.0.0.1:9").await,
-        contact(&b.provisioning, "127.0.0.1:9").await,
-    ];
-    worker.add_peers(devices).await.expect("peers w");
+    let worker = PrismClient::open_or_create(
+        dir.path().join("w").display().to_string(),
+        Some(Network::Borrowed(attach_w.transport())),
+    )
+    .await
+    .expect("open worker");
+    let inv_a = worker.invite(Some("phone")).await.expect("invite a");
+    let inv_b = worker.invite(Some("mac")).await.expect("invite b");
+    let client_a = open(&dir.path().join("a"), &inv_a, &attach_a).await;
+    let client_b = open(&dir.path().join("b"), &inv_b, &attach_b).await;
 
     put_profile(&client_a, "from-a").await;
     wait_for(&worker, &["from-a"]).await;

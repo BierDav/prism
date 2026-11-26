@@ -557,139 +557,128 @@ impl PrismClient {
     }
 
     async fn assistant_batch(&self, id: &str, ops: Vec<Op>) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for op in ops {
-            match op {
-                Op::Delete(table, rid) => {
-                    tx.execute(&format!("DELETE FROM {table} WHERE id = ?"), vec![rid])
-                        .await
+        let id = id.to_owned();
+        self.db
+            .write(async move |tx| {
+                for op in ops {
+                    match op {
+                        Op::Delete(table, rid) => {
+                            tx.execute(&format!("DELETE FROM {table} WHERE id = ?"), vec![rid])
+                                .await?;
+                        }
+                        Op::InsertEntry {
+                            position,
+                            revision,
+                            entry_id,
+                            body,
+                        } => {
+                            let rid = tx.next_id("assistant_entries").await?;
+                            tx.execute(
+                                "INSERT INTO assistant_entries \
+                                 (id, conversation_id, position, revision, entry_id, body) \
+                                 VALUES (?, ?, ?, ?, ?, ?)",
+                                params![rid, id.clone(), position, revision, entry_id, body],
+                            )
+                            .await?;
+                        }
+                        Op::InsertHistory {
+                            seq,
+                            revision,
+                            body,
+                        } => {
+                            let rid = tx.next_id("assistant_history").await?;
+                            tx.execute(
+                                "INSERT INTO assistant_history (id, conversation_id, seq, revision, body) \
+                                 VALUES (?, ?, ?, ?, ?)",
+                                params![rid, id.clone(), seq, revision, body],
+                            )
+                            .await?;
+                        }
+                        Op::Commit(head, true) => {
+                            tx.execute(
+                                "UPDATE assistant_conversations SET title = ?, updated_at = ?, revision = ?, \
+                                 entry_count = ?, history_from = ?, history_to = ?, save_id = ? WHERE id = ?",
+                                params![
+                                    head.row.title,
+                                    head.row.updated_at,
+                                    head.row.revision,
+                                    head.entry_count,
+                                    head.history_from,
+                                    head.history_to,
+                                    head.save_id,
+                                    head.rid
+                                ],
+                            )
+                            .await?;
+                        }
+                        Op::Commit(head, false) => {
+                            let rid = tx.next_id("assistant_conversations").await?;
+                            tx.execute(
+                                "INSERT INTO assistant_conversations \
+                                 (id, conversation_id, device, title, created_at, updated_at, revision, \
+                                  entry_count, history_from, history_to, save_id) \
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                params![
+                                    rid,
+                                    head.row.conversation_id,
+                                    head.row.device,
+                                    head.row.title,
+                                    head.row.created_at,
+                                    head.row.updated_at,
+                                    head.row.revision,
+                                    head.entry_count,
+                                    head.history_from,
+                                    head.history_to,
+                                    head.save_id
+                                ],
+                            )
+                            .await?;
+                        }
+                        Op::Tombstone(row) => {
+                            let rid = tx.next_id("assistant_conversations").await?;
+                            tx.execute(
+                                "INSERT INTO assistant_conversations \
+                                 (id, conversation_id, device, title, created_at, updated_at, deleted) \
+                                 VALUES (?, ?, ?, '', ?, ?, 1)",
+                                params![
+                                    rid,
+                                    row.conversation_id,
+                                    row.device,
+                                    row.created_at,
+                                    row.updated_at
+                                ],
+                            )
+                            .await?;
+                        }
+                        Op::MarkDeleted => {
+                            tx.execute(
+                                "UPDATE assistant_conversations SET deleted = 1 WHERE conversation_id = ?",
+                                params![id.clone()],
+                            )
+                            .await?;
+                        }
+                    }
                 }
-                Op::InsertEntry {
-                    position,
-                    revision,
-                    entry_id,
-                    body,
-                } => {
-                    let rid = tx
-                        .next_id("assistant_entries", vec![])
-                        .await
-                        .map_err(storage_err)?;
-                    tx.execute(
-                        "INSERT INTO assistant_entries \
-                         (id, conversation_id, position, revision, entry_id, body) \
-                         VALUES (?, ?, ?, ?, ?, ?)",
-                        params![rid, id, position, revision, entry_id, body],
-                    )
-                    .await
-                }
-                Op::InsertHistory {
-                    seq,
-                    revision,
-                    body,
-                } => {
-                    let rid = tx
-                        .next_id("assistant_history", vec![])
-                        .await
-                        .map_err(storage_err)?;
-                    tx.execute(
-                        "INSERT INTO assistant_history (id, conversation_id, seq, revision, body) \
-                         VALUES (?, ?, ?, ?, ?)",
-                        params![rid, id, seq, revision, body],
-                    )
-                    .await
-                }
-                Op::Commit(head, true) => {
-                    tx.execute(
-                        "UPDATE assistant_conversations SET title = ?, updated_at = ?, revision = ?, \
-                         entry_count = ?, history_from = ?, history_to = ?, save_id = ? WHERE id = ?",
-                        params![
-                            head.row.title,
-                            head.row.updated_at,
-                            head.row.revision,
-                            head.entry_count,
-                            head.history_from,
-                            head.history_to,
-                            head.save_id,
-                            head.rid
-                        ],
-                    )
-                    .await
-                }
-                Op::Commit(head, false) => {
-                    let rid = tx
-                        .next_id("assistant_conversations", vec![])
-                        .await
-                        .map_err(storage_err)?;
-                    tx.execute(
-                        "INSERT INTO assistant_conversations \
-                         (id, conversation_id, device, title, created_at, updated_at, revision, \
-                          entry_count, history_from, history_to, save_id) \
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        params![
-                            rid,
-                            head.row.conversation_id,
-                            head.row.device,
-                            head.row.title,
-                            head.row.created_at,
-                            head.row.updated_at,
-                            head.row.revision,
-                            head.entry_count,
-                            head.history_from,
-                            head.history_to,
-                            head.save_id
-                        ],
-                    )
-                    .await
-                }
-                Op::Tombstone(row) => {
-                    let rid = tx
-                        .next_id("assistant_conversations", vec![])
-                        .await
-                        .map_err(storage_err)?;
-                    tx.execute(
-                        "INSERT INTO assistant_conversations \
-                         (id, conversation_id, device, title, created_at, updated_at, deleted) \
-                         VALUES (?, ?, ?, '', ?, ?, 1)",
-                        params![
-                            rid,
-                            row.conversation_id,
-                            row.device,
-                            row.created_at,
-                            row.updated_at
-                        ],
-                    )
-                    .await
-                }
-                Op::MarkDeleted => {
-                    tx.execute(
-                        "UPDATE assistant_conversations SET deleted = 1 WHERE conversation_id = ?",
-                        params![id],
-                    )
-                    .await
-                }
-            }
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
-        Ok(())
+                Ok::<_, PrismError>(())
+            })
+            .await
     }
 
     /// Conversation `id`'s head and every row of its entries and history,
-    /// read in one transaction (rolled back), so all of it is of one moment.
+    /// read in one transaction, so all of it is of one moment.
     async fn assistant_read(
         &self,
         id: &str,
     ) -> Result<(Found, Vec<Stored>, Vec<Stored>), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        let read = async {
-            let head = assistant_head(&mut tx, id).await?;
-            let entries = assistant_rows(&mut tx, "assistant_entries", id).await?;
-            let history = assistant_rows(&mut tx, "assistant_history", id).await?;
-            Ok((head, entries, history))
-        }
-        .await;
-        tx.rollback().await.map_err(storage_err)?;
-        read
+        let id = id.to_owned();
+        self.db
+            .write(async move |tx| {
+                let head = assistant_head(tx, &id).await?;
+                let entries = assistant_rows(tx, "assistant_entries", &id).await?;
+                let history = assistant_rows(tx, "assistant_history", &id).await?;
+                Ok((head, entries, history))
+            })
+            .await
     }
 }
 
