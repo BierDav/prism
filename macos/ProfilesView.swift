@@ -210,17 +210,25 @@ struct ProfilesView: View {
                     get: { draft?.label ?? "" }, set: { draft?.label = $0 }
                 ))
                 .textFieldStyle(.roundedBorder)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(indices.indices, id: \.self) { position in
-                            entryRow(position, indices: indices, placement: placement)
-                            Divider()
+                if indices.isEmpty {
+                    Text("No models or profiles yet. Add one below to set the priority order.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 6)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(indices.indices, id: \.self) { position in
+                                entryRow(position, indices: indices, placement: placement)
+                                Divider()
+                            }
                         }
                     }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(maxHeight: 260)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 260)
-                .fixedSize(horizontal: false, vertical: true)
                 let models = placement.models.filter { !$0.hidden && $0.instanceId != PlacementEntry.companion.PROFILE_INSTANCE }
                 // Profiles it may use: not itself, and none that uses it (the server refuses cycles).
                 let profiles = placement.referenceCandidates(profileId: draft?.original?.id ?? "", held: draft?.entries ?? [])
@@ -332,6 +340,7 @@ struct ProfilesView: View {
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)
+                    .help(entry.isProfileReference ? "Remove profile" : "Remove model")
                 }
                 if !entry.isProfileReference && (!levels.isEmpty || !entry.reasoning.isEmpty) {
                     Picker("Reasoning", selection: Binding(get: { entry.reasoning }, set: { update(index, reasoning: $0) })) {
@@ -504,6 +513,7 @@ struct ProfilesView: View {
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
             .disabled(disabled)
+            .help(up ? "Move up" : "Move down")
     }
 
     private func update(_ index: Int, enabled: Bool? = nil, reasoning: String? = nil) {
@@ -580,6 +590,10 @@ private struct ProfileRow: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
                 }
                 .contentShape(Rectangle())
             }

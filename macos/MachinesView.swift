@@ -186,11 +186,11 @@ private struct HostRow: View {
             Spacer(minLength: 4)
             if !expanded, let battery = host.battery {
                 HStack(spacing: 2) {
-                    Image(systemName: battery.charging ? "battery.100percent.bolt" : "battery.50percent")
+                    Image(systemName: Self.batterySymbol(battery))
                     Text(HostText.percent(battery.level)).monospacedDigit()
                 }
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Self.batteryTint(battery))
             }
             if host.online {
                 Image(systemName: "chevron.right")
@@ -237,12 +237,31 @@ private struct HostRow: View {
             }
             if let battery = host.battery {
                 Label(HostText.percent(battery.level) + (battery.charging ? " · charging" : ""),
-                      systemImage: battery.charging ? "battery.100percent.bolt" : "battery.50percent")
+                      systemImage: Self.batterySymbol(battery))
+                    .foregroundStyle(Self.batteryTint(battery))
             }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
         .labelStyle(.titleAndIcon)
+    }
+
+    private static func batterySymbol(_ battery: HostMetrics.Battery) -> String {
+        if battery.charging { return "battery.100percent.bolt" }
+        switch battery.level {
+        case ..<0.125: return "battery.0percent"
+        case ..<0.375: return "battery.25percent"
+        case ..<0.625: return "battery.50percent"
+        case ..<0.875: return "battery.75percent"
+        default: return "battery.100percent"
+        }
+    }
+
+    private static func batteryTint(_ battery: HostMetrics.Battery) -> Color {
+        guard !battery.charging else { return .secondary }
+        if battery.level < 0.10 { return .red }
+        if battery.level < 0.20 { return .orange }
+        return .secondary
     }
 
     private var details: some View {

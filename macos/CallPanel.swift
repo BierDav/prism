@@ -66,6 +66,7 @@ struct CallView: View {
                         .font(.system(size: 20))
                         .foregroundStyle(call.state == .ended ? Color.secondary : Color.green)
                         .frame(width: 28)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(visible(call.title))
                             .font(.headline)
@@ -147,8 +148,16 @@ struct CallView: View {
                 .tint(.red)
                 Spacer(minLength: 0)
                 if call.audioOnMac {
-                    Button { calls.muted.toggle() } label: {
-                        Label(calls.muted ? "Unmute" : "Mute", systemImage: calls.muted ? "mic.slash.fill" : "mic.fill")
+                    if calls.muted {
+                        Button { calls.muted.toggle() } label: {
+                            Label("Unmute", systemImage: "mic.slash.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                    } else {
+                        Button { calls.muted.toggle() } label: {
+                            Label("Mute", systemImage: "mic.fill")
+                        }
                     }
                     Button { calls.moveToPhone() } label: {
                         Label("To phone", systemImage: "iphone")

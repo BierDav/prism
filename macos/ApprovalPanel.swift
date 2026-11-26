@@ -115,19 +115,19 @@ private struct RequestView: View {
                 details
             }
             if !approval.options.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(approval.options.filter { $0.decision.hasPrefix("accept") }, id: \.decision) { option in
-                        Button { approver.choose(request, decision: option.decision) } label: {
-                            Label(visible(option.label), systemImage: approval.decision == option.decision ? "largecircle.fill.circle" : "circle")
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(approval.decision == option.decision ? .isSelected : [])
-                        .disabled(request.phase == .signing)
-                        if approval.decision == option.decision && !option.warning.isEmpty {
-                            Text(visibleLines(option.warning)).font(.callout).foregroundStyle(.orange)
+                        ApprovalOptionRow(
+                            label: visible(option.label),
+                            warning: option.warning.isEmpty ? nil : visibleLines(option.warning),
+                            selected: approval.decision == option.decision,
+                            enabled: request.phase != .signing
+                        ) {
+                            approver.choose(request, decision: option.decision)
                         }
                     }
                 }
+                .padding(.horizontal, -8)
             }
             if let thread = approval.thread {
                 ThreadCard(thread: thread)
@@ -171,6 +171,7 @@ private struct RequestView: View {
             }
             .frame(width: 48, height: 48)
             .shadow(color: HostColor.of(approval.source).opacity(0.35), radius: 6, y: 2)
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(visible(approval.title))
@@ -286,6 +287,7 @@ private struct RequestView: View {
                 HStack(spacing: 7) {
                     Text("Deny")
                     KeyCap("esc")
+                        .accessibilityHidden(true)
                 }
             }
             .buttonStyle(PillStyle())
@@ -354,6 +356,50 @@ private struct RequestView: View {
         .accessibilityHint(request.phase == .needsAction ? "" : "Rest your finger on the Touch ID sensor to approve")
         .help(request.phase == .needsAction ? "" : "Rest your finger on the Touch ID sensor to approve")
         .animation(.smooth(duration: 0.2), value: request.phase)
+    }
+}
+
+/// One selectable approval scope row with full-width hit target and hover highlight.
+private struct ApprovalOptionRow: View {
+    let label: String
+    let warning: String?
+    let selected: Bool
+    let enabled: Bool
+    let select: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: select) {
+                HStack(spacing: 8) {
+                    Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        .frame(width: 14)
+                    Text(label)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .disabled(!enabled)
+            if selected, let warning {
+                Text(warning)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 22)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(hovering && enabled ? Color.primary.opacity(0.06) : .clear)
+        )
+        .onHover { hovering = $0 }
     }
 }
 

@@ -11,6 +11,8 @@ struct WiFiView: View {
     @ObservedObject var wifi: WiFiSwitch
     @ObservedObject var networks: WiFiNetworks
 
+    private enum InlineField: Hashable { case reliable, hotspot }
+
     @State private var addingReliable = false
     @State private var typed = ""
     @State private var addingHotspot = false
@@ -20,6 +22,7 @@ struct WiFiView: View {
     @State private var password = ""
     @State private var passwordError: String?
     @State private var savedPasswords: Set<String> = []
+    @FocusState private var focusedField: InlineField?
 
     private var hotspotConfigured: Bool { hotspot.keyFile != nil }
 
@@ -123,7 +126,10 @@ struct WiFiView: View {
                     label: "Add",
                     accessibilityLabel: "Add reliable network",
                     exclude: Set(networks.reliable.keys),
-                    onManual: { addingReliable = true },
+                    onManual: {
+                        addingReliable = true
+                        focusedField = .reliable
+                    },
                     add: { networks.addReliable($0) }
                 )
             }
@@ -158,7 +164,12 @@ struct WiFiView: View {
                 HStack(spacing: 6) {
                     TextField("Network name", text: $typed)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .reliable)
                         .onSubmit(addTyped)
+                        .onExitCommand {
+                            typed = ""
+                            addingReliable = false
+                        }
                     Button("Add", action: addTyped)
                         .disabled(WiFiNetworks.clean(typed) == nil)
                     Button {
@@ -220,7 +231,10 @@ struct WiFiView: View {
                     label: "Add",
                     accessibilityLabel: "Add phone hotspot",
                     exclude: Set(networks.hotspots),
-                    onManual: { addingHotspot = true },
+                    onManual: {
+                        addingHotspot = true
+                        focusedField = .hotspot
+                    },
                     add: { networks.addHotspot($0) }
                 )
             }
@@ -276,7 +290,12 @@ struct WiFiView: View {
                 HStack(spacing: 6) {
                     TextField("Hotspot name", text: $typedHotspot)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .hotspot)
                         .onSubmit(addTypedHotspot)
+                        .onExitCommand {
+                            typedHotspot = ""
+                            addingHotspot = false
+                        }
                     Button("Add", action: addTypedHotspot)
                         .disabled(WiFiNetworks.clean(typedHotspot) == nil)
                     Button {
@@ -427,6 +446,7 @@ private struct HotspotRow: View {
     let cancelPassword: () -> Void
     let remove: () -> Void
     @State private var hovering = false
+    @FocusState private var passwordFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -461,7 +481,9 @@ private struct HotspotRow: View {
                 HStack(spacing: 6) {
                     SecureField("Password", text: $password)
                         .textFieldStyle(.roundedBorder)
+                        .focused($passwordFocused)
                         .onSubmit(savePassword)
+                        .onExitCommand(perform: cancelPassword)
                     Button("Save", action: savePassword)
                         .disabled(password.isEmpty)
                     if hasSavedPassword {
@@ -477,6 +499,7 @@ private struct HotspotRow: View {
                     .help("Cancel")
                 }
                 .padding(.leading, 24)
+                .onAppear { passwordFocused = true }
                 if let passwordError {
                     Label(passwordError, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)

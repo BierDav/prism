@@ -90,10 +90,15 @@ struct AlertsView: View {
                     }
                 }
                 if !store.tasks.isEmpty {
-                    SectionLabel("Agents")
-                        .padding(.horizontal, 14)
-                        .padding(.top, 10)
-                        .padding(.bottom, 5)
+                    HStack(spacing: 6) {
+                        SectionLabel("Agents")
+                        Text("\(store.tasks.count)")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 5)
                     AgentList(agents: store.tasks, showTarget: true)
                         .padding(.horizontal, 14)
                 }
