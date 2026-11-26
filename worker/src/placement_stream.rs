@@ -29,12 +29,27 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use rocky_prism::{PlacementSyncRequest, PlacementSyncResponse};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// The WebSocket subprotocol this endpoint speaks.
 pub const SUBPROTOCOL: &str = "jsonrpc-2.0";
-/// How often a connection ranks its host's last report again.
+/// How often a connection ranks its host's last report again for time-based
+/// or ClickHouse usage changes; Rocky table changes wake it immediately via
+/// [`PLACEMENT_OBSERVE_TABLES`].
 pub const PUSH_CHECK_EVERY: Duration = Duration::from_secs(5);
+/// Rocky tables whose changes can alter a host's [`PlacementSyncResponse`].
+const PLACEMENT_OBSERVE_TABLES: &[&str] = &[
+    "profiles",
+    "profile_entries",
+    "actions",
+    "policy",
+    "instructions",
+    "move_acks",
+    "hosts",
+    "threads",
+];
 /// A report older than this is not ranked again: the host is gone or stuck,
 /// and its threads no longer count (`PLACEMENT_FRESH_REPORT_SECS`).
 const REPORT_FRESH_FOR: Duration = Duration::from_secs(3 * 60);
@@ -93,9 +108,39 @@ impl Stream {
     }
 }
 
+async fn push_if_changed(state: &AppState, machine: &str, stream: &mut Stream) -> Option<Value> {
+    let Some((req, at)) = &stream.report else {
+        return None;
+    };
+    if at.elapsed() > REPORT_FRESH_FOR {
+        return None;
+    }
+    let resp = run_placement_sync(state, machine, req.clone(), 0).await?;
+    stream
+        .note_sent(&resp)
+        .then(|| json!({"jsonrpc": "2.0", "method": METHOD_UPDATE, "params": resp}))
+}
+
 async fn serve(state: AppState, machine: String, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut stream = Stream::default();
+    let changed = Arc::new(Notify::new());
+    let observer = {
+        let client = Arc::clone(&state.client);
+        let notify = Arc::clone(&changed);
+        let tables: Vec<String> = PLACEMENT_OBSERVE_TABLES
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect();
+        tokio::spawn(async move {
+            let Ok(mut events) = client.observe(Some(tables)).await else {
+                return;
+            };
+            while events.next().await.is_ok() {
+                notify.notify_one();
+            }
+        })
+    };
     let mut push = tokio::time::interval(state.placement_push_every);
     push.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -120,16 +165,11 @@ async fn serve(state: AppState, machine: String, socket: WebSocket) {
                     Message::Ping(_) | Message::Pong(_) => None,
                 }
             }
+            _ = changed.notified() => {
+                push_if_changed(&state, &machine, &mut stream).await
+            }
             _ = push.tick() => {
-                match &stream.report {
-                    Some((req, at)) if at.elapsed() <= REPORT_FRESH_FOR => {
-                        let resp = run_placement_sync(&state, &machine, req.clone(), 0).await;
-                        resp.filter(|resp| stream.note_sent(resp)).map(|resp| {
-                            json!({"jsonrpc": "2.0", "method": METHOD_UPDATE, "params": resp})
-                        })
-                    }
-                    _ => None,
-                }
+                push_if_changed(&state, &machine, &mut stream).await
             }
             _ = ping.tick() => {
                 if heard.elapsed() > IDLE_TIMEOUT {
@@ -150,6 +190,7 @@ async fn serve(state: AppState, machine: String, socket: WebSocket) {
             break;
         }
     }
+    observer.abort();
     let _ = tx.close().await;
 }
 
@@ -429,5 +470,59 @@ mod tests {
         )
         .await;
         assert_eq!(next(&mut socket).await["id"], 5);
+    }
+
+    #[tokio::test]
+    async fn pushes_a_changed_profile_immediately_via_observe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(
+            PrismClient::open_or_create(dir.path().display().to_string(), None)
+                .await
+                .expect("open_or_create"),
+        );
+        // Set the fallback poll timer far out so only Rocky `observe` can wake the push.
+        let state = AppState::new(Arc::clone(&client), Some(KEY.to_vec()))
+            .with_placement_push_every(Duration::from_secs(60));
+        let base = serve(router(state)).await.replacen("http://", "ws://", 1);
+        let token = machine_token(KEY, "david-mb").expect("token");
+        let mut socket = connect(&base, Some(&token)).await.expect("connect");
+
+        call(
+            &mut socket,
+            json!({"jsonrpc": "2.0", "id": 1, "method": METHOD_SYNC, "params": report()}),
+        )
+        .await;
+        let answer = next(&mut socket).await;
+        assert_eq!(answer["id"], 1);
+        assert_eq!(answer["result"]["profiles"], json!([]));
+
+        let started = Instant::now();
+        client
+            .put_placement_profile(
+                "fast".into(),
+                PutPlacementProfileRequest {
+                    label: "Fast".into(),
+                    entries: vec![PutPlacementEntryInput {
+                        instance_id: "claudeAgent".into(),
+                        model: "claude-david/claude-opus-5-5".into(),
+                        reasoning: String::new(),
+                        enabled: true,
+                        session_share_of_weekly: None,
+                    }],
+                },
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+            .expect("put profile");
+        let update = tokio::time::timeout(Duration::from_secs(3), next(&mut socket))
+            .await
+            .expect("pushed via observe before fallback timer");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "expected immediate push, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(update["method"], METHOD_UPDATE);
+        assert_eq!(update["params"]["profiles"][0]["id"], "fast");
     }
 }

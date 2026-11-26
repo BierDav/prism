@@ -5,7 +5,6 @@
 
 use crate::config::{CLUSTER_TARGET, Config};
 use crate::magic::{AUTO_CHOICE, pick_machine, pick_project};
-use crate::metrics::fetch_host_metrics;
 use crate::push::Pusher;
 use crate::t3::{Secrets, T3Hub};
 use rocky_prism::{
@@ -200,7 +199,7 @@ pub async fn process_agent_request(
         target_name = if cluster_only {
             CLUSTER_TARGET.to_string()
         } else {
-            pick_machine(client, cfg).await
+            pick_machine(client, cfg, secrets, now).await
         };
     }
     if cluster_only && target_name != CLUSTER_TARGET {
@@ -720,51 +719,31 @@ pub async fn expiry_reminders(
     Ok(())
 }
 
-/// Refreshes the replicated `machines` table (config + ClickHouse metrics) and
+/// Refreshes the replicated `machines` table (config only; host metrics are
+/// served directly from ClickHouse by `GET /v1/machines/metrics`) and
 /// `projects` catalog from reachable T3 hosts.
 pub async fn refresh_machines_and_projects(
     client: &PrismClient,
     cfg: &Config,
     t3: &T3Hub,
-    secrets: &Secrets,
+    _secrets: &Secrets,
     now: i64,
 ) -> Result<(), String> {
-    let metrics_by_host: BTreeMap<String, String> =
-        match fetch_host_metrics(cfg, secrets, now).await {
-            Ok(view) => view
-                .hosts
-                .into_iter()
-                .filter_map(|h| {
-                    let name = h.name.clone();
-                    serde_json::to_string(&h).ok().map(|j| (name, j))
-                })
-                .collect(),
-            Err(_) => BTreeMap::new(),
-        };
-
-    let mut all_names: Vec<String> = cfg.machines.keys().cloned().collect();
-    for k in metrics_by_host.keys() {
-        if !cfg.machines.contains_key(k) {
-            all_names.push(k.clone());
-        }
-    }
-    for name in all_names {
-        let m = cfg.machines.get(&name);
-        let has_t3 = m.map(|x| x.has_t3()).unwrap_or(false);
+    for (name, m) in &cfg.machines {
+        let has_t3 = m.has_t3();
         let status = json!({
             "name": name,
-            "aliases": m.map(|x| x.aliases.clone()).unwrap_or_default(),
-            "description": m.map(|x| x.description.clone()).unwrap_or_default(),
+            "aliases": m.aliases,
+            "description": m.description,
             "t3": has_t3,
             "reachable": has_t3,
-            "t3WebOrigin": if has_t3 { cfg.t3_web_origin(&name) } else { String::new() },
+            "t3WebOrigin": if has_t3 { cfg.t3_web_origin(name) } else { String::new() },
         });
-        let metrics_json = metrics_by_host.get(&name).cloned().unwrap_or_default();
         let _ = client
             .upsert_machine(&MachineRow {
-                name,
+                name: name.clone(),
                 status_json: status.to_string(),
-                metrics_json,
+                metrics_json: String::new(),
                 updated_at: now,
             })
             .await;

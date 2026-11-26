@@ -1242,16 +1242,44 @@ impl Api {
     }
 
     async fn host_metrics(&self) -> Result<Reply, ApiError> {
-        let mut time = 0;
-        let mut hosts = Vec::new();
-        for m in self.client.list_machines().await? {
-            let v = parse(&m.metrics_json);
-            if v.is_object() {
-                time = time.max(m.updated_at);
-                hosts.push(v);
-            }
+        let base = self.prism_url.trim_end_matches('/');
+        if base.is_empty() {
+            return Err(ApiError::unavailable(
+                "Host metrics require a Prism server URL.",
+            ));
         }
-        ok(json!({"time": time, "hosts": hosts}))
+        static HTTP: std::sync::LazyLock<Option<reqwest::Client>> =
+            std::sync::LazyLock::new(|| {
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(20))
+                    .build()
+                    .ok()
+            });
+        let http = HTTP
+            .as_ref()
+            .ok_or_else(|| ApiError::unavailable("Could not initialize HTTP client."))?;
+        let resp = http
+            .get(format!("{base}/v1/machines/metrics"))
+            .send()
+            .await
+            .map_err(|_| ApiError::unavailable("Could not reach Prism for host metrics."))?;
+        let status = i32::from(resp.status().as_u16());
+        let text = resp
+            .text()
+            .await
+            .map_err(|_| ApiError::unavailable("Could not read host metrics from Prism."))?;
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|_| ApiError::unavailable("Prism returned invalid host metrics."))?;
+        if (200..300).contains(&status) {
+            return ok(body);
+        }
+        if body.is_object() && body.get("error").is_some() {
+            return Ok(Reply { status, body });
+        }
+        Err(ApiError::unavailable(format!(
+            "Prism host metrics failed (HTTP {status})."
+        )))
     }
 
     // --- Model and reasoning --------------------------------------------------

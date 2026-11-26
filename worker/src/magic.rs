@@ -3,12 +3,12 @@
 //! the Go server's `magic.go`.
 
 use crate::config::{CLUSTER_TARGET, Config};
-use crate::metrics::HostMetrics;
+use crate::metrics::{HostMetrics, fetch_host_metrics};
 use crate::t3::Secrets;
 use rocky_prism::{PrismClient, ProjectRow};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 pub const AUTO_CHOICE: &str = "auto";
@@ -60,11 +60,28 @@ pub fn pick_by_load(hosts: &[HostLoad]) -> Option<String> {
     best.map(|h| h.name.clone())
 }
 
-/// Picks the best machine from the replicated `machines` table, or `"cluster"`
-/// if metrics are unavailable.
-pub async fn pick_machine(client: &PrismClient, cfg: &Config) -> String {
+/// Picks the best machine using live ClickHouse host metrics and the
+/// replicated `machines` table, or `"cluster"` if metrics are unavailable.
+pub async fn pick_machine(
+    client: &PrismClient,
+    cfg: &Config,
+    secrets: &Secrets,
+    now: i64,
+) -> String {
     let Ok(machines) = client.list_machines().await else {
         return CLUSTER_TARGET.into();
+    };
+    let live_metrics: BTreeMap<String, HostMetrics> = if cfg.metrics_url.is_empty() {
+        BTreeMap::new()
+    } else {
+        match fetch_host_metrics(cfg, secrets, now).await {
+            Ok(view) => view
+                .hosts
+                .into_iter()
+                .map(|h| (h.name.clone(), h))
+                .collect(),
+            Err(_) => BTreeMap::new(),
+        }
     };
     let mut hosts = Vec::new();
     for m in machines {
@@ -76,10 +93,14 @@ pub async fn pick_machine(client: &PrismClient, cfg: &Config) -> String {
             .get("reachable")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if !has_t3 || !reachable || m.metrics_json.is_empty() {
+        if !has_t3 || !reachable {
             continue;
         }
-        let Ok(hm) = serde_json::from_str::<HostMetrics>(&m.metrics_json) else {
+        let Some(hm) = live_metrics.get(&m.name).cloned().or_else(|| {
+            (!m.metrics_json.is_empty())
+                .then(|| serde_json::from_str::<HostMetrics>(&m.metrics_json).ok())
+                .flatten()
+        }) else {
             continue;
         };
         if !hm.online {

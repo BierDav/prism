@@ -910,6 +910,9 @@ impl PrismClient {
                 return Ok(()); // A firing retry must not resurrect an ended episode.
             }
             if row.episode == episode && row.state != ALERT_GONE {
+                if row.payload == raw && row.missing_since == 0 {
+                    return Ok(());
+                }
                 return self.update_alert_payload(&row.key, alert, raw).await;
             }
             if row.is_open() {

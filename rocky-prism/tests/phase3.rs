@@ -343,6 +343,95 @@ async fn phase3_tables_round_trip() {
 }
 
 #[tokio::test]
+async fn noop_writes_skip_rocky_transactions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+        .await
+        .expect("open");
+
+    let machine = MachineRow {
+        name: "david-mb".into(),
+        status_json: r#"{"name":"david-mb","reachable":true}"#.into(),
+        metrics_json: String::new(),
+        updated_at: 100,
+    };
+    let projects = vec![ProjectRow {
+        project_id: "host:david-mb/p1".into(),
+        name: "prism".into(),
+        icon_json: String::new(),
+        machines_json: r#"["david-mb"]"#.into(),
+        repository: false,
+        updated_at: 100,
+    }];
+    let activity = AgentActivityRow {
+        agent_id: "t-1".into(),
+        status: "running".into(),
+        items_json: "[]".into(),
+        updated_at: 100,
+    };
+
+    client.upsert_machine(&machine).await.expect("machine");
+    client.replace_projects(&projects).await.expect("projects");
+    client.set_setting("k", "v", 100).await.expect("setting");
+    client
+        .save_agent_activity(&activity)
+        .await
+        .expect("activity");
+
+    // Start observing every table AFTER initial population.
+    let mut events = client.observe(None).await.expect("observe");
+
+    // Repeat identical writes (with newer timestamps) and an empty prune:
+    // none of these should open a Rocky write transaction.
+    client
+        .upsert_machine(&MachineRow {
+            updated_at: 200,
+            ..machine.clone()
+        })
+        .await
+        .expect("noop machine");
+    client
+        .replace_projects(&[ProjectRow {
+            updated_at: 200,
+            ..projects[0].clone()
+        }])
+        .await
+        .expect("noop projects");
+    client
+        .set_setting("k", "v", 200)
+        .await
+        .expect("noop setting");
+    client
+        .save_agent_activity(&AgentActivityRow {
+            updated_at: 200,
+            ..activity.clone()
+        })
+        .await
+        .expect("noop activity");
+    client
+        .prune_phase3(200, 60)
+        .await
+        .expect("empty prune");
+
+    // A genuine write after the no-ops should be the ONLY event emitted.
+    client
+        .set_setting("sentinel", "1", 300)
+        .await
+        .expect("sentinel");
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+        .await
+        .expect("event")
+        .expect("ok");
+    assert_eq!(
+        first.tables,
+        vec!["settings".to_string()],
+        "no-op writes must not emit table change events before sentinel"
+    );
+    let extra = tokio::time::timeout(std::time::Duration::from_millis(150), events.next()).await;
+    assert!(extra.is_err(), "no extra events expected after sentinel");
+}
+
+#[tokio::test]
 async fn a_request_is_written_once_and_held_by_one_worker_until_stale() {
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PrismClient::open_or_create(dir.path().display().to_string(), None)

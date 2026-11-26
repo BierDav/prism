@@ -48,6 +48,9 @@ pub struct AppState {
     pub placement_log: Option<Arc<crate::placement_log::PlacementLog>>,
     /// Where placement reads the accounts' usage, when configured.
     pub usage: Option<Arc<crate::usage::UsageSource>>,
+    /// Where `GET /v1/machines/metrics` reads host metrics from ClickHouse,
+    /// when configured.
+    pub metrics: Option<Arc<crate::metrics::HostMetricsSource>>,
     /// How often a placement stream ranks its host's last report again
     /// (`placement_stream.rs`).
     pub placement_push_every: std::time::Duration,
@@ -71,6 +74,7 @@ impl AppState {
             eligible: watch::channel(Eligibility::Ready).1,
             placement_log: None,
             usage: None,
+            metrics: None,
             placement_push_every: crate::placement_stream::PUSH_CHECK_EVERY,
         }
     }
@@ -106,6 +110,11 @@ impl AppState {
         self.placement_log =
             crate::placement_log::PlacementLog::from_config(&cfg, &self.secrets, &self.node);
         self.usage = crate::usage::UsageSource::from_config(&cfg, &self.secrets);
+        self.metrics = crate::metrics::HostMetricsSource::from_config(
+            Arc::clone(&cfg),
+            Arc::clone(&self.secrets),
+            Arc::clone(&self.now_fn),
+        );
         self.cfg = cfg;
         self
     }
@@ -175,6 +184,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/t3/pair", post(crate::admin::post_pair))
         .route("/v1/machines", get(crate::admin::get_machines))
+        .route("/v1/machines/metrics", get(get_machine_metrics))
         .route("/v1/rocky/contact", get(crate::admin::get_rocky_contact))
         .route("/v1/rocky/invite", post(crate::admin::post_rocky_invite))
         .route("/v1/rocky/peers", post(crate::admin::post_rocky_peers))
@@ -214,6 +224,35 @@ async fn v1_health(State(state): State<AppState>) -> Response {
             .into_response()
     } else {
         (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+    }
+}
+
+/// `GET /v1/machines/metrics`: live host metrics pulled directly from
+/// ClickHouse (cached briefly across clients) instead of replicated in Rocky.
+async fn get_machine_metrics(State(state): State<AppState>) -> Response {
+    let Some(source) = state.metrics.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "Host metrics are not configured.",
+                "code": "unavailable",
+            })),
+        )
+            .into_response();
+    };
+    match source.current().await {
+        Ok(view) => (StatusCode::OK, Json((*view).clone())).into_response(),
+        Err(err) => {
+            eprintln!("prism-worker: reading host metrics from ClickHouse failed: {err}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "Host metrics are temporarily unavailable.",
+                    "code": "unavailable",
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -892,5 +931,76 @@ mod tests {
             .unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].name, "disk");
+    }
+
+    #[tokio::test]
+    async fn machine_metrics_endpoint_pulls_from_clickhouse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(
+            PrismClient::open_or_create(dir.path().display().to_string(), None)
+                .await
+                .expect("open_or_create"),
+        );
+
+        // Without metrics_url configured, GET /v1/machines/metrics returns 503.
+        let unconfigured = router(AppState::new(Arc::clone(&client), None));
+        let res = unconfigured
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/machines/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // With metrics_url configured, GET /v1/machines/metrics pulls from ClickHouse.
+        let prom = Router::new()
+            .route(
+                "/api/v1/query",
+                get(
+                    |axum::extract::Query(q): axum::extract::Query<
+                        std::collections::BTreeMap<String, String>,
+                    >| async move {
+                        let expr = q.get("query").map(String::as_str).unwrap_or("");
+                        let result = if expr.contains("node_time_seconds") {
+                            json!([{"metric": {"instance": "david-mb"}, "value": [1000, "995"]}])
+                        } else if expr.contains("node_cpu_seconds_total") && expr.contains("count")
+                        {
+                            json!([{"metric": {"instance": "david-mb"}, "value": [1000, "12"]}])
+                        } else {
+                            json!([])
+                        };
+                        Json(json!({"status": "success", "data": {"result": result}}))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/query_range",
+                get(|| async { Json(json!({"status": "success", "data": {"result": []}})) }),
+            );
+        let prom_url = crate::testutil::serve(prom).await;
+        let mut cfg = Config::parse("{}").expect("cfg");
+        cfg.metrics_url = prom_url;
+        let mut state = AppState::new(Arc::clone(&client), None);
+        state.now_fn = Arc::new(|| 1000);
+        let app = router(state.with_config(Arc::new(cfg)));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/machines/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["time"], 1000);
+        assert_eq!(body["hosts"][0]["name"], "david-mb");
+        assert_eq!(body["hosts"][0]["cores"], 12);
     }
 }

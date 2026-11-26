@@ -6,7 +6,11 @@ use crate::t3::Secrets;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long the worker shares one ClickHouse host-metrics read across clients.
+pub const REFRESH_EVERY: Duration = Duration::from_secs(15);
 
 const METRICS_ONLINE_WINDOW_SECS: i64 = 3 * 60;
 const METRICS_HISTORY_SECS: i64 = 2 * 60 * 60;
@@ -155,6 +159,61 @@ async fn prom_query(
     Ok(out.data.result)
 }
 
+/// Cached ClickHouse host metrics served by `GET /v1/machines/metrics`.
+///
+/// Host metrics change every scrape and never belong in Rocky's replicated
+/// history; Prism clients read them directly from the worker, which caches
+/// one ClickHouse query fan-out for [`REFRESH_EVERY`].
+pub struct HostMetricsSource {
+    cfg: Arc<Config>,
+    secrets: Secrets,
+    now_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
+    http: reqwest::Client,
+    last: tokio::sync::Mutex<Option<(Instant, Arc<HostMetricsView>)>>,
+}
+
+impl HostMetricsSource {
+    /// None when `metrics_url` is not configured.
+    pub fn from_config(
+        cfg: Arc<Config>,
+        secrets: Secrets,
+        now_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Option<Arc<Self>> {
+        if cfg.metrics_url.trim().is_empty() {
+            return None;
+        }
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .ok()?;
+        Some(Arc::new(Self {
+            cfg,
+            secrets,
+            now_fn,
+            http,
+            last: tokio::sync::Mutex::new(None),
+        }))
+    }
+
+    /// Returns the latest host metrics, refreshing from ClickHouse once
+    /// [`REFRESH_EVERY`] has passed. Concurrent callers coalesce behind the
+    /// mutex so a burst of requests runs one ClickHouse fan-out.
+    pub async fn current(&self) -> Result<Arc<HostMetricsView>, String> {
+        let mut last = self.last.lock().await;
+        if let Some((at, view)) = last.as_ref()
+            && at.elapsed() < REFRESH_EVERY
+        {
+            return Ok(Arc::clone(view));
+        }
+        let now = (self.now_fn)();
+        let view =
+            Arc::new(fetch_host_metrics_with_client(&self.http, &self.cfg, &self.secrets, now).await?);
+        *last = Some((Instant::now(), Arc::clone(&view)));
+        Ok(view)
+    }
+}
+
 pub async fn fetch_host_metrics(
     cfg: &Config,
     secrets: &Secrets,
@@ -164,9 +223,22 @@ pub async fn fetch_host_metrics(
         return Err("Host metrics are not configured.".into());
     }
     let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
+    fetch_host_metrics_with_client(&http, cfg, secrets, now).await
+}
+
+async fn fetch_host_metrics_with_client(
+    http: &reqwest::Client,
+    cfg: &Config,
+    secrets: &Secrets,
+    now: i64,
+) -> Result<HostMetricsView, String> {
+    if cfg.metrics_url.is_empty() {
+        return Err("Host metrics are not configured.".into());
+    }
 
     let at = now.to_string();
     let step = METRICS_STEP_SECS;
@@ -181,56 +253,56 @@ pub async fn fetch_host_metrics(
 
     let (last_seen, cpu, cores, gauges, uname, rx, tx, cpu_hist, mem_hist) = tokio::try_join!(
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", PROM_LAST_SEEN.into()), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", PROM_CPU.into()), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", PROM_CORES.into()), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", PROM_GAUGES.into()), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", PROM_UNAME.into()), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", prom_rx), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query",
             vec![("query", prom_tx), ("time", at.clone())]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query_range",
@@ -242,7 +314,7 @@ pub async fn fetch_host_metrics(
             ]
         ),
         prom_query(
-            &http,
+            http,
             cfg,
             secrets,
             "query_range",
@@ -543,5 +615,60 @@ mod tests {
         assert_eq!(view.hosts[0].cores, 16);
         assert_eq!(view.hosts[0].cpu, Some(0.25));
         assert_eq!(view.hosts[0].os, "Darwin 25.0");
+    }
+
+    #[tokio::test]
+    async fn host_metrics_source_caches_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let app = Router::new()
+            .route(
+                "/api/v1/query",
+                get(move |Query(q): Query<BTreeMap<String, String>>| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        let expr = q.get("query").map(String::as_str).unwrap_or("");
+                        if expr.contains("node_time_seconds") {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            return axum::Json(json!({
+                                "status": "success",
+                                "data": {"result": [{"metric": {"instance": "david-mb"}, "value": [1000, "995"]}]}
+                            }));
+                        }
+                        axum::Json(json!({"status": "success", "data": {"result": []}}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/query_range",
+                get(|| async {
+                    axum::Json(json!({"status": "success", "data": {"result": []}}))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut cfg = Config::parse("{}").expect("cfg");
+        cfg.metrics_url = format!("http://{addr}");
+        let secrets: Secrets = Arc::new(|_| None);
+        let source = HostMetricsSource::from_config(Arc::new(cfg), secrets, Arc::new(|| 1000))
+            .expect("configured");
+
+        let first = source.current().await.expect("first");
+        assert_eq!(first.hosts[0].name, "david-mb");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let second = source.current().await.expect("cached");
+        assert_eq!(second, first);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Expire cache and verify a fresh ClickHouse read happens.
+        *source.last.lock().await = Some((Instant::now() - REFRESH_EVERY, Arc::clone(&first)));
+        let _ = source.current().await.expect("refreshed");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

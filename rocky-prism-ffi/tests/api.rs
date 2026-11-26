@@ -336,10 +336,43 @@ async fn the_phone_reads_and_acts_through_its_replica() {
     })
     .await;
     assert_eq!(machines["machines"][0]["openAlerts"], json!([1]));
-    let metrics = eventually(&on_phone, "/v1/machines/metrics", |b| {
-        b["hosts"].as_array().is_some_and(|a| !a.is_empty())
-    })
-    .await;
+    // Host metrics are fetched from the Prism server (`prism_url`), not Rocky.
+    let (missing_url_status, _) = call(&on_phone, "GET", "/v1/machines/metrics", None).await;
+    assert_eq!(missing_url_status, 503);
+    let metrics_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind metrics mock");
+    let metrics_addr = metrics_listener.local_addr().expect("metrics addr");
+    let metrics_body =
+        json!({"time": now(), "hosts": [{"name": "david-mb", "online": true, "cores": 8}]})
+            .to_string();
+    let metrics_server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = metrics_listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                metrics_body.len(),
+                metrics_body
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    });
+    let metrics_resp = on_phone
+        .call(ApiRequest {
+            method: "GET".into(),
+            path: "/v1/machines/metrics".into(),
+            body: None,
+            device: "david-pixel".into(),
+            cluster_machine: "david-mm".into(),
+            wait_seconds: 5,
+            prism_url: format!("http://{metrics_addr}"),
+        })
+        .await;
+    let _ = metrics_server.await;
+    assert_eq!(metrics_resp.status, 200);
+    let metrics: Value = serde_json::from_str(&metrics_resp.body).expect("metrics json");
     assert_eq!(metrics["hosts"][0]["cores"], 8);
     let questions = eventually(&on_phone, "/v1/questions", |b| {
         b["questions"].as_array().is_some_and(|a| !a.is_empty())

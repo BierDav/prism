@@ -362,24 +362,62 @@ impl PrismClient {
     /// than `keep_secs` (leader only), so these replicated tables, which
     /// every phone and Mac holds, don't grow without bound. A device retrying
     /// a request after that long writes a new one.
+    ///
+    /// Checks each table before opening a write transaction so an empty prune
+    /// emits no Rocky frames across the six scopes.
     pub async fn prune_phase3(&self, now: i64, keep_secs: i64) -> Result<(), PrismError> {
         let before = now - keep_secs;
         let _guard = self.alerts_lock.lock().await;
+        let mut req_tables = Vec::new();
+        for table in [
+            "approval_answers",
+            "question_answers",
+            "agent_requests",
+            "agent_messages",
+        ] {
+            let mut rows = self
+                .db
+                .query(
+                    &format!(
+                        "SELECT 1 FROM {table} WHERE done_at IS NOT NULL AND done_at < ? LIMIT 1"
+                    ),
+                    params![before],
+                )
+                .await
+                .map_err(storage_err)?;
+            if rows.next().await.map_err(storage_err)?.is_some() {
+                req_tables.push(table);
+            }
+        }
+        let mut item_tables = Vec::new();
+        for table in ["approvals", "questions"] {
+            let mut rows = self
+                .db
+                .query(
+                    &format!(
+                        "SELECT 1 FROM {table} WHERE state != 'open' AND updated_at < ? LIMIT 1"
+                    ),
+                    params![before],
+                )
+                .await
+                .map_err(storage_err)?;
+            if rows.next().await.map_err(storage_err)?.is_some() {
+                item_tables.push(table);
+            }
+        }
+        if req_tables.is_empty() && item_tables.is_empty() {
+            return Ok(());
+        }
         self.db
             .write(async move |tx| {
-                for table in [
-                    "approval_answers",
-                    "question_answers",
-                    "agent_requests",
-                    "agent_messages",
-                ] {
+                for table in req_tables {
                     tx.execute(
                         &format!("DELETE FROM {table} WHERE done_at IS NOT NULL AND done_at < ?"),
                         params![before],
                     )
                     .await?;
                 }
-                for table in ["approvals", "questions"] {
+                for table in item_tables {
                     tx.execute(
                         &format!("DELETE FROM {table} WHERE state != 'open' AND updated_at < ?"),
                         params![before],
@@ -1380,6 +1418,26 @@ impl PrismClient {
 
     pub async fn save_agent_activity(&self, row: &AgentActivityRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
+        let mut existing = self
+            .db
+            .query(
+                "SELECT status, items_json FROM agent_activity WHERE agent_id = ?",
+                params![row.agent_id.clone()],
+            )
+            .await
+            .map_err(storage_err)?;
+        let mut count = 0usize;
+        let mut unchanged = false;
+        while let Some(r) = existing.next().await.map_err(storage_err)? {
+            count += 1;
+            unchanged = count == 1
+                && col_str(&r, "status") == row.status
+                && col_str(&r, "items_json") == row.items_json;
+        }
+        drop(existing);
+        if unchanged {
+            return Ok(());
+        }
         let row = row.clone();
         self.db
             .write(async move |tx| {
@@ -1428,6 +1486,26 @@ impl PrismClient {
 
     pub async fn upsert_machine(&self, row: &MachineRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
+        let mut existing = self
+            .db
+            .query(
+                "SELECT status_json, metrics_json FROM machines WHERE name = ?",
+                params![row.name.clone()],
+            )
+            .await
+            .map_err(storage_err)?;
+        let mut count = 0usize;
+        let mut unchanged = false;
+        while let Some(r) = existing.next().await.map_err(storage_err)? {
+            count += 1;
+            unchanged = count == 1
+                && col_str(&r, "status_json") == row.status_json
+                && col_str(&r, "metrics_json") == row.metrics_json;
+        }
+        drop(existing);
+        if unchanged {
+            return Ok(());
+        }
         let row = row.clone();
         self.db
             .write(async move |tx| {
@@ -1474,6 +1552,22 @@ impl PrismClient {
 
     pub async fn replace_projects(&self, projects: &[ProjectRow]) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
+        let key = |p: &ProjectRow| {
+            (
+                p.project_id.clone(),
+                p.name.clone(),
+                p.icon_json.clone(),
+                p.machines_json.clone(),
+                p.repository,
+            )
+        };
+        let mut existing: Vec<_> = self.list_projects().await?.iter().map(key).collect();
+        existing.sort();
+        let mut incoming: Vec<_> = projects.iter().map(key).collect();
+        incoming.sort();
+        if existing == incoming {
+            return Ok(());
+        }
         let projects = projects.to_vec();
         self.db
             .write(async move |tx| {
@@ -1530,6 +1624,21 @@ impl PrismClient {
 
     pub async fn set_setting(&self, key: &str, value: &str, now: i64) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
+        let mut existing = self
+            .db
+            .query("SELECT value FROM settings WHERE key = ?", params![key])
+            .await
+            .map_err(storage_err)?;
+        let mut count = 0usize;
+        let mut unchanged = false;
+        while let Some(r) = existing.next().await.map_err(storage_err)? {
+            count += 1;
+            unchanged = count == 1 && col_str(&r, "value") == value;
+        }
+        drop(existing);
+        if unchanged {
+            return Ok(());
+        }
         let key = key.to_owned();
         let value = value.to_owned();
         self.db

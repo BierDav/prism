@@ -36,10 +36,11 @@ fn print(text: String) -> Result<(), Failure> {
 /// and registers its own contact back; otherwise opens or creates a database
 /// in `data_dir`.
 pub async fn open(data_dir: String, network: Network) -> Result<PrismClient, Failure> {
-    if auth::secret("PRISM_WORKER_INVITATION").is_none() && is_empty_dir(&data_dir) {
-        if let Some((bootstrap_url, node_name, token)) = auto_join_config() {
-            return auto_join(data_dir, network, &bootstrap_url, &node_name, &token).await;
-        }
+    if auth::secret("PRISM_WORKER_INVITATION").is_none()
+        && is_empty_dir(&data_dir)
+        && let Some((bootstrap_url, node_name, token)) = auto_join_config()
+    {
+        return auto_join(data_dir, network, &bootstrap_url, &node_name, &token).await;
     }
     open_from(data_dir, network, auth::secret).await
 }
