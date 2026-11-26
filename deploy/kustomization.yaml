@@ -23,5 +23,5 @@ configMapGenerator:
 images:
   - name: prism-worker
     newName: ghcr.io/bierdav/prism-worker
-    newTag: f19eddb6e0cb9a3e6eed2b3a4127c9e52e264174-45775117575
-    digest: sha256:5c4fe7852c6e9f4d6ec29e6b013cd8ad74af39567c47e6363826d93a67441e7f
+    newTag: 15d47d3db83a0e210fad275427c9ce1abe935b4e-45785803167
+    digest: sha256:bca1e8ef2da075c046f51b7ce6e3e13d5ccf7756c51005dc9d7adcaa9e74fcd1
