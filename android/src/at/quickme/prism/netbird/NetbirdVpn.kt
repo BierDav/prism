@@ -8,11 +8,13 @@
 // The phone's networks outside the VPN are watched so the engine learns of
 // network changes and its DNS can forward to the network's own servers.
 //
-// A watchdog restarts the engine with a fresh client once it has gone
-// STUCK_MS without a connection while the phone has a network. The engine's
-// reconnect loops pause silently while it thinks there is no network, and
-// the VPN's DNS server is the engine itself, so an engine that never resumes
-// after a long standby takes the device's DNS down with it.
+// A watchdog looks after an engine without a connection while the phone has
+// a network: after NUDGE_MS it tells the engine there is a network and makes
+// it redial; after RESTART_MS it restarts the engine with a fresh client
+// (then after twice as long, up to RESTART_MAX_MS, until it connects). The
+// engine's reconnect loops pause silently while it thinks there is no
+// network, and the VPN's DNS server is the engine itself, so an engine that
+// never resumes after a long standby takes the device's DNS down with it.
 
 package at.quickme.prism.netbird
 
@@ -81,8 +83,11 @@ class NetbirdVpn : VpnService() {
         private const val CHANNEL = "netbird"
         private const val ONGOING_ID = 0x6e6274
         private const val LOGIN_TIMEOUT_S = 120L
-        /** Without a connection this long (with a network): restart the engine. */
-        private const val STUCK_MS = 3 * 60_000L
+        /** Without a connection this long (with a network): tell the engine there is a network. */
+        private const val NUDGE_MS = 3 * 60_000L
+        /** Without a connection this long: restart the engine; doubled after each restart that doesn't connect. */
+        private const val RESTART_MS = 10 * 60_000L
+        private const val RESTART_MAX_MS = 60 * 60_000L
         private const val WATCHDOG_MS = 30_000L
         private const val V4_DEFAULT = "0.0.0.0/0"
         private const val V6_DEFAULT = "::/0"
@@ -141,8 +146,18 @@ class NetbirdVpn : VpnService() {
     @Volatile private var stuck = false
     /** The engine runs (runWithoutLogin has not returned). */
     @Volatile private var engineRunning = false
-    /** elapsedRealtime since the running engine has had no connection, or 0 while it has one. */
+    /**
+     * uptimeMillis since the running engine has had no connection, or 0 while
+     * it has one: time asleep doesn't count, so the engine gets its chance to
+     * reconnect after a standby before the watchdog steps in.
+     */
     @Volatile private var unconnectedSince = 0L
+    /** The watchdog nudged the engine since unconnectedSince (tun thread). */
+    private var nudged = false
+    /** The watchdog's restart threshold (tun thread; reset on connecting). */
+    private var restartAfter = RESTART_MS
+    /** Android blocks the app's own network access on underlying (Doze and the like). */
+    @Volatile private var blocked = false
     @Volatile private var client: Client? = null
     private var engine: Thread? = null
     /** Rebuilds the tun device and applies the route picks, off the engine's own threads. */
@@ -284,6 +299,7 @@ class NetbirdVpn : VpnService() {
         var backoff = 5_000L
         while (running) {
             restart = false
+            stuck = false
             var wait = backoff
             try {
                 if (!login(files)) {
@@ -291,7 +307,7 @@ class NetbirdVpn : VpnService() {
                 } else if (!restart) {
                     Netbird.setStatus("connecting")
                     val started = System.currentTimeMillis()
-                    unconnectedSince = SystemClock.elapsedRealtime()
+                    unconnectedSince = SystemClock.uptimeMillis()
                     engineRunning = true
                     try {
                         c.runWithoutLogin(files, dnsList(hostDns), { dnsReady() }, EnvList())
@@ -305,12 +321,11 @@ class NetbirdVpn : VpnService() {
                     if (stuck) {
                         // A fresh client: the stopped one's state (its idea
                         // that there is no network) stays behind.
-                        stuck = false
                         backoff = 5_000
                         wait = 1_000
                         c.removeConnectionListener()
                         c = newClient()
-                        Netbird.setConnected(false, "restarted after ${STUCK_MS / 60_000} min without a connection")
+                        Netbird.setConnected(false, "restarted: no connection for a long time")
                     } else if (running && c.status() == "NeedsLogin") {
                         // The management service dropped this peer: enroll again,
                         // with the managed key if it is one that works.
@@ -343,37 +358,51 @@ class NetbirdVpn : VpnService() {
     }
 
     /**
-     * Every WATCHDOG_MS on the tun thread: stops an engine that has had no
-     * connection for STUCK_MS while the phone has a network; the engine loop
-     * then runs it again with a fresh client.
+     * Every WATCHDOG_MS on the tun thread, for an engine without a connection
+     * while the phone has a network: after NUDGE_MS tells it there is a
+     * network; after restartAfter stops it, and the engine loop runs it
+     * again with a fresh client.
      */
     private fun watchdog() {
         if (!running) return
-        val since = unconnectedSince
-        val c = client
-        if (engineRunning && since != 0L && c != null && !restart && !stuck &&
-            SystemClock.elapsedRealtime() - since > STUCK_MS && outsideNetwork()
-        ) {
-            Log.w(TAG, "no connection for ${(SystemClock.elapsedRealtime() - since) / 1000} s with a network: restarting the engine")
-            stuck = true
-            c.stop()
+        try {
+            val since = unconnectedSince
+            val c = client
+            if (since == 0L) {
+                nudged = false
+                restartAfter = RESTART_MS
+            } else if (engineRunning && c != null && !restart && !stuck && !blocked && outsideNetwork()) {
+                val s = (SystemClock.uptimeMillis() - since) / 1000
+                if (s * 1000 > restartAfter) {
+                    Log.w(TAG, "no connection for $s s with a network: restarting the engine")
+                    restartAfter = minOf(restartAfter * 2, RESTART_MAX_MS)
+                    nudged = false
+                    stuck = true
+                    c.stop()
+                } else if (s * 1000 > NUDGE_MS && !nudged) {
+                    Log.w(TAG, "no connection for $s s with a network: telling the engine")
+                    nudged = true
+                    c.setNetworkAvailable(true)
+                    c.notifyNetworkChange()
+                }
+            }
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "watchdog", e)
+        } finally {
+            onTunThread(WATCHDOG_MS) { watchdog() }
         }
-        onTunThread(WATCHDOG_MS) { watchdog() }
     }
 
     /**
      * The device left idle or its network was unblocked: a disconnected engine
-     * learns the network is there and redials now, and the watchdog counts
-     * from here rather than from before the standby.
+     * with a network learns it is there and redials now.
      */
     private fun awake() {
-        if (!engineRunning || unconnectedSince == 0L) return
-        unconnectedSince = SystemClock.elapsedRealtime()
+        if (!engineRunning || unconnectedSince == 0L || !outsideNetwork()) return
         val c = client ?: return
-        val network = outsideNetwork()
-        Log.i(TAG, "awake while disconnected; network " + if (network) "available" else "unavailable")
-        c.setNetworkAvailable(network)
-        if (network) c.notifyNetworkChange()
+        Log.i(TAG, "awake while disconnected: redialing")
+        c.setNetworkAvailable(true)
+        c.notifyNetworkChange()
     }
 
     /**
@@ -497,6 +526,7 @@ class NetbirdVpn : VpnService() {
                 val c = client ?: return
                 c.setNetworkAvailable(true)
                 if (underlying != null && underlying != network) c.notifyNetworkChange()
+                if (underlying != network) blocked = false
                 underlying = network
             }
 
@@ -515,10 +545,12 @@ class NetbirdVpn : VpnService() {
                 client?.setNetworkAvailable(false)
             }
 
-            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+            override fun onBlockedStatusChanged(network: Network, isBlocked: Boolean) {
                 // Doze or the like blocks the app's own network access.
-                Log.i(TAG, "network $network " + if (blocked) "blocked" else "unblocked")
-                if (!blocked && network == underlying) awake()
+                if (network != underlying || isBlocked == blocked) return
+                Log.i(TAG, "network $network " + if (isBlocked) "blocked" else "unblocked")
+                blocked = isBlocked
+                if (!isBlocked) awake()
             }
         }
         lock.withLock {
@@ -788,7 +820,7 @@ class NetbirdVpn : VpnService() {
         }
 
         private fun unconnected(s: String) {
-            if (unconnectedSince == 0L) unconnectedSince = SystemClock.elapsedRealtime()
+            if (unconnectedSince == 0L) unconnectedSince = SystemClock.uptimeMillis()
             Netbird.setConnected(false, s)
         }
     }
