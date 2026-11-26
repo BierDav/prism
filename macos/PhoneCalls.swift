@@ -1641,8 +1641,8 @@ final class CallAudio: @unchecked Sendable {
     /// On micQueue, like the watchdog: a rebuild under way finishes first,
     /// and its engine is the one that stops.
     func stop() {
-        onRestart = nil
         micQueue.sync {
+            onRestart = nil
             watchdog?.cancel()
             watchdog = nil
             let (engine, player) = lock.withLock {
