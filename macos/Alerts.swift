@@ -1,7 +1,6 @@
 // Prism's side of the app: the cluster's and the machines' open alerts, the
-// agents each one started, and the owner's quick actions on them (fix, do),
-// and the choices for new agents: the model, its reasoning level and the
-// machine "Do…" works on. Its contract is
+// agents each one started, and the owner's quick actions on them (fix, do).
+// Its contract is
 // docs/prism-api.md in the prism repository ("the contract" below). The
 // popout (AlertsView.swift) only shows what this store holds.
 //
@@ -133,13 +132,9 @@ final class PrismStore: ObservableObject {
     /// The last action that failed, for the popout.
     @Published var actionError: String?
     @Published private(set) var pushConnected = false
-    /// The model and reasoning level for new agents; nil until loaded.
-    @Published private(set) var modelSettings: ModelSettings?
     /// The machines "Do…" can work on, from the server.
     @Published private(set) var machines: [Machine] = []
     @Published private(set) var loadingMachines = false
-    /// A model or reasoning change on the way to the server.
-    @Published private(set) var savingModel = false
     /// Where "Do…" starts its agent: a machine's name, or nil for the cluster.
     @Published var doTarget: String?
     /// The hosts' performance, for the Machines tab; nil until loaded.
@@ -169,7 +164,6 @@ final class PrismStore: ObservableObject {
     private var healthFailures = 0
     private static let healthURL = URL(string: "https://prism.quickme.at/v1/health")!
     private static let outageNotification = "prism-server-unreachable"
-    private var modelLoaded: Date?
     private var machinesLoaded: Date?
 
     init(config: RockyConfig?, device: String = "", relayURL: String = "", relayTokenFile: String = "") {
@@ -245,7 +239,6 @@ final class PrismStore: ObservableObject {
             Task { await watchPlacement(replica) }
             for try await _ in stream(replica.updates(tables: PrismStore.shownTables)) {
                 refresh()
-                if modelLoaded != nil { loadModel() }
             }
         } catch {
             log("replica: \(error.text)")
@@ -348,9 +341,7 @@ final class PrismStore: ObservableObject {
                     AppDelegate.approver?.syncRemote(approvals, client: client)
                 }
                 updated = Date()
-                let first = connection != .connected
                 connection = .connected
-                if first { loadChoices() }
             } catch {
                 connection = .failed(error.text)
             }
@@ -387,27 +378,7 @@ final class PrismStore: ObservableObject {
         }
     }
 
-    // MARK: - Choices for new agents
-
-    /// Loads the model settings when the popout opens (at most once a minute
-    /// unless `force`).
-    func loadChoices(force: Bool = false) {
-        guard client != nil, connected else { return }
-        if force || modelLoaded.map({ Date().timeIntervalSince($0) > 60 }) ?? true { loadModel() }
-    }
-
-    private func loadModel() {
-        guard let client else { return }
-        modelLoaded = Date()
-        Task {
-            do {
-                modelSettings = try await client.modelSettings()
-            } catch {
-                modelLoaded = nil
-                log("model settings: \(error.text)")
-            }
-        }
-    }
+    // MARK: - Machines & Metrics
 
     func loadMachines() {
         guard let client, !loadingMachines else { return }
@@ -440,32 +411,6 @@ final class PrismStore: ObservableObject {
                 metricsError = nil
             } catch {
                 metricsError = error.text
-            }
-        }
-    }
-
-    /// PUT /settings/model: the model future agents get.
-    func select(model: ModelChoice) {
-        guard model != modelSettings?.model else { return }
-        saveModel { try await $0.setModel(model: model) }
-    }
-
-    /// PUT /settings/reasoning: a level, or "default".
-    func select(reasoning level: String) {
-        saveModel { try await $0.setReasoning(level: level) }
-    }
-
-    private func saveModel(_ change: @escaping (PrismClient) async throws -> ModelSettings) {
-        guard let client, !savingModel else { return }
-        savingModel = true
-        actionError = nil
-        Task {
-            defer { savingModel = false }
-            do {
-                modelSettings = try await change(client)
-                modelLoaded = Date()
-            } catch {
-                actionError = error.text
             }
         }
     }
@@ -610,14 +555,6 @@ final class PrismStore: ObservableObject {
             alert(35, "alert", "BackupTooOld", "Backups", "info", "", "The last ClickHouse backup is 30 hours old.", 300),
         ]
         store.tasks = [agent("t4", "Clean up the Nix store on david-tp", "running", 0, "david-tp", 4)]
-        let models = [
-            ModelChoice(instanceId: "claudeAgent", provider: "claudeAgent", model: "claude-alex/claude-opus-5-5"),
-            ModelChoice(instanceId: "claudeAgent", provider: "claudeAgent", model: "claude-alex/claude-sonnet-5-5"),
-            ModelChoice(instanceId: "codex", provider: "codex", model: "codex-david/gpt-6.2-sol"),
-        ]
-        store.modelSettings = ModelSettings(
-            model: models[0], reasoning: Reasoning(current: "high", defaultLevel: "medium", levels: ["low", "medium", "high", "xhigh"]),
-            models: models)
         func machine(_ name: String, _ route: String, _ reachable: Bool, _ state: String) -> Machine {
             Machine(name: name, aliases: [], description: "", t3: route != "ssh", route: route, via: "", reachable: reachable,
                     state: state, detail: "", sshRunner: route == "ssh", openAlerts: [], t3WebOrigin: "")

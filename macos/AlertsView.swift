@@ -2,7 +2,6 @@
 // category (most severe groups first), each with its severity, the agents it
 // started (Open in T3), and the quick actions: fix and a free-text
 // instruction. An alert leaves the list only when its condition clears.
-// Below them, the model and reasoning pickers choose what new agents run with.
 
 import AppKit
 import PrismShared
@@ -38,14 +37,7 @@ struct AlertsView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
             }
-            if store.connected, store.modelSettings != nil {
-                Divider()
-                AgentChoices(store: store)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-            }
         }
-        .onAppear { store.loadChoices() }
     }
 
     @ViewBuilder
@@ -297,107 +289,6 @@ private struct AlertRow: View {
             }
         }
         .padding(.leading, 27)
-    }
-}
-
-// MARK: - Choices for new agents
-
-/// The model and reasoning level of new agents, as small menus in a row.
-private struct AgentChoices: View {
-    @ObservedObject var store: PrismStore
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text("New agents")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
-            if store.savingModel {
-                ProgressView().controlSize(.mini)
-            }
-            if let settings = store.modelSettings {
-                modelMenu(settings)
-                if let reasoning = settings.reasoning, !reasoning.levels.isEmpty {
-                    reasoningMenu(reasoning)
-                }
-            }
-        }
-    }
-
-    private func modelMenu(_ settings: ModelSettings) -> some View {
-        Menu {
-            ForEach(settings.grouped, id: \.instance) { group in
-                Section(group.instance) {
-                    ForEach(group.models, id: \.self) { model in
-                        Toggle(isOn: Binding(
-                            get: { settings.model == model },
-                            set: { if $0 { store.select(model: model) } })
-                        ) { Text(model.model) }
-                    }
-                }
-            }
-        } label: {
-            ChoiceChip(symbol: "cpu", text: settings.model.shortName)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(store.savingModel || settings.models.isEmpty)
-        .accessibilityLabel("Model for new agents: \(settings.model.shortName)")
-        .help("Model for new agents: \(settings.model.model)")
-    }
-
-    private func reasoningMenu(_ reasoning: Reasoning) -> some View {
-        Menu {
-            Toggle(isOn: Binding(
-                get: { reasoning.current.isEmpty },
-                set: { if $0 { store.select(reasoning: "default") } })
-            ) { Text(reasoning.defaultLevel.isEmpty ? "Default" : "Default (\(reasoning.defaultLevel))") }
-            Divider()
-            ForEach(reasoning.levels, id: \.self) { level in
-                Toggle(isOn: Binding(
-                    get: { reasoning.current == level },
-                    set: { if $0 { store.select(reasoning: level) } })
-                ) { Text(level) }
-            }
-        } label: {
-            ChoiceChip(symbol: "brain", text: reasoning.label)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(store.savingModel)
-        .accessibilityLabel("Reasoning level: \(reasoning.label)")
-        .help("Reasoning level for new agents")
-    }
-}
-
-/// A menu's label: a symbol and a value in a capsule, like "Open in T3".
-private struct ChoiceChip: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: symbol)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text(visible(text))
-                .font(.caption.weight(.medium))
-                .lineLimit(1)
-            Chevron()
-        }
-        .modifier(CapsuleChipShape())
-    }
-}
-
-private struct Chevron: View {
-    var body: some View {
-        Image(systemName: "chevron.down")
-            .font(.system(size: 7, weight: .bold))
-            .foregroundStyle(.tertiary)
     }
 }
 
