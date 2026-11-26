@@ -34,7 +34,7 @@ private fun objectTests() {
                       "t3":{"environmentId":"65bb","threadId":"mcp:launch:9e47","host":"david-mb"}}],"new":1}""",
     )
     check(alert.title == "brew-update" && alert.level == Severity.WARNING && alert.labels.isEmpty()) { "alert: $alert" }
-    check(alert.canResolve && alert.since(now = 200) == 100L) { "a start in the future falls back to createdAt" }
+    check(alert.machineEvent && alert.since(now = 200) == 100L) { "a start in the future falls back to createdAt" }
     val agent = alert.agents.single()
     check(agent.status == "waiting" && agent.active && agent.displayTitle == "Agent") { "agent: $agent" }
     check(agent.link == "t3code://threads/65bb/mcp%3Alaunch%3A9e47") { "link: ${agent.link}" }
@@ -194,9 +194,9 @@ private suspend fun clientTests() {
         "start with selections: ${sent.last()}"
     }
 
-    answer = PrismResponse(409, """{"error":"Alert #7 is already resolved.","code":"conflict"}""")
-    val conflict = runCatching { client.dismiss(7, "r3") }.exceptionOrNull()
-    check(conflict is PrismError && conflict.status == 409 && conflict.code == "conflict" && conflict.message == "Alert #7 is already resolved.") { "409: $conflict" }
+    answer = PrismResponse(409, """{"error":"#7 is no longer open. Give an instruction to work on it anyway.","code":"conflict"}""")
+    val conflict = runCatching { client.fix(7, null, "r3") }.exceptionOrNull()
+    check(conflict is PrismError && conflict.status == 409 && conflict.code == "conflict" && conflict.message == "#7 is no longer open. Give an instruction to work on it anyway.") { "409: $conflict" }
 
     answer = PrismResponse(502, "<html>bad gateway</html>")
     val gateway = runCatching { client.questions() }.exceptionOrNull()

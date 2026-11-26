@@ -130,7 +130,8 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                         .required()
                         .default(""),
                 )
-                // open, resolved, dismissed or gone (no longer in Alertmanager).
+                // open, resolved or gone (no longer in Alertmanager); dismissed
+                // on episodes from before alerts could only end by themselves.
                 .column(Column::new("state", Affinity::Text).required())
                 .column(Column::new("received_at", Affinity::Integer).required())
                 .column(Column::new("resolved_at", Affinity::Integer))
@@ -149,7 +150,8 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                 .column(Column::new("at", Affinity::Integer).required()),
         )
         .table(
-            // fix, dismiss and resolve: a device writes the request, the leader
+            // fix (older apps also wrote dismiss and resolve, which now end with
+            // an error): a device writes the request, the leader
             // claims it, runs it and marks it done.
             Table::replayed("alert_actions")
                 .column(Column::new("request_id", Affinity::Text).required())

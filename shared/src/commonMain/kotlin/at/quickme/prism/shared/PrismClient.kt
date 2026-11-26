@@ -91,17 +91,6 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
         return decode(send("POST", "/v1/alerts/$id/fix", body), AgentAnswer.serializer()).agent
     }
 
-    /** Ends the current episode. */
-    @Throws(Exception::class)
-    suspend fun dismiss(id: Long, requestId: String): Alert = alertAction(id, "dismiss", requestId)
-
-    /** Machine events only: resolved until the check fails again. */
-    @Throws(Exception::class)
-    suspend fun resolve(id: Long, requestId: String): Alert = alertAction(id, "resolve", requestId)
-
-    private suspend fun alertAction(id: Long, what: String, requestId: String): Alert =
-        decode(send("POST", "/v1/alerts/$id/$what", buildJsonObject { put("requestId", requestId) }), AlertAnswer.serializer()).alert
-
     // --- Agents ---
 
     /** [state]: `active`, `recent` or `all`. */
@@ -450,9 +439,6 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
 
 @Serializable
 private class AlertList(val alerts: List<Alert> = emptyList())
-
-@Serializable
-private class AlertAnswer(val alert: Alert)
 
 @Serializable
 private class AgentList(val agents: List<Agent> = emptyList())

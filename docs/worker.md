@@ -61,14 +61,15 @@ All tables are replayed Rocky tables. Ids are Rocky ids unless noted.
   moves and interrupts the workers decided and T3 has yet to apply.
 - `alerts(key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, resolved_at, missing_since)`:
   one row per episode. `key` is derived from the label fingerprint (the Go
-  server's) and Alertmanager's `startsAt`; `state` is `open`, `resolved`,
-  `dismissed` or `gone`. Any worker may insert the same episode, so reads keep
+  server's) and Alertmanager's `startsAt`; `state` is `open`, `resolved` or
+  `gone` (`dismissed` on older episodes). Only the alert's condition ends it. Any worker may insert the same episode, so reads keep
   the row with the smallest Rocky id per key, and updates name the key.
 - `alert_numbers(key, number, at)`: the owner's `#42`. Only the leader numbers
   episodes; if two leaders in a handover give one number twice, the earlier
   row keeps it and the leader numbers the other key again.
 - `alert_actions(request_id, alert, kind, instruction, requested_by, requested_at, claimed_by, claimed_at, done_at, thread_id, link, error)`:
-  fix, dismiss and resolve. A device writes the request (the same
+  fix (the only kind; an older app's dismiss or resolve ends with an error
+  saying why). A device writes the request (the same
   `request_id` again is the same request), and the leader claims, runs and
   finishes it. A fix records the launched thread; a failure records the text
   the owner sees.
@@ -157,7 +158,7 @@ reclaims such a claim. The leader forgets finished requests and closed approvals
 questions after a week.
 
 A device asks for anything with a side effect (start an agent, send a follow-up,
-answer a question or approval, fix/dismiss/resolve an alert) by **writing a
+answer a question or approval, fix an alert) by **writing a
 request row**. It never calls a worker directly. Requests become `claimed_by` a
 worker, then `done_at`.
 
@@ -165,7 +166,7 @@ worker, then `done_at`.
 
 | App screen / action | Reads | Writes |
 | --- | --- | --- |
-| Alerts list & detail | `alerts`, `alert_numbers`, `alert_actions`, `agents` | `alert_actions` (`fix`, `dismiss`, `resolve`) |
+| Alerts list & detail | `alerts`, `alert_numbers`, `alert_actions`, `agents` | `alert_actions` (`fix`) |
 | Approvals | `approvals`, `approval_answers` | `approval_answers` (signed with device SSH key) |
 | Questions | `questions`, `question_answers` | `question_answers` |
 | Agents / Assistant | `agents`, `agent_activity`, `agent_requests`, `agent_messages`, `machines`, `projects` | `agent_requests`, `agent_messages` |

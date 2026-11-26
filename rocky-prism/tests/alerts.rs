@@ -1,6 +1,6 @@
 use rocky_prism::{
-    ALERT_DISMISSED, ALERT_GONE, ALERT_OPEN, ALERT_RESOLVED, AlertActionOutcome,
-    AlertActionRequest, AlertFilter, AlertWebhookError, PrismClient, PrismError,
+    ALERT_GONE, ALERT_OPEN, ALERT_RESOLVED, AlertActionOutcome, AlertActionRequest, AlertFilter,
+    AlertWebhookError, PrismClient, PrismError,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -226,7 +226,7 @@ async fn requests_are_claimed_once_and_reclaimed_after_a_timeout() {
     let req = AlertActionRequest {
         request_id: "phone-1".into(),
         alert: key.clone(),
-        kind: "dismiss".into(),
+        kind: "fix".into(),
         instruction: String::new(),
         requested_by: "david-phone".into(),
     };
@@ -239,30 +239,33 @@ async fn requests_are_claimed_once_and_reclaimed_after_a_timeout() {
         .await
         .expect("retry");
     assert_eq!(first, again, "the same request id is one request");
-    assert!(matches!(
-        c.request_alert_action(
-            AlertActionRequest {
-                kind: "resolve".into(),
-                request_id: "phone-2".into(),
-                ..req.clone()
-            },
-            NOW
-        )
-        .await,
-        Err(PrismError::Conflict(_))
-    ));
-    assert!(matches!(
-        c.request_alert_action(
-            AlertActionRequest {
-                kind: "reboot".into(),
-                request_id: "phone-3".into(),
-                ..req.clone()
-            },
-            NOW
-        )
-        .await,
-        Err(PrismError::InvalidInput(_))
-    ));
+    // An alert ends only when its condition does: nothing dismisses or
+    // resolves one, and an older app asking to is told why.
+    for (id, kind) in [
+        ("phone-2", "dismiss"),
+        ("phone-3", "resolve"),
+        ("phone-6", "reboot"),
+    ] {
+        let refused = c
+            .request_alert_action(
+                AlertActionRequest {
+                    kind: kind.into(),
+                    request_id: id.into(),
+                    ..req.clone()
+                },
+                NOW,
+            )
+            .await;
+        match refused {
+            Err(PrismError::InvalidInput(msg)) if kind == "reboot" => {
+                assert!(msg.contains("only one is fix"), "{msg}")
+            }
+            Err(PrismError::InvalidInput(msg)) => {
+                assert!(msg.contains("ends by itself"), "{msg}")
+            }
+            other => panic!("{kind}: {other:?}"),
+        }
+    }
     let generated = c
         .request_alert_action(
             AlertActionRequest {
@@ -335,7 +338,12 @@ async fn requests_are_claimed_once_and_reclaimed_after_a_timeout() {
             .done_at,
         None
     );
-    c.dismiss_alert(&key, later).await.expect("dismiss");
+    c.record_alert_webhook(
+        &webhook("resolved", json!([node_down("resolved", START)])),
+        later,
+    )
+    .await
+    .expect("recovered");
     c.finish_alert_action("phone-1", "worker-b", later, AlertActionOutcome::default())
         .await
         .expect("finish b");
@@ -350,9 +358,9 @@ async fn requests_are_claimed_once_and_reclaimed_after_a_timeout() {
     );
 
     let all = c.list_alerts(AlertFilter::All).await.expect("all");
-    assert_eq!(all[0].state, ALERT_DISMISSED);
+    assert_eq!(all[0].state, ALERT_RESOLVED);
     assert_eq!(all[0].actions.len(), 2);
-    // A dismiss on an ended alert is refused, a fix with instruction is not.
+    // A plain fix on an ended alert is refused, a fix with instruction is not.
     assert!(matches!(
         c.request_alert_action(
             AlertActionRequest {

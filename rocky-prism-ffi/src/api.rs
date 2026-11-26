@@ -23,9 +23,9 @@
 
 use crate::{ReplicaError, now_unix, retrying};
 use rocky_prism::{
-    ACTION_DISMISS, ACTION_FIX, ACTION_RESOLVE, ASSISTANT_DELETED, AgentRow, AlertActionRequest,
-    AlertFilter, AlertView, AssistantConversationRow, AssistantEntry, PlacementPolicy, PrismClient,
-    PrismError, PutPlacementProfileRequest, QuestionRow, RequestOutcome, RequestTable,
+    ACTION_FIX, ASSISTANT_DELETED, AgentRow, AlertActionRequest, AlertFilter, AlertView,
+    AssistantConversationRow, AssistantEntry, PlacementPolicy, PrismClient, PrismError,
+    PutPlacementProfileRequest, QuestionRow, RequestOutcome, RequestTable,
     SetPlacementActionsRequest, sha256_hex,
 };
 use serde_json::{Map, Value, json};
@@ -382,9 +382,7 @@ impl Api {
                 let row = self.alert_row(id).await?;
                 ok(self.alert_json(row).await?)
             }
-            ("POST", ["v1", "alerts", id, action @ ("fix" | "dismiss" | "resolve")]) => {
-                self.alert_action(id, action, &body).await
-            }
+            ("POST", ["v1", "alerts", id, "fix"]) => self.fix_alert(id, &body).await,
             ("GET", ["v1", "agents"]) => self.agents(query(&q, "state").unwrap_or("active")).await,
             ("POST", ["v1", "agents"]) => self.start_agent(&body).await,
             ("GET", ["v1", "agents", id]) => {
@@ -662,20 +660,15 @@ impl Api {
         v
     }
 
-    async fn alert_action(&self, id: &str, action: &str, body: &Value) -> Result<Reply, ApiError> {
+    async fn fix_alert(&self, id: &str, body: &Value) -> Result<Reply, ApiError> {
         let alert = self.alert_row(id).await?;
         let instruction = str_field(body, "instruction");
-        let request_id = self.request_id(body, &format!("{action}:{}", alert.key))?;
-        let kind = match action {
-            "fix" => ACTION_FIX,
-            "dismiss" => ACTION_DISMISS,
-            _ => ACTION_RESOLVE,
-        };
+        let request_id = self.request_id(body, &format!("{ACTION_FIX}:{}", alert.key))?;
         let c = &self.client;
         let req = AlertActionRequest {
             request_id: request_id.clone(),
             alert: alert.key.clone(),
-            kind: kind.into(),
+            kind: ACTION_FIX.into(),
             instruction,
             requested_by: self.device.clone(),
         };
@@ -695,28 +688,17 @@ impl Api {
                 }))
             })
             .await?;
-        if kind == ACTION_FIX {
-            return Ok(match done {
-                Some(o) => Reply {
-                    status: 201,
-                    body: json!({"agent": self.started_agent(&o, alert.id).await?}),
-                },
-                None => Reply {
-                    status: 202,
-                    body: detailed(
-                        json!({"agent": self.pending_agent(alert.id), "pending": true}),
-                        &unreachable,
-                    ),
-                },
-            });
-        }
-        let current = self.alert_row(id).await?;
-        let alert = self.alert_json(current).await?;
-        Ok(Reply {
-            status: if done.is_some() { 200 } else { 202 },
-            body: match done {
-                Some(_) => json!({"alert": alert}),
-                None => detailed(json!({"alert": alert, "pending": true}), &unreachable),
+        Ok(match done {
+            Some(o) => Reply {
+                status: 201,
+                body: json!({"agent": self.started_agent(&o, alert.id).await?}),
+            },
+            None => Reply {
+                status: 202,
+                body: detailed(
+                    json!({"agent": self.pending_agent(alert.id), "pending": true}),
+                    &unreachable,
+                ),
             },
         })
     }

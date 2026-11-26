@@ -88,7 +88,7 @@ are gone; nothing used them.)
 - Times are Unix seconds (integers). `0` or a missing field means none.
 - Errors return a non-2xx status with `{"error": "<text to show the owner>", "code": "<code>"}`.
   The codes are `invalid` (400), `unauthorized` (401), `not_found` (404),
-  `conflict` (409, e.g. resolving an alert that is already resolved),
+  `conflict` (409, e.g. a fix without instruction on an alert that ended),
   `unavailable` (503, e.g. the target machine is offline or T3 does not
   answer; `error` says which). The leader's error for a request it ran
   arrives as text; `call` gives it the server's status (`not_found`,
@@ -156,7 +156,7 @@ places:
 | `summary`, `description` | From the alert's annotations. Untrusted text: show it as plain text, never as markup or links. |
 | `command`, `output` | For machine events: the command and the tail of its output. Show them in monospace. |
 | `labels` | Every label. |
-| `state` | `open`, `resolved` (it recovered), `dismissed` (the owner dismissed this episode) or `gone` (Alertmanager no longer had it; cluster alerts only). |
+| `state` | `open`, `resolved` (it recovered), `gone` (Alertmanager no longer had it; cluster alerts only) or, on episodes from before alerts could only end by themselves, `dismissed`. |
 | `startsAt` | When the episode started (Alertmanager's `startsAt`, or the first failed run of a machine event), never later than `createdAt`. |
 | `createdAt` | When the server first saw this episode. |
 | `updatedAt` | When the alert last changed. |
@@ -177,16 +177,15 @@ first:
 
 ### Actions on an alert
 
-All of them take `POST` with an optional JSON body.
+An alert ends only when its condition does; there is no dismiss or resolve.
+The one action takes `POST` with an optional JSON body.
 
 | Request | Body | What happens | Answer |
 | --- | --- | --- | --- |
 | `POST /v1/alerts/{id}/fix` | `{"instruction": "…"?, "requestId": "…"?}` | Starts an agent on the alert's machine (or the cluster). Without `instruction` it investigates the alert and fixes it where appropriate. With one, it follows the instruction. | `201 {"agent": Agent}` |
-| `POST /v1/alerts/{id}/dismiss` | `{"requestId": "…"?}` | Ends the current episode. A cluster alert stays quiet until its next episode. A machine event is resolved and fires again on the next failed run. | `200 {"alert": Alert}` |
-| `POST /v1/alerts/{id}/resolve` | `{"requestId": "…"?}` | Machine events only: resolves the check until it fails again. For a cluster alert it answers `409`; use dismiss. | `200 {"alert": Alert}` |
 
-An action on an alert that is no longer open answers `409`, except `fix` with an
-instruction, which is allowed on any alert the server still has.
+A `fix` without instruction on an alert that is no longer open answers `409`;
+with an instruction it is allowed on any alert the server still has.
 
 ## Agents
 
@@ -644,7 +643,7 @@ own notification from the JSON.
 | `type` | When | Extra fields | Suggested handling |
 | --- | --- | --- | --- |
 | `alert.firing` | A new alert episode starts | `alertId`, `severity`, `host` | Notify. Critical is high priority. Tap opens the alert. |
-| `alert.ended` | An alert left `open` | `alertId`, `state` (`resolved`/`dismissed`/`gone`) | Remove its notification and refresh. Don't notify. |
+| `alert.ended` | An alert left `open` | `alertId`, `state` (`resolved`/`gone`) | Remove its notification and refresh. Don't notify. |
 | `agent.started` | An agent started (from any device) | `agentId`, `alertId` | Refresh. Don't notify. |
 | `agent.question` | A T3 thread asks the owner, whether Prism started it or not | `questionId`, `agentId`, `alertId`, `host`, `environmentId`, `threadId` | Notify. Tap opens the question (`GET /v1/questions`) or the thread in T3. For a thread Prism did not start, `agentId` is the thread ID and `title` is "Agent asks: <thread title>". |
 | `question.closed` | A question was answered (in the app or in T3) or is no longer pending | `questionId`, `host`, `environmentId`, `threadId` | Remove the notification whose `agent.question` had this `questionId` and refresh the questions. Don't notify. |

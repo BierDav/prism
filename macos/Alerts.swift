@@ -1,7 +1,7 @@
 // Prism's side of the app: the cluster's and the machines' open alerts, the
-// agents each one started, and the owner's quick actions on them (fix,
-// dismiss, resolve, do), and the choices for new agents: the model, its
-// reasoning level and the machine "Do…" works on. Its contract is
+// agents each one started, and the owner's quick actions on them (fix, do),
+// and the choices for new agents: the model, its reasoning level and the
+// machine "Do…" works on. Its contract is
 // docs/prism-api.md in the prism repository ("the contract" below). The
 // popout (AlertsView.swift) only shows what this store holds.
 //
@@ -85,8 +85,6 @@ extension Error {
 enum PrismAction: Equatable {
     /// Start an agent on the alert, with an instruction or without.
     case fix(String?)
-    case dismiss
-    case resolve
     /// Start an agent for any task, on a machine or the cluster.
     case task(String, machine: String?)
 }
@@ -361,10 +359,6 @@ final class PrismStore: ObservableObject {
                 switch (action, alert) {
                 case (.fix(let instruction), let alert?):
                     _ = try await client.fix(id: alert.id, instruction: instruction, requestId: requestID)
-                case (.dismiss, let alert?):
-                    _ = try await client.dismiss(id: alert.id, requestId: requestID)
-                case (.resolve, let alert?):
-                    _ = try await client.resolve(id: alert.id, requestId: requestID)
                 case (.task(let text, let machine), _):
                     _ = try await client.startAgent(task: "do", target: machine, request: text, requestId: requestID)
                 default:

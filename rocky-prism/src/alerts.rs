@@ -3,9 +3,15 @@
 //!
 //! Every worker accepts Alertmanager's webhook and writes episode rows. The
 //! leader numbers new episodes, posts their ntfy wake-ups and runs the
-//! owner's requests (fix, dismiss, resolve), which any device writes as
-//! `alert_actions` rows. Several workers may write the same episode, so reads
-//! keep one row per key: the one with the smallest Rocky id.
+//! owner's fix requests, which any device writes as `alert_actions` rows.
+//!
+//! An alert shows a problem that is still there: it ends only when its
+//! condition does (the rule recovers, the CronJob reports it resolved, the
+//! machine's check passes, or Alertmanager no longer has it). Nothing
+//! dismisses or resolves one by hand.
+//!
+//! Several workers may write the same episode, so reads keep one row per key:
+//! the one with the smallest Rocky id.
 
 use crate::client::{PrismClient, hex_string, id_bytes, storage_err};
 use crate::types::PrismError;
@@ -19,6 +25,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const ALERT_OPEN: &str = "open";
 pub const ALERT_RESOLVED: &str = "resolved";
+/// An episode the owner dismissed, before alerts could only end by
+/// themselves. Older rows keep it; nothing writes it any more.
 pub const ALERT_DISMISSED: &str = "dismissed";
 /// Alertmanager no longer had the alert (reconciliation).
 pub const ALERT_GONE: &str = "gone";
@@ -29,8 +37,6 @@ pub const ALERT_GONE: &str = "gone";
 pub const DEVICE_CLAIM_PREFIX: &str = "device:";
 
 pub const ACTION_FIX: &str = "fix";
-pub const ACTION_DISMISS: &str = "dismiss";
-pub const ACTION_RESOLVE: &str = "resolve";
 
 /// The alert name of a machine event (`prism run`), a check's alert.
 pub const EVENT_ALERT_NAME: &str = "HostCheckFailed";
@@ -540,7 +546,7 @@ pub struct AlertActionView {
     pub error: String,
 }
 
-/// A request a device writes: fix, dismiss or resolve one alert.
+/// A request a device writes: fix one alert.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertActionRequest {
@@ -1211,41 +1217,11 @@ impl PrismClient {
         Ok(ended)
     }
 
-    /// Ends an alert's open episode as the owner asked (`dismiss`). A machine
-    /// event is resolved instead, so its next failed run reports it again.
-    pub async fn dismiss_alert(&self, key: &str, now: i64) -> Result<AlertRow, PrismError> {
+    /// Ends a machine event's open episode: its check passed
+    /// (`crate::events`).
+    pub(crate) async fn resolve_host_event(&self, key: &str, now: i64) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let row = self.open_alert(key).await?;
-        let state = if row.alert().is_host_event() {
-            ALERT_RESOLVED
-        } else {
-            ALERT_DISMISSED
-        };
-        self.end_alert(key, state, now).await?;
-        self.alert_by_key(key).await?.ok_or(PrismError::NotFound)
-    }
-
-    /// Resolves a machine event until its check fails again. Cluster alerts
-    /// end when their rule recovers; they are dismissed instead.
-    pub async fn resolve_alert(&self, key: &str, now: i64) -> Result<AlertRow, PrismError> {
-        let _guard = self.alerts_lock.lock().await;
-        let row = self.open_alert(key).await?;
-        if !row.alert().is_host_event() {
-            return Err(resolve_conflict());
-        }
-        self.end_alert(key, ALERT_RESOLVED, now).await?;
-        self.alert_by_key(key).await?.ok_or(PrismError::NotFound)
-    }
-
-    async fn open_alert(&self, key: &str) -> Result<AlertRow, PrismError> {
-        let row = self.alert_by_key(key).await?.ok_or(PrismError::NotFound)?;
-        if !row.is_open() {
-            return Err(PrismError::Conflict(format!(
-                "{} has already ended.",
-                display_id(&row)
-            )));
-        }
-        Ok(row)
+        self.end_alert(key, ALERT_RESOLVED, now).await
     }
 
     // --- Requests --------------------------------------------------------
@@ -1259,20 +1235,12 @@ impl PrismClient {
         now: i64,
     ) -> Result<AlertActionView, PrismError> {
         let instruction = req.instruction.trim().to_string();
-        if ![ACTION_FIX, ACTION_DISMISS, ACTION_RESOLVE].contains(&req.kind.as_str()) {
-            return Err(PrismError::InvalidInput(format!(
-                "Unknown action {:?}: use fix, dismiss or resolve.",
-                req.kind
-            )));
+        if req.kind != ACTION_FIX {
+            return Err(PrismError::InvalidInput(unknown_action(&req.kind)));
         }
         if instruction.chars().count() > MAX_INSTRUCTION_CHARS {
             return Err(PrismError::InvalidInput(
                 "Please keep the instruction under 10,000 characters.".into(),
-            ));
-        }
-        if req.kind != ACTION_FIX && !instruction.is_empty() {
-            return Err(PrismError::InvalidInput(
-                "Only fix takes an instruction.".into(),
             ));
         }
         if req.request_id.len() > MAX_REQUEST_ID_BYTES {
@@ -1543,12 +1511,15 @@ fn display_id(row: &AlertRow) -> String {
     }
 }
 
-fn resolve_conflict() -> PrismError {
-    PrismError::Conflict(
-        "Only events that machines reported can be resolved. Cluster alerts end when \
-         their rule recovers; dismiss this episode instead."
+/// Why a request other than fix is refused: an older app's dismiss or
+/// resolve, still in the replica, ends with this.
+pub fn unknown_action(kind: &str) -> String {
+    match kind {
+        "dismiss" | "resolve" => "Alerts can't be dismissed or resolved: each one ends by \
+             itself when the problem it reports is gone."
             .into(),
-    )
+        other => format!("Unknown action {other:?}: the only one is fix."),
+    }
 }
 
 /// Whether a request still applies to the alert as it is now.
@@ -1561,12 +1532,7 @@ pub fn check_action(row: &AlertRow, kind: &str, instruction: &str) -> Result<(),
             )))
         }
         ACTION_FIX => Ok(()),
-        _ if !row.is_open() => Err(PrismError::Conflict(format!(
-            "{} has already ended.",
-            display_id(row)
-        ))),
-        ACTION_RESOLVE if !row.alert().is_host_event() => Err(resolve_conflict()),
-        _ => Ok(()),
+        other => Err(PrismError::InvalidInput(unknown_action(other))),
     }
 }
 
@@ -1638,8 +1604,33 @@ mod tests {
         assert_eq!(msg["type"], "alert.firing");
         assert_eq!(msg["alertId"], 42);
         assert!(msg.get("state").is_none());
-        let e = ended_notification(&alert, 42, ALERT_DISMISSED, 1_763_470_012, 1_763_470_100);
-        assert_eq!(e.title, "#42 NodeNotReady dismissed");
+        let e = ended_notification(&alert, 42, ALERT_GONE, 1_763_470_012, 1_763_470_100);
+        assert_eq!(e.title, "#42 NodeNotReady gone");
         assert_eq!(e.priority(), 1);
+    }
+
+    #[test]
+    fn an_older_apps_dismiss_or_resolve_ends_with_why() {
+        let row = AlertRow {
+            key: "k".into(),
+            fingerprint: "f".into(),
+            episode: "2026-11-21T10:00:00Z".into(),
+            payload: "{}".into(),
+            state: ALERT_OPEN.into(),
+            received_at: 1,
+            resolved_at: None,
+            missing_since: 0,
+            number: 7,
+            row_id: vec![1],
+        };
+        for kind in ["dismiss", "resolve"] {
+            match check_action(&row, kind, "") {
+                Err(PrismError::InvalidInput(msg)) => {
+                    assert!(msg.contains("ends by itself"), "{kind}: {msg}")
+                }
+                other => panic!("{kind}: {other:?}"),
+            }
+        }
+        assert!(check_action(&row, ACTION_FIX, "").is_ok());
     }
 }

@@ -1,6 +1,7 @@
 // The popout's Alerts tab: the open alerts and machine events grouped by
 // category, each with its severity, the agents it started (Open in T3), and
-// the quick actions: fix, dismiss, resolve, and a free-text instruction.
+// the quick actions: fix and a free-text instruction. An alert leaves the
+// list only when its condition clears.
 // Below them, "Do…" starts an agent for any task on the machine picked next
 // to it (or the cluster), and the model and reasoning pickers choose what
 // new agents run with.
@@ -274,16 +275,6 @@ private struct AlertRow: View {
                     Label("Fix", systemImage: "wrench.and.screwdriver")
                 }
                 .help("Start an agent that investigates #\(alert.id) and fixes it where appropriate")
-                Button { store.perform(.dismiss, on: alert) } label: {
-                    Label("Dismiss", systemImage: "xmark")
-                }
-                .help("Dismiss this episode of #\(alert.id)")
-                if alert.canResolve {
-                    Button { store.perform(.resolve, on: alert) } label: {
-                        Label("Resolve", systemImage: "checkmark")
-                    }
-                    .help("Resolve #\(alert.id) until its check fails again")
-                }
                 Spacer(minLength: 0)
             }
             .buttonStyle(PillStyle(width: nil, compact: true))
