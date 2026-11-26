@@ -83,6 +83,11 @@ final class PhoneCalls: ObservableObject {
     /// Pings the phone while linked: the round trip, and the phone's audio counters.
     private var pingTimer: Timer?
     private var pongs = 0
+    /// Pongs in a row that took longer than `slowRoundTrip`.
+    private var slowPongs = 0
+    /// A link this far behind holds seconds of audio in its buffers (an LE
+    /// link whose throughput collapsed): a new one starts empty.
+    private static let slowRoundTrip = 1500
     private var recentDelays: [Int] = []
 
     init(keyFile: String?) {
@@ -207,6 +212,7 @@ final class PhoneCalls: ObservableObject {
         audioLink.link = candidate
         if let old, old !== candidate { old.cancel("replaced by a newer link") }
         connected = true
+        slowPongs = 0
         clearTask?.cancel()
         startPings()
         log("calls: the phone connected over \(candidate.transport.bluetooth ? "Bluetooth" : "TCP") (\(candidate.peer))\(old != nil && old !== candidate ? ", replacing the earlier link" : "")")
@@ -252,6 +258,13 @@ final class PhoneCalls: ObservableObject {
     private func pong(_ json: [String: Any]) {
         guard let t = (json["t"] as? NSNumber)?.intValue else { return }
         let rtt = Self.milliseconds() - t
+        slowPongs = rtt > Self.slowRoundTrip ? slowPongs + 1 : 0
+        if slowPongs >= 2, let link {
+            slowPongs = 0
+            log("calls: the link fell \(rtt) ms behind; connecting again")
+            link.cancel("it fell \(rtt) ms behind")
+            return
+        }
         guard let audio, call?.audioOnMac == true else {
             if delay != nil { delay = nil }
             recentDelays = []

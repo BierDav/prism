@@ -46,9 +46,6 @@ package at.quickme.prism.shell
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -658,27 +655,6 @@ object CallBridge {
         }
     }
 
-    /**
-     * Asks for the LE link's shortest connection interval (11.25–15 ms rather
-     * than Android's default 30–50 ms for a channel), through a GATT client on
-     * the same link: a frame then waits less for the next connection event,
-     * which is most of the Bluetooth link's delay. The phone is the central,
-     * so it sets the interval; the channel doesn't depend on this connection.
-     */
-    private fun fastLink(device: BluetoothDevice): BluetoothGatt? = try {
-        device.connectGatt(shell, false, object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    val ok = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                    Log.i(TAG, "Bluetooth: asked for a short connection interval ($ok)")
-                }
-            }
-        }, BluetoothDevice.TRANSPORT_LE)
-    } catch (e: RuntimeException) {
-        Log.i(TAG, "Bluetooth: no GATT client for the connection interval: $e")
-        null
-    }
-
     /** The link `l` is gone: unless another comes up soon, the call's audio goes back to the phone. */
     private fun linkLost(why: String) {
         Log.i(TAG, why)
@@ -755,7 +731,6 @@ object CallBridge {
                 continue
             }
             val l = Link(socket.inputStream, socket.outputStream, socket, true, "Bluetooth")
-            var gatt: BluetoothGatt? = null
             // BluetoothSocket has no timeouts: close it if connecting or the handshake stalls.
             main.postDelayed({ if (!l.authenticated) l.close() }, 3L * CONNECT_TIMEOUT_MS)
             try {
@@ -763,17 +738,12 @@ object CallBridge {
                 handshake(l)
                 link.getAndSet(l)?.close()
                 Log.i(TAG, "connected to the Mac over Bluetooth")
-                gatt = fastLink(device)
                 main.post { sendState() }
                 read(l)
             } catch (e: IOException) {
                 if (!ended) Log.i(TAG, "Bluetooth link: ${e.message}")
             } finally {
                 l.close()
-                gatt?.let {
-                    it.disconnect()
-                    it.close()
-                }
                 if (link.compareAndSet(l, null)) main.post { linkLost("the Bluetooth link to the Mac broke") }
             }
             found.clear()
