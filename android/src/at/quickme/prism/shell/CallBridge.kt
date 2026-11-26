@@ -46,16 +46,21 @@ package at.quickme.prism.shell
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.net.TetheringManager
 import android.net.Uri
 import android.os.Handler
@@ -100,6 +105,13 @@ object CallBridge {
 
     /** Playback falls at most this far behind (200 ms of 20 ms frames). */
     private const val QUEUE_FRAMES = 10
+
+    /**
+     * Frames the queue for the call keeps at least, over a second: more than
+     * that is delay a burst left behind, which the queue sheds (Pipe).
+     */
+    private const val SLACK_FRAMES = 1
+    private const val WINDOW_FRAMES = 50
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val RETRY_MS = 2_000L
 
@@ -108,6 +120,9 @@ object CallBridge {
 
     /** AudioManager.CALL_REDIRECT_PSTN (hidden). */
     private const val CALL_REDIRECT_PSTN = 1
+
+    /** AudioAttributes.USAGE_CALL_ASSISTANT (system). */
+    private const val USAGE_CALL_ASSISTANT = 17
 
     /** The longest call it serves (the wake lock's limit). */
     private const val MAX_CALL_MS = 6 * 3600_000L
@@ -399,12 +414,22 @@ object CallBridge {
             // What AudioManager's getCallDownlinkExtractionAudioRecord and
             // getCallUplinkInjectionAudioTrack build, but on the shell's
             // context: without one the record names the system's package
-            // ("android"), which AudioFlinger refuses for uid 2000.
+            // ("android"), which AudioFlinger refuses for uid 2000. Their
+            // attributes are what route them to the call (telephony-rx and
+            // telephony-tx): without, the record takes the phone's
+            // microphone and the track plays on its speaker.
+            val downlink = AudioAttributes.Builder()
+            Hidden.call(downlink, "setInternalCapturePreset", MediaRecorder.AudioSource.VOICE_DOWNLINK)
             val recordBuilder = AudioRecord.Builder().setContext(shell).setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
+            Hidden.call(recordBuilder, "setAudioAttributes", downlink.build()) // a system API for a record
             Hidden.call(recordBuilder, "setCallRedirectionMode", CALL_REDIRECT_PSTN)
             val record = recordBuilder.build()
             val track = try {
-                val trackBuilder = AudioTrack.Builder().setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+                val uplink = AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                Hidden.call(uplink, "setSystemUsage", USAGE_CALL_ASSISTANT)
+                val trackBuilder = AudioTrack.Builder()
+                    .setAudioAttributes(uplink.build())
+                    .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
                 try {
                     Hidden.call(trackBuilder, "setContext", shell) // API 34
                 } catch (e: NoSuchMethodException) {
@@ -468,11 +493,12 @@ object CallBridge {
         private val recordedPeak = AtomicInteger()
         private val played = AtomicInteger()
         private val playedPeak = AtomicInteger()
+        private val trimmed = AtomicInteger()
 
-        /** Recorded, its peak, played, its peak (0..32768), frames queued for the call; and starts over. */
+        /** Recorded, its peak, played, its peak (0..32768), frames queued for the call, frames shed; and starts over. */
         fun stats(): IntArray = intArrayOf(
             recorded.getAndSet(0), recordedPeak.getAndSet(0),
-            played.getAndSet(0), playedPeak.getAndSet(0), incoming.size,
+            played.getAndSet(0), playedPeak.getAndSet(0), incoming.size, trimmed.getAndSet(0),
         )
 
         private fun peak(pcm: ByteArray, length: Int): Int {
@@ -506,12 +532,23 @@ object CallBridge {
                 }
             }, "call-downlink")
             threads += Thread({
+                // The fewest frames left waiting over the window: a jitter
+                // buffer that keeps SLACK_FRAMES for the link's unevenness
+                // and sheds what's left of a burst.
+                var least = Int.MAX_VALUE
+                var seen = 0
                 while (running) {
                     val frame = try {
                         incoming.poll(100, TimeUnit.MILLISECONDS)
                     } catch (e: InterruptedException) {
                         return@Thread
                     } ?: continue
+                    least = minOf(least, incoming.size)
+                    if (++seen == WINDOW_FRAMES) {
+                        repeat(least - SLACK_FRAMES) { if (incoming.poll() != null) trimmed.incrementAndGet() }
+                        least = Int.MAX_VALUE
+                        seen = 0
+                    }
                     if (track.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING) < 0) return@Thread
                     played.incrementAndGet()
                     playedPeak.accumulateAndGet(peak(frame, frame.size)) { a, b -> maxOf(a, b) }
@@ -621,6 +658,27 @@ object CallBridge {
         }
     }
 
+    /**
+     * Asks for the LE link's shortest connection interval (11.25–15 ms rather
+     * than Android's default 30–50 ms for a channel), through a GATT client on
+     * the same link: a frame then waits less for the next connection event,
+     * which is most of the Bluetooth link's delay. The phone is the central,
+     * so it sets the interval; the channel doesn't depend on this connection.
+     */
+    private fun fastLink(device: BluetoothDevice): BluetoothGatt? = try {
+        device.connectGatt(shell, false, object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    val ok = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    Log.i(TAG, "Bluetooth: asked for a short connection interval ($ok)")
+                }
+            }
+        }, BluetoothDevice.TRANSPORT_LE)
+    } catch (e: RuntimeException) {
+        Log.i(TAG, "Bluetooth: no GATT client for the connection interval: $e")
+        null
+    }
+
     /** The link `l` is gone: unless another comes up soon, the call's audio goes back to the phone. */
     private fun linkLost(why: String) {
         Log.i(TAG, why)
@@ -697,6 +755,7 @@ object CallBridge {
                 continue
             }
             val l = Link(socket.inputStream, socket.outputStream, socket, true, "Bluetooth")
+            var gatt: BluetoothGatt? = null
             // BluetoothSocket has no timeouts: close it if connecting or the handshake stalls.
             main.postDelayed({ if (!l.authenticated) l.close() }, 3L * CONNECT_TIMEOUT_MS)
             try {
@@ -704,12 +763,17 @@ object CallBridge {
                 handshake(l)
                 link.getAndSet(l)?.close()
                 Log.i(TAG, "connected to the Mac over Bluetooth")
+                gatt = fastLink(device)
                 main.post { sendState() }
                 read(l)
             } catch (e: IOException) {
                 if (!ended) Log.i(TAG, "Bluetooth link: ${e.message}")
             } finally {
                 l.close()
+                gatt?.let {
+                    it.disconnect()
+                    it.close()
+                }
                 if (link.compareAndSet(l, null)) main.post { linkLost("the Bluetooth link to the Mac broke") }
             }
             found.clear()
@@ -904,7 +968,7 @@ object CallBridge {
     private fun pong(l: Link, ping: JSONObject) {
         val reply = JSONObject().put("type", "pong").put("t", ping.opt("t"))
         pipe?.stats()?.let { s ->
-            reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4])
+            reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4]).put("trimmed", s[5])
                 .put("mode", audio.mode)
         }
         val bytes = reply.toString().toByteArray(Charsets.UTF_8)

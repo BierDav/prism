@@ -275,10 +275,10 @@ final class PhoneCalls: ObservableObject {
                 return String(format: "peak %.0f dBFS", 20 * log10(p / 32768))
             }
             log("calls: audio: delay about \(shown) ms (hear \(hear), speak \(speak), round trip \(rtt) ms);"
-                + " from the phone \(mac.received) frames (\(dB(mac.receivedPeak))), dropped \(mac.dropped);"
+                + " from the phone \(mac.received) frames (\(dB(mac.receivedPeak))), dropped \(mac.dropped), shed \(mac.trimmed);"
                 + " to the phone \(mac.sent) frames (\(dB(mac.sentPeak)));"
                 + " the phone recorded \(json["recorded"] ?? "?") (\(dB(json["recordedPeak"])))"
-                + " and played \(json["played"] ?? "?") (\(dB(json["playedPeak"]))), queued \(phoneQueued), mode \(json["mode"] ?? "?")")
+                + " and played \(json["played"] ?? "?") (\(dB(json["playedPeak"]))), queued \(phoneQueued), shed \(json["trimmed"] ?? "?"), mode \(json["mode"] ?? "?")")
         }
     }
 
@@ -1293,12 +1293,26 @@ final class CallAudio: @unchecked Sendable {
     private static let frameBytes = 640
     /// Playback falls at most this many frames behind (200 ms).
     private static let maxQueued = 10
+    /// The frames the player keeps at least over a second (the one playing
+    /// and one waiting): more is delay a burst left behind, which play()
+    /// sheds.
+    private static let slack = 2
+    private static let window = 50
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private var sink: AVAudioSinkNode?
+    /// The microphone's samples, off the audio thread.
+    private let micQueue = DispatchQueue(label: "at.quickme.prism.calls.mic")
+    private var micFormat: AVAudioFormat?
     private let send: (Data) -> Void
     private let lock = NSLock()
     private var queued = 0
+    // The jitter buffer: the fewest frames queued over the window, and frames still to shed.
+    private var least = Int.max
+    private var seen = 0
+    private var shed = 0
+    private var trimmed = 0
     private var pending = Data()
     private var converter: AVAudioConverter?
     private var running = false
@@ -1314,7 +1328,7 @@ final class CallAudio: @unchecked Sendable {
     private var sentPeak: Int16 = 0
 
     struct Stats {
-        var received: Int, receivedPeak: Int, dropped: Int, sent: Int, sentPeak: Int
+        var received: Int, receivedPeak: Int, dropped: Int, trimmed: Int, sent: Int, sentPeak: Int
         /// Frames waiting for the player now.
         var playQueued: Int
         /// The audio devices' own delay, ms.
@@ -1326,8 +1340,8 @@ final class CallAudio: @unchecked Sendable {
         let output = Int(engine.outputNode.presentationLatency * 1000)
         let input = Int(engine.inputNode.presentationLatency * 1000)
         return lock.withLock {
-            defer { received = 0; receivedPeak = 0; dropped = 0; sent = 0; sentPeak = 0 }
-            return Stats(received: received, receivedPeak: Int(receivedPeak), dropped: dropped, sent: sent,
+            defer { received = 0; receivedPeak = 0; dropped = 0; trimmed = 0; sent = 0; sentPeak = 0 }
+            return Stats(received: received, receivedPeak: Int(receivedPeak), dropped: dropped, trimmed: trimmed, sent: sent,
                          sentPeak: Int(sentPeak), playQueued: queued, outputLatency: output, inputLatency: input)
         }
     }
@@ -1337,8 +1351,10 @@ final class CallAudio: @unchecked Sendable {
     var outputStalled: Bool { lock.withLock { receivedTotal >= 25 && playedTotal == 0 } }
 
     /// The devices the engine plays to and records from, by name.
+    /// With voice processing one unit does both, and names the output; the
+    /// input is the system's default.
     var devices: (output: String, input: String) {
-        (Self.deviceName(engine.outputNode.audioUnit), Self.deviceName(engine.inputNode.audioUnit))
+        (Self.deviceName(engine.outputNode.audioUnit), Self.deviceName(Self.defaultInput()))
     }
 
     private static func deviceName(_ unit: AudioUnit?) -> String {
@@ -1346,6 +1362,19 @@ final class CallAudio: @unchecked Sendable {
         var device = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &size) == noErr else { return "?" }
+        return deviceName(device)
+    }
+
+    private static func defaultInput() -> AudioDeviceID {
+        var device = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        _ = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device)
+        return device
+    }
+
+    private static func deviceName(_ device: AudioDeviceID) -> String {
+        var size: UInt32
         var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var name: Unmanaged<CFString>?
         size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
@@ -1386,16 +1415,26 @@ final class CallAudio: @unchecked Sendable {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
         // With voice processing the input has one channel per microphone (9
-        // on a MacBook Pro); the processed voice is the first.
-        let micFormat = input.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: micFormat, to: wire) else {
-            throw NSError(domain: "PrismCalls", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter from \(micFormat)"])
+        // on a MacBook Pro), float, one buffer each; the processed voice is
+        // the first. A sink node gets each IO cycle (about 10 ms) as it
+        // comes: a tap hands over 100 ms at a time, all of it delay.
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard inputFormat.commonFormat == .pcmFormatFloat32, !inputFormat.isInterleaved,
+              let mono = AVAudioFormat(standardFormatWithSampleRate: inputFormat.sampleRate, channels: 1),
+              let converter = AVAudioConverter(from: mono, to: wire) else {
+            throw NSError(domain: "PrismCalls", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter from \(inputFormat)"])
         }
-        converter.channelMap = [0]
         self.converter = converter
-        input.installTap(onBus: 0, bufferSize: 960, format: micFormat) { [weak self] buffer, _ in
-            self?.captured(buffer)
+        micFormat = mono
+        let sink = AVAudioSinkNode { [weak self] _, frames, list in
+            guard let self, let data = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list)).first?.mData else { return noErr }
+            let samples = Data(bytes: data, count: Int(frames) * MemoryLayout<Float>.size)
+            self.micQueue.async { self.captured(samples) }
+            return noErr
         }
+        self.sink = sink
+        engine.attach(sink)
+        engine.connect(input, to: sink, format: inputFormat)
         engine.prepare()
         try engine.start()
         player.play()
@@ -1404,14 +1443,21 @@ final class CallAudio: @unchecked Sendable {
 
     func stop() {
         lock.withLock { running = false }
-        engine.inputNode.removeTap(onBus: 0)
         player.stop()
         engine.stop()
     }
 
-    /// The microphone, converted to the wire's format and cut into frames.
-    private func captured(_ buffer: AVAudioPCMBuffer) {
-        guard let converter else { return }
+    /// The microphone (its first channel, float), converted to the wire's
+    /// format and cut into frames. On micQueue.
+    private func captured(_ samples: Data) {
+        guard let converter, let micFormat else { return }
+        let count = samples.count / MemoryLayout<Float>.size
+        guard count > 0, let buffer = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: AVAudioFrameCount(count)),
+              let channel = buffer.floatChannelData?[0] else { return }
+        buffer.frameLength = AVAudioFrameCount(count)
+        samples.withUnsafeBytes { raw in
+            channel.update(from: raw.bindMemory(to: Float.self).baseAddress!, count: count)
+        }
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * wire.sampleRate / buffer.format.sampleRate) + 32
         guard let out = AVAudioPCMBuffer(pcmFormat: wire, frameCapacity: capacity) else { return }
         var given = false
@@ -1451,6 +1497,18 @@ final class CallAudio: @unchecked Sendable {
             receivedTotal += 1
             guard queued < Self.maxQueued else {
                 dropped += 1
+                return false
+            }
+            least = min(least, queued)
+            seen += 1
+            if seen == Self.window {
+                shed += max(0, least - Self.slack)
+                least = .max
+                seen = 0
+            }
+            if shed > 0 {
+                shed -= 1
+                trimmed += 1
                 return false
             }
             queued += 1
