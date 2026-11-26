@@ -223,3 +223,26 @@ from 150 ms on.
 Audio frames flow both ways while `audio` is `mac`; the Mac sends silence
 while it's muted. A side that falls more than 200 ms behind drops audio
 until it has caught up.
+
+### Acks
+
+Each side acks every 5th audio frame it receives on a link, both ways:
+
+```json
+{"type": "ack", "n": 250}
+```
+
+`n` counts the audio frames received on this link so far. The sender times
+each ack against when frame `n` went out; the least of those times over the
+last 5–10 s is the path's own delay. While an ack comes more than 100 ms
+later than that, frames wait in buffers on the way (an LE link that slowed
+down, a busy network), and the sender sends only every other frame until
+they drain: gaps, rather than a delay that only grows. A link whose round
+trip (ping) stays over 1.5 s anyway is closed by the Mac, and the phone
+connects again with empty buffers.
+
+### The end of a call
+
+When the call ends the phone sends `"state": "ended"` and leaves the link
+open: closing it could drop what's still on the way. The Mac closes the
+link once it has `ended`, and the phone exits then, or after 3 s.

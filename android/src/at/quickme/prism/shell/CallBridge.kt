@@ -65,6 +65,7 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
@@ -114,6 +115,9 @@ object CallBridge {
 
     /** A call on the Mac waits this long for another link before its audio goes back to the phone. */
     private const val LINK_GRACE_MS = 5_000L
+
+    /** After the call ends, how long the bridge waits for the Mac to have "ended" and close the link. */
+    private const val END_WAIT_MS = 3_000L
 
     /** AudioManager.CALL_REDIRECT_PSTN (hidden). */
     private const val CALL_REDIRECT_PSTN = 1
@@ -375,12 +379,19 @@ object CallBridge {
         stopAudio()
         stopScan()
         sendState()
-        sender.execute { link.getAndSet(null)?.close() }
-        main.postDelayed({
+        // "ended" may wait behind audio the link still holds, and closing
+        // drops what's unsent: the Mac closes the link once it has it
+        // (linkLost), or this gives up after a while.
+        main.postDelayed({ exit() }, END_WAIT_MS)
+    }
+
+    private fun exit() {
+        sender.execute {
+            link.getAndSet(null)?.close()
             println("call ended")
             System.out.flush()
             System.exit(0)
-        }, 500)
+        }
     }
 
     private fun sendState() {
@@ -601,6 +612,9 @@ object CallBridge {
         private var sealer: CallLink.Crypt? = null
         private var opener: CallLink.Crypt? = null
         private val encoder = CallLink.Adpcm.Encoder()
+        val pace = Pace()
+        /** Audio frames from the Mac on this link (the reader's). */
+        var audioReceived = 0
 
         /** After the handshake: every frame from here on is encrypted. */
         fun keys(toMac: ByteArray, toPhone: ByteArray) {
@@ -628,9 +642,11 @@ object CallBridge {
         /** 20 ms of the downlink: ADPCM over Bluetooth, PCM over TCP. */
         fun sendAudio(pcm: ByteArray, length: Int) {
             if (bluetooth && length == CallLink.FRAME_BYTES) {
-                // The encoder's state follows the frames sent: one writer, the downlink thread.
-                send(CallLink.ADPCM, encoder.encode(pcm))
-            } else {
+                // One writer, the downlink thread; encoded even when paced
+                // out, so the encoder follows the signal.
+                val adpcm = encoder.encode(pcm)
+                if (pace.shouldSend()) send(CallLink.ADPCM, adpcm)
+            } else if (pace.shouldSend()) {
                 send(CallLink.AUDIO, pcm, 0, length)
             }
         }
@@ -658,6 +674,10 @@ object CallBridge {
     /** The link `l` is gone: unless another comes up soon, the call's audio goes back to the phone. */
     private fun linkLost(why: String) {
         Log.i(TAG, why)
+        if (ended) {
+            exit()
+            return
+        }
         main.postDelayed({ if (link.get() == null) lost("no link to the Mac") }, LINK_GRACE_MS)
     }
 
@@ -936,7 +956,7 @@ object CallBridge {
 
     /** The Mac's ping, echoed with the audio's counters since the last (docs/calls.md). */
     private fun pong(l: Link, ping: JSONObject) {
-        val reply = JSONObject().put("type", "pong").put("t", ping.opt("t"))
+        val reply = JSONObject().put("type", "pong").put("t", ping.opt("t")).put("skipped", l.pace.takeSkipped())
         pipe?.stats()?.let { s ->
             reply.put("recorded", s[0]).put("recordedPeak", s[1]).put("played", s[2]).put("playedPeak", s[3]).put("queued", s[4]).put("trimmed", s[5])
                 .put("mode", audio.mode)
@@ -945,12 +965,22 @@ object CallBridge {
         sender.execute { l.send(CallLink.MESSAGE, bytes) }
     }
 
+    /** An audio frame from the Mac; every 5th gets an ack (Pace). */
+    private fun heard(l: Link, pcm: ByteArray) {
+        val n = ++l.audioReceived
+        if (n % Pace.ACK_EVERY == 0) {
+            val ack = JSONObject().put("type", "ack").put("n", n).toString().toByteArray(Charsets.UTF_8)
+            sender.execute { l.send(CallLink.MESSAGE, ack) }
+        }
+        pipe?.offer(pcm)
+    }
+
     private fun read(l: Link) {
         while (!ended) {
             val frame = l.read()
             when (frame.type) {
-                CallLink.AUDIO -> pipe?.offer(frame.payload)
-                CallLink.ADPCM -> pipe?.offer(CallLink.Adpcm.decode(frame.payload))
+                CallLink.AUDIO -> heard(l, frame.payload)
+                CallLink.ADPCM -> heard(l, CallLink.Adpcm.decode(frame.payload))
                 CallLink.MESSAGE -> {
                     val message = try {
                         JSONObject(String(frame.payload, Charsets.UTF_8))
@@ -959,10 +989,66 @@ object CallBridge {
                         continue
                     }
                     // Answered here, not on the main thread: the Mac times the round trip.
-                    if (message.optString("type") == "ping") pong(l, message) else main.post { command(message) }
+                    when (message.optString("type")) {
+                        "ping" -> pong(l, message)
+                        "ack" -> l.pace.acked(message.optInt("n"))
+                        else -> main.post { command(message) }
+                    }
                 }
                 else -> Log.w(TAG, "frame type ${frame.type} after the handshake")
             }
+        }
+    }
+
+    /**
+     * Paces a link's audio by its delay (docs/calls.md, "Acks"): the
+     * receiver acks every 5th audio frame with the count it has, and the
+     * sender times each ack against when that frame went out. The least of
+     * those times over the last 5–10 s is the path's own delay; more than
+     * BEHIND_MS over it means frames wait in buffers on the way, and the
+     * sender then sends every other frame until it drains.
+     */
+    class Pace {
+        private val sentAt = LongArray(256)
+        private var sent = 0
+        private var least = Long.MAX_VALUE
+        private var leastBefore = Long.MAX_VALUE
+        private var since = 0L
+        private var over = 0L
+        private var skip = false
+        private var skipped = 0
+
+        @Synchronized fun shouldSend(): Boolean {
+            if (over > BEHIND_MS) {
+                skip = !skip
+                if (skip) {
+                    skipped++
+                    return false
+                }
+            }
+            sentAt[sent and 255] = SystemClock.uptimeMillis()
+            sent++
+            return true
+        }
+
+        @Synchronized fun acked(n: Int) {
+            if (n <= 0 || n > sent || sent - n >= 256) return
+            val now = SystemClock.uptimeMillis()
+            val age = now - sentAt[(n - 1) and 255]
+            if (now - since > 5_000) {
+                leastBefore = least
+                least = Long.MAX_VALUE
+                since = now
+            }
+            least = minOf(least, age)
+            over = age - minOf(least, leastBefore)
+        }
+
+        @Synchronized fun takeSkipped(): Int = skipped.also { skipped = 0 }
+
+        companion object {
+            const val ACK_EVERY = 5
+            const val BEHIND_MS = 100L
         }
     }
 }
