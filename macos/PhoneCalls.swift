@@ -182,11 +182,10 @@ final class PhoneCalls: ObservableObject {
                 self.message(data)
             }
         }
-        candidate.onAudio = { [weak self, weak candidate] frame in
-            guard let self, let candidate else { return }
-            Task { @MainActor in
-                if self.link === candidate { self.audio?.play(frame) }
-            }
+        let audioLink = self.audioLink
+        candidate.onAudio = { [weak candidate] frame in
+            guard let candidate, audioLink.link === candidate else { return }
+            audioLink.audio?.play(frame)
         }
         candidate.onClose = { [weak self, weak candidate] reason in
             Task { @MainActor in
@@ -349,7 +348,17 @@ final class PhoneCalls: ObservableObject {
             audioLink.link?.sendAudio(frame)
         }
         audio.muted = muted
+        audio.onRestart = { [weak self] what, withoutVoiceProcessing in
+            Task { @MainActor in
+                guard let self else { return }
+                self.log("calls: audio: \(what)")
+                if withoutVoiceProcessing, self.audio === audio {
+                    self.call?.error = "Echo cancellation stopped working on this Mac, so the caller may hear themselves. Headphones help."
+                }
+            }
+        }
         self.audio = audio
+        audioLink.audio = audio
         Task { [weak self] in
             let allowed = await CallAudio.microphoneAllowed()
             guard let self, self.audio === audio else { return }
@@ -369,6 +378,7 @@ final class PhoneCalls: ObservableObject {
                 self.log("calls: audio failed: \(error.localizedDescription)")
                 self.call?.error = "The Mac's audio failed: \(error.localizedDescription)"
                 self.audio = nil
+                self.audioLink.audio = nil
                 self.moveToPhone()
             }
         }
@@ -377,6 +387,7 @@ final class PhoneCalls: ObservableObject {
     private func stopAudio() {
         guard let audio else { return }
         self.audio = nil
+        audioLink.audio = nil
         delay = nil
         recentDelays = []
         audio.stop()
@@ -514,10 +525,18 @@ final class PhoneCalls: ObservableObject {
 final class AudioLink: @unchecked Sendable {
     private let lock = NSLock()
     private weak var _link: CallConnection?
+    private var _audio: CallAudio?
 
     var link: CallConnection? {
         get { lock.withLock { _link } }
         set { lock.withLock { _link = newValue } }
+    }
+
+    /// The call's audio while it's on this Mac: frames from the phone go
+    /// straight to it from the link's queue, not through the main thread.
+    var audio: CallAudio? {
+        get { lock.withLock { _audio } }
+        set { lock.withLock { _audio = newValue } }
     }
 }
 
@@ -1299,9 +1318,24 @@ final class CallAudio: @unchecked Sendable {
     private static let slack = 2
     private static let window = 50
 
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
-    private var sink: AVAudioSinkNode?
+    // The engine and its player, under the lock: the watchdog builds new
+    // ones when macOS's audio stalls.
+    private var engine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
+    /// Counts the engines, so an old player's completions leave the count alone.
+    private var generation = 0
+    private var voiceProcessing = true
+    /// When the microphone last delivered, under the lock.
+    private var lastInput = CACurrentMediaTime()
+    private var restarts = 0
+    private var watchdog: DispatchSourceTimer?
+    private var outputLatency = 0
+    private var inputLatency = 0
+    /// The microphone stopped and the audio started over: what happened,
+    /// and whether it now runs without echo cancellation. On micQueue.
+    var onRestart: ((_ what: String, _ withoutVoiceProcessing: Bool) -> Void)?
+    /// A stall gives up after this many new engines.
+    private static let maxRestarts = 6
     /// The microphone's samples, off the audio thread.
     private let micQueue = DispatchQueue(label: "at.quickme.prism.calls.mic")
     private var micFormat: AVAudioFormat?
@@ -1336,13 +1370,13 @@ final class CallAudio: @unchecked Sendable {
     }
 
     /// The counters since the last call, and starts them over.
+    /// Doesn't touch the engine: its properties wait on coreaudiod, which
+    /// can hang.
     func stats() -> Stats {
-        let output = Int(engine.outputNode.presentationLatency * 1000)
-        let input = Int(engine.inputNode.presentationLatency * 1000)
-        return lock.withLock {
+        lock.withLock {
             defer { received = 0; receivedPeak = 0; dropped = 0; trimmed = 0; sent = 0; sentPeak = 0 }
             return Stats(received: received, receivedPeak: Int(receivedPeak), dropped: dropped, trimmed: trimmed, sent: sent,
-                         sentPeak: Int(sentPeak), playQueued: queued, outputLatency: output, inputLatency: input)
+                         sentPeak: Int(sentPeak), playQueued: queued, outputLatency: outputLatency, inputLatency: inputLatency)
         }
     }
 
@@ -1354,7 +1388,7 @@ final class CallAudio: @unchecked Sendable {
     /// With voice processing one unit does both, and names the output; the
     /// input is the system's default.
     var devices: (output: String, input: String) {
-        (Self.deviceName(engine.outputNode.audioUnit), Self.deviceName(Self.defaultInput()))
+        (Self.deviceName(lock.withLock { engine }.outputNode.audioUnit), Self.deviceName(Self.defaultInput()))
     }
 
     private static func deviceName(_ unit: AudioUnit?) -> String {
@@ -1406,12 +1440,27 @@ final class CallAudio: @unchecked Sendable {
     }
 
     func start() throws {
+        try micQueue.sync { try build(voiceProcessing: true) }
+        let timer = DispatchSource.makeTimerSource(queue: micQueue)
+        timer.schedule(deadline: .now() + 1, repeating: .milliseconds(250))
+        timer.setEventHandler { [weak self] in self?.check() }
+        timer.resume()
+        watchdog = timer
+    }
+
+    /// A new engine: the player into the mixer, the microphone into a sink.
+    /// On micQueue.
+    private func build(voiceProcessing: Bool) throws {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
         // The output and the mixer must exist before voice processing goes
         // on: made after, the output fails to initialize (-10875).
         _ = engine.outputNode
         _ = engine.mainMixerNode
         let input = engine.inputNode
-        try input.setVoiceProcessingEnabled(true)
+        if voiceProcessing {
+            try input.setVoiceProcessingEnabled(true)
+        }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
         // With voice processing the input has one channel per microphone (9
@@ -1424,25 +1473,69 @@ final class CallAudio: @unchecked Sendable {
               let converter = AVAudioConverter(from: mono, to: wire) else {
             throw NSError(domain: "PrismCalls", code: 1, userInfo: [NSLocalizedDescriptionKey: "no converter from \(inputFormat)"])
         }
-        self.converter = converter
-        micFormat = mono
         let sink = AVAudioSinkNode { [weak self] _, frames, list in
             guard let self, let data = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list)).first?.mData else { return noErr }
             let samples = Data(bytes: data, count: Int(frames) * MemoryLayout<Float>.size)
             self.micQueue.async { self.captured(samples) }
             return noErr
         }
-        self.sink = sink
         engine.attach(sink)
         engine.connect(input, to: sink, format: inputFormat)
         engine.prepare()
         try engine.start()
         player.play()
-        lock.withLock { running = true }
+        let output = Int(engine.outputNode.presentationLatency * 1000)
+        let latency = Int(input.presentationLatency * 1000)
+        self.converter = converter
+        micFormat = mono
+        lock.withLock {
+            pending = Data()
+            self.engine = engine
+            self.player = player
+            self.voiceProcessing = voiceProcessing
+            generation += 1
+            queued = 0
+            lastInput = CACurrentMediaTime()
+            outputLatency = output
+            inputLatency = latency
+            running = true
+        }
+    }
+
+    /// The watchdog, on micQueue: macOS's voice processing sometimes starts
+    /// without running, or stops (coreaudiod's "StartIO: Start failed"),
+    /// and then neither the microphone nor the speakers run. A new engine
+    /// usually helps; the third goes without voice processing, which runs
+    /// where it doesn't.
+    private func check() {
+        let (stalled, engine, player) = lock.withLock { (running && CACurrentMediaTime() - lastInput > 0.6, self.engine, self.player) }
+        guard stalled, restarts < Self.maxRestarts else { return }
+        restarts += 1
+        let withVoiceProcessing = restarts < 3
+        lock.withLock { running = false }
+        player.stop()
+        engine.stop()
+        do {
+            try build(voiceProcessing: withVoiceProcessing)
+            onRestart?("the microphone stopped; started the audio over"
+                       + (withVoiceProcessing ? "" : " without echo cancellation"), !withVoiceProcessing)
+        } catch {
+            // Tries again at the next stall check.
+            lock.withLock {
+                running = true
+                lastInput = CACurrentMediaTime()
+            }
+            onRestart?("the microphone stopped, and the audio didn't start over: \(error.localizedDescription)", !withVoiceProcessing)
+        }
     }
 
     func stop() {
-        lock.withLock { running = false }
+        watchdog?.cancel()
+        watchdog = nil
+        let (engine, player) = lock.withLock {
+            running = false
+            return (self.engine, self.player)
+        }
         player.stop()
         engine.stop()
     }
@@ -1451,6 +1544,7 @@ final class CallAudio: @unchecked Sendable {
     /// format and cut into frames. On micQueue.
     private func captured(_ samples: Data) {
         guard let converter, let micFormat else { return }
+        lock.withLock { lastInput = CACurrentMediaTime() }
         let count = samples.count / MemoryLayout<Float>.size
         guard count > 0, let buffer = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: AVAudioFrameCount(count)),
               let channel = buffer.floatChannelData?[0] else { return }
@@ -1491,13 +1585,13 @@ final class CallAudio: @unchecked Sendable {
 
     /// A frame from the phone, scheduled on the player; the oldest go when it falls behind.
     func play(_ frame: Data) {
-        let ok: Bool = lock.withLock {
-            guard running else { return false }
+        let target: (AVAudioPlayerNode, Int)? = lock.withLock {
+            guard running else { return nil }
             received += 1
             receivedTotal += 1
             guard queued < Self.maxQueued else {
                 dropped += 1
-                return false
+                return nil
             }
             least = min(least, queued)
             seen += 1
@@ -1509,12 +1603,12 @@ final class CallAudio: @unchecked Sendable {
             if shed > 0 {
                 shed -= 1
                 trimmed += 1
-                return false
+                return nil
             }
             queued += 1
-            return true
+            return (player, generation)
         }
-        guard ok else { return }
+        guard let (player, generation) = target else { return }
         let count = frame.count / 2
         guard let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(count)),
               let channel = buffer.floatChannelData?[0] else { return }
@@ -1532,6 +1626,7 @@ final class CallAudio: @unchecked Sendable {
         player.scheduleBuffer(buffer) { [weak self] in
             guard let self else { return }
             self.lock.withLock {
+                guard self.generation == generation else { return }
                 self.queued -= 1
                 self.playedTotal += 1
             }
