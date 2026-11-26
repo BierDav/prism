@@ -164,7 +164,51 @@ enum PrismGlyph {
 }
 
 struct PopoutView: View {
-    enum Tab: String { case alerts, machines, profiles, approvals = "approval", wifi }
+    enum Tab: String, CaseIterable, Identifiable {
+        case alerts, machines, profiles, approvals = "approval", wifi
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .alerts: "Alerts"
+            case .machines: "Machines"
+            case .profiles: "Profiles"
+            case .approvals: "Approvals"
+            case .wifi: "Wi-Fi"
+            }
+        }
+
+        func symbol(selected: Bool) -> String {
+            switch self {
+            case .alerts: selected ? "bell.fill" : "bell"
+            case .machines: "server.rack"
+            case .profiles: selected ? "square.stack.3d.up.fill" : "square.stack.3d.up"
+            case .approvals: selected ? "checkmark.shield.fill" : "checkmark.shield"
+            case .wifi: "wifi"
+            }
+        }
+
+        var shortcutKey: KeyEquivalent {
+            switch self {
+            case .alerts: "1"
+            case .machines: "2"
+            case .profiles: "3"
+            case .approvals: "4"
+            case .wifi: "5"
+            }
+        }
+
+        var shortcutNumber: Int {
+            switch self {
+            case .alerts: 1
+            case .machines: 2
+            case .profiles: 3
+            case .approvals: 4
+            case .wifi: 5
+            }
+        }
+    }
 
     @ObservedObject var approver: Approver
     @ObservedObject var store: PrismStore
@@ -175,7 +219,9 @@ struct PopoutView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-                .padding(14)
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
             ForEach(approver.problems, id: \.self) { problem in
                 Label(problem, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -186,19 +232,9 @@ struct PopoutView: View {
             if hotspot.keyFile != nil {
                 HotspotBanner(hotspot: hotspot, wifi: hotspot.wifi, showWifiProblem: tab != .wifi)
             }
-            Picker("", selection: $tab) {
-                Text(store.alerts.isEmpty ? "Alerts" : "Alerts (\(store.alerts.count))").tag(Tab.alerts)
-                Text("Machines").tag(Tab.machines)
-                Text("Profiles").tag(Tab.profiles)
-                Text(approver.pending.isEmpty ? "Approvals" : "Approvals (\(approver.pending.count))").tag(Tab.approvals)
-                // An icon: five labels don't fit the popout's width.
-                Image(systemName: "wifi").accessibilityLabel("Wi-Fi").help("Wi-Fi").tag(Tab.wifi)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 14)
-            .padding(.bottom, 10)
+            PopoutTabBar(selection: $tab, approver: approver, store: store, hotspot: hotspot, wifi: hotspot.wifi)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             Divider()
             switch tab {
             case .alerts: AlertsView(store: store)
@@ -214,11 +250,12 @@ struct PopoutView: View {
 
     private var tabShortcuts: some View {
         Group {
-            Button("") { tab = .alerts }.keyboardShortcut("1", modifiers: .command)
-            Button("") { tab = .machines }.keyboardShortcut("2", modifiers: .command)
-            Button("") { tab = .profiles }.keyboardShortcut("3", modifiers: .command)
-            Button("") { tab = .approvals }.keyboardShortcut("4", modifiers: .command)
-            Button("") { tab = .wifi }.keyboardShortcut("5", modifiers: .command)
+            ForEach(Tab.allCases) { item in
+                Button("") {
+                    withAnimation(.snappy(duration: 0.2)) { tab = item }
+                }
+                .keyboardShortcut(item.shortcutKey, modifiers: .command)
+            }
         }
         .frame(width: 0, height: 0)
         .opacity(0)
@@ -293,6 +330,187 @@ struct PopoutView: View {
         if open == 0 { return "\(approver.config.host) · all clear" }
         let critical = store.openCritical
         return "\(approver.config.host) · \(open) open" + (critical > 0 ? ", \(critical) critical" : "")
+    }
+}
+
+/// Uniform 5-destination navigation bar: every section uses the same
+/// icon-over-label layout with equal flexible widths so counts and labels can
+/// never push the popout wider than its 400pt frame.
+private struct PopoutTabBar: View {
+    @Binding var selection: PopoutView.Tab
+    @ObservedObject var approver: Approver
+    @ObservedObject var store: PrismStore
+    @ObservedObject var hotspot: Hotspot
+    @ObservedObject var wifi: WiFiSwitch
+    @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var activePill
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(PopoutView.Tab.allCases) { item in
+                PopoutTabItem(
+                    item: item,
+                    selected: selection == item,
+                    badge: badge(for: item),
+                    accessibilityLabel: accessibilityLabel(for: item),
+                    activePill: activePill
+                ) {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        selection = item
+                    }
+                }
+            }
+        }
+        .padding(3)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), lineWidth: 0.5)
+                }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func badge(for item: PopoutView.Tab) -> PopoutTabItem.Badge? {
+        switch item {
+        case .alerts:
+            let count = store.alerts.count
+            guard count > 0 else { return nil }
+            let tint: Color = store.openCritical > 0
+                ? .red
+                : store.alerts.contains { $0.level != .info } ? .orange : .blue
+            return .count(count, tint)
+        case .approvals:
+            let count = approver.pending.count
+            return count > 0 ? .count(count, .orange) : nil
+        case .wifi:
+            if hotspot.problem != nil || wifi.problem != nil || (wifi.joinError != nil && wifi.joining) {
+                return .dot(.orange)
+            }
+            if hotspot.advertising != nil || wifi.joining || wifi.state != .away {
+                return .dot(.accentColor)
+            }
+            return nil
+        case .machines, .profiles:
+            return nil
+        }
+    }
+
+    private func accessibilityLabel(for item: PopoutView.Tab) -> String {
+        switch item {
+        case .alerts where !store.alerts.isEmpty:
+            let critical = store.openCritical
+            let detail = critical > 0 ? "\(store.alerts.count) open, \(critical) critical" : "\(store.alerts.count) open"
+            return "\(item.title), \(detail)"
+        case .approvals where !approver.pending.isEmpty:
+            return "\(item.title), \(approver.pending.count) pending"
+        case .wifi where hotspot.advertising != nil || wifi.joining || wifi.state != .away:
+            return "\(item.title), hotspot active"
+        case .wifi where hotspot.problem != nil || wifi.problem != nil:
+            return "\(item.title), needs attention"
+        default:
+            return item.title
+        }
+    }
+}
+
+private struct PopoutTabItem: View {
+    enum Badge {
+        case count(Int, Color)
+        case dot(Color)
+    }
+
+    let item: PopoutView.Tab
+    let selected: Bool
+    let badge: Badge?
+    let accessibilityLabel: String
+    let activePill: Namespace.ID
+    let action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                ZStack {
+                    Image(systemName: item.symbol(selected: selected))
+                        .font(.system(size: 14, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(iconStyle)
+                }
+                .frame(width: 28, height: 18)
+                .overlay(alignment: .topTrailing) {
+                    badgeView
+                }
+                Text(item.title)
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
+                    .foregroundStyle(labelStyle)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 6)
+            .padding(.bottom, 5)
+            .padding(.horizontal, 2)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                        .fill(colorScheme == .dark ? Color.white.opacity(0.14) : Color(nsColor: .controlBackgroundColor))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                                .strokeBorder(
+                                    colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06),
+                                    lineWidth: 0.5
+                                )
+                        }
+                        .shadow(color: colorScheme == .dark ? .clear : Color.black.opacity(0.07), radius: 1.5, y: 0.5)
+                        .matchedGeometryEffect(id: "activeTab", in: activePill)
+                } else if hovering {
+                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7.5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help("\(item.title) (⌘\(item.shortcutNumber))")
+    }
+
+    private var iconStyle: AnyShapeStyle {
+        if selected { return AnyShapeStyle(.tint) }
+        return AnyShapeStyle(hovering ? Color.primary.opacity(0.85) : Color.secondary)
+    }
+
+    private var labelStyle: AnyShapeStyle {
+        if selected { return AnyShapeStyle(.primary) }
+        return AnyShapeStyle(hovering ? Color.primary.opacity(0.85) : Color.secondary)
+    }
+
+    @ViewBuilder
+    private var badgeView: some View {
+        switch badge {
+        case .count(let n, let tint):
+            Text(n > 99 ? "99+" : "\(n)")
+                .font(.system(size: 9, weight: .bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 3.5)
+                .frame(minWidth: 14, minHeight: 14)
+                .background(Capsule().fill(tint))
+                .offset(x: 6, y: -3)
+                .accessibilityHidden(true)
+        case .dot(let tint):
+            Circle()
+                .fill(tint)
+                .frame(width: 6, height: 6)
+                .offset(x: 2, y: -2)
+                .accessibilityHidden(true)
+        case nil:
+            EmptyView()
+        }
     }
 }
 
