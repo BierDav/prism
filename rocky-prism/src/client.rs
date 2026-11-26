@@ -282,6 +282,19 @@ impl PrismClient {
         })
     }
 
+    /// Composes `coordination` into the open database: how a trusted device
+    /// reaches the coordinator that makes its seals final (`crate::seal`).
+    /// For a replica opened without one, e.g. after its open lost a seal race.
+    pub async fn coordinate(&self, coordination: rocky_sdk::CoordinatorSlot) -> Result<(), PrismError> {
+        match coordination {
+            rocky_sdk::CoordinatorSlot::Client(client) => self.db.coordinate(Some(client)).await,
+            rocky_sdk::CoordinatorSlot::Connector(connector) => {
+                self.db.connect_coordinator(Some(connector)).await
+            }
+        }
+        .map_err(storage_err)
+    }
+
     /// This device's Rocky node key, hex.
     pub async fn node(&self) -> Result<String, PrismError> {
         Ok(self.own_node().await?.to_hex())

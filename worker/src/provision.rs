@@ -115,7 +115,33 @@ pub async fn open(
     network: Network,
     coordination: Option<rocky_sdk::CoordinatorSlot>,
 ) -> Result<PrismClient, Failure> {
-    open_from(data_dir, network, coordination, auth::secret).await
+    let first = open_from(data_dir.clone(), network.clone(), coordination.clone(), auth::secret).await;
+    let (Err(err), Some(slot)) = (&first, coordination) else {
+        return first;
+    };
+    if !lost_seal_race(&err.to_string()) {
+        return first;
+    }
+    // Opening the same replica again would lose the same way: the seal that
+    // won isn't here yet, and peers sync only once the open is done. Without
+    // the coordinator the newer schema waits (Rocky skips its publication),
+    // so the open finishes and syncs; then the coordinator joins, and a seal
+    // that loses from now on is only skipped. A persisted chain that is
+    // really broken fails this open too, and the worker exits as before.
+    eprintln!("prism-worker: the open lost a seal race; opening without the coordinator first: {err}");
+    let client = open_from(data_dir, network, None, auth::secret).await?;
+    client.coordinate(slot).await?;
+    Ok(client)
+}
+
+/// Whether an open failed only because another node's seal got to the tip
+/// first. Rocky publishes a newer schema as a seal while it opens the
+/// replica (rocky-sdk `publish_schema_at_open`) and fails the open when
+/// another seal ends the tip first, or when its chain link was just
+/// settled away.
+fn lost_seal_race(message: &str) -> bool {
+    message.contains("another seal ended the tip's coordinated log first")
+        || message.contains("a tip statement's predecessor is missing or does not match")
 }
 
 async fn open_from(
@@ -153,6 +179,21 @@ async fn open_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_lost_seal_race_is_retried() {
+        // The two errors the v2 rollout's workers exited with (2026-11-26).
+        assert!(lost_seal_race(
+            "storage error: application rejected request: sealed: another seal ended the tip's coordinated log first"
+        ));
+        assert!(lost_seal_race(
+            "storage error: replication data rejected: a tip statement's predecessor is missing or does not match"
+        ));
+        assert!(!lost_seal_race("storage error: the database is locked"));
+        assert!(!lost_seal_race(
+            "PRISM_WORKER_PEERS needs PRISM_WORKER_PROVISIONING: a database the worker created itself syncs with no one"
+        ));
+    }
     use std::collections::BTreeMap;
 
     fn env(vars: BTreeMap<&'static str, String>) -> impl Fn(&str) -> Option<String> {
