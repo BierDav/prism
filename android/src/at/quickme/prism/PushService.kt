@@ -51,6 +51,7 @@ class PushService : Service() {
     private val shellChanged = Runnable {
         BackgroundPolicy.applyAsync(this)
         Hotspot.apply(this)
+        Calls.watch(this)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -121,6 +122,8 @@ class PushService : Service() {
             at.quickme.prism.shell.Shell.listen(shellChanged)
             BackgroundPolicy.applyAsync(this)
             Hotspot.apply(this)
+            // Calls on the Mac (docs/calls.md).
+            Calls.watch(this)
         }
         return START_STICKY
     }

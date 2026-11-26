@@ -47,4 +47,6 @@
         android:title="@string/matrix_homeserver" android:description="@string/matrix_homeserver_about" />
     <restriction android:key="matrix_access_token" android:restrictionType="string"
         android:title="@string/matrix_access_token" android:description="@string/matrix_access_token_about" />
+    <restriction android:key="call_mac" android:restrictionType="string"
+        android:title="@string/call_mac" android:description="@string/call_mac_about" />
 </restrictions>

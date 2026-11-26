@@ -1,10 +1,13 @@
 // The app shell: an agent-only (LSUIElement) SwiftUI app whose one scene is
 // the menu-bar extra, Prism's glyph with the number of open critical alerts.
-// Its popout has four tabs: Alerts (AlertsView.swift, from the Prism
-// server), Machines (MachinesView.swift) and Approvals: what waits for the
-// owner, the last decisions and this Mac's public key.
+// Its popout has five tabs: Alerts (AlertsView.swift, from the Prism
+// server), Machines (MachinesView.swift), Profiles (ProfilesView.swift),
+// Approvals: what waits for the owner, the last decisions and this Mac's
+// public key, and Wi-Fi (WiFiView.swift): the reliable networks and the
+// phone's hotspot.
 
 import AppKit
+import Combine
 import PrismShared
 import SwiftUI
 import UserNotifications
@@ -14,7 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor static var approver: Approver!
     @MainActor static var store: PrismStore!
     @MainActor static var hotspot: Hotspot!
+    @MainActor static var calls: PhoneCalls!
     private var panel: ApprovalPanel?
+    private var callPanel: CallPanel?
+    private var hotspotWatch: AnyCancellable?
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -26,6 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         approver.start()
         Self.store.start()
         Self.hotspot.start()
+        let calls = Self.calls!
+        let callPanel = CallPanel(calls: calls)
+        calls.onChange = { [weak callPanel] in callPanel?.update() }
+        self.callPanel = callPanel
+        // The call's Bluetooth advertisement steps aside for the hotspot's.
+        let hotspot = Self.hotspot!
+        calls.hotspotAdvertising = { hotspot.advertising != nil }
+        hotspotWatch = hotspot.$advertising.sink { _ in
+            // @Published tells before the change: read it after.
+            DispatchQueue.main.async { calls.hotspotChanged() }
+        }
+        calls.start()
     }
 
     /// A notification about an agent opens its thread in T3 Code.
@@ -122,7 +140,7 @@ enum PrismGlyph {
 }
 
 struct PopoutView: View {
-    enum Tab: String { case alerts, machines, profiles, approvals = "approval" }
+    enum Tab: String { case alerts, machines, profiles, approvals = "approval", wifi }
 
     @ObservedObject var approver: Approver
     @ObservedObject var store: PrismStore
@@ -150,6 +168,8 @@ struct PopoutView: View {
                 Text("Machines").tag(Tab.machines)
                 Text("Profiles").tag(Tab.profiles)
                 Text(approver.pending.isEmpty ? "Approvals" : "Approvals (\(approver.pending.count))").tag(Tab.approvals)
+                // An icon: five labels don't fit the popout's width.
+                Image(systemName: "wifi").accessibilityLabel("Wi-Fi").help("Wi-Fi").tag(Tab.wifi)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -162,6 +182,7 @@ struct PopoutView: View {
             case .machines: MachinesView(store: store)
             case .profiles: ProfilesView(store: store)
             case .approvals: ApprovalTab(approver: approver)
+            case .wifi: WiFiView(wifi: hotspot.wifi, networks: hotspot.wifi.networks, hotspotConfigured: hotspot.keyFile != nil)
             }
         }
         .frame(width: 400)
@@ -205,8 +226,9 @@ struct PopoutView: View {
 }
 
 /// "Ask the phone for its hotspot" (Hotspot.swift), or what it is doing:
-/// asking while the Mac is offline or after the request, on the hotspot and
-/// leaving it for a proven Wi-Fi (WiFiSwitch.swift), or why it can't.
+/// asking while the Mac is offline or after the request, joining the hotspot,
+/// on it and leaving it for a reliable Wi-Fi (WiFiSwitch.swift), or why it
+/// can't.
 private struct HotspotRow: View {
     @ObservedObject var hotspot: Hotspot
     @ObservedObject var wifi: WiFiSwitch
@@ -214,6 +236,12 @@ private struct HotspotRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             row
+            if let error = wifi.joinError, wifi.joining {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
             if let problem = wifi.problem {
                 Text(problem)
                     .font(.caption)
@@ -227,19 +255,27 @@ private struct HotspotRow: View {
         HStack(spacing: 6) {
             switch hotspot.advertising {
             case .release(let ssid):
-                status("On the phone's hotspot · switching to \(ssid)…")
+                if case .switching = wifi.state {
+                    status("On the phone's hotspot · switching to \(ssid)…")
+                } else {
+                    status("On \(ssid) · switching the phone's hotspot off…")
+                }
             case .offline:
-                status("Offline: asking the phone for its hotspot…")
+                status("Offline: asking the phone for its hotspot\(wifi.joining ? " and joining it" : "")…")
             case .asked(let until):
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let left = max(0, Int(until.timeIntervalSince(context.date)))
-                    status("Asking the phone for its hotspot… \(left / 60):\(String(format: "%02d", left % 60))")
+                    status("Asking the phone for its hotspot\(wifi.joining ? " and joining it" : "")… \(left / 60):\(String(format: "%02d", left % 60))")
                 }
             case nil:
                 if case .checking(let ssid) = wifi.state {
-                    status("Left the phone's hotspot · checking the internet on \(ssid)…")
+                    status("Left the hotspot · checking the internet on \(ssid)…")
+                } else if case .leaving(let ssid) = wifi.state {
+                    status("On a hotspot · joining \(ssid)…")
+                } else if wifi.joining {
+                    status("Looking for the phone's hotspot to join it…")
                 } else if wifi.state == .onHotspot {
-                    status("On the phone's hotspot")
+                    status(wifi.current.phoneHotspot ? "On the phone's hotspot" : "On a hotspot (metered Wi-Fi)")
                 } else {
                     askButton
                 }
@@ -250,7 +286,7 @@ private struct HotspotRow: View {
 
     @ViewBuilder private var askButton: some View {
         Button {
-            hotspot.ask()
+            wifi.askedFromMenu()
         } label: {
             Label("Ask the phone for its hotspot", systemImage: "personalhotspot")
                 .font(.caption)

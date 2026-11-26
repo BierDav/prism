@@ -78,9 +78,9 @@ the workers' config (`devices.<name>.key`, selfhosted-platform
 `manifests/alerting/prism-config.json`). `prism pubkey` prints a Mac's; the
 phone shows its key on the Approvals tab, and `prism-phone-enroll` prints it.
 
-The workers still mint `prism_` device tokens (`prism device-token
-<device>`) for their own HTTP routes (docs/worker.md, "HTTP on
-prism.quickme.at"); the apps don't use them.
+There are no device tokens: a device's identity is its replica's
+provisioning. (The workers' `prism_` device tokens, `prism device-token`,
+are gone; nothing used them.)
 
 ## Conventions
 
@@ -368,7 +368,8 @@ approvals are handled separately through `GET /v1/approvals` and
 `POST /v1/approvals/{id}/answer`. Prism forwards the chosen decision to
 T3’s client API. A device signature binds the approval to the selected scope.
 Fleet registers a short-lived T3 client session using `prism register-t3`;
-this client session is separate from the MCP session used for agent actions.
+this client session is separate from the MCP session used for agent actions,
+which each T3 host registers with `prism register-t3-mcp` (docs/worker.md).
 
 ### List
 
@@ -710,7 +711,7 @@ and fleet's publisher may change most of them later:
 - `GET /v1/android/settings` returns the calling device's own settings,
   `{"device", "settings", "updatedAt", "updatedBy"}`, or `404`. The phone
   asks its replica (`Replica.call`, for its `device_name`), so it needs no
-  token; the workers also answer it over HTTP to a `prism_` device token.
+  token. The workers don't serve it over HTTP.
 
 The phone applies them when `app.settings` names it, when its replica's
 `settings` change, every 6 hours and after a boot. Values are never logged.
@@ -728,6 +729,46 @@ The phone applies them when `app.settings` names it, when its replica's
   wrong credential, `413` for a larger body, `502` when the upstream refuses
   the worker's credential or can't be reached, `504` after 10 s, and `503`
   while the worker has no `telemetry_url` or password.
+
+## The assistant's conversations
+
+The phone's assistant keeps every conversation in the replica, so it outlives
+the app and reaches the other devices (the history screen,
+`android/src/.../assistant/AssistHistory.kt`). These routes are only on the
+device (`Replica.call`); the workers serve none of them. Times are Unix
+seconds. A conversation is `{"id", "device", "title", "createdAt",
+"updatedAt", "revision"}`; `device` is the one it was started on, `revision`
+the committed one.
+
+- `GET /v1/assistant/conversations?limit=N` returns
+  `{"conversations": [...]}`, every device's, the most recently updated first
+  (`limit` 1 to 500, default 500); deleted ones are left out.
+- `GET /v1/assistant/conversations/{id}` returns `{"conversation", "entries":
+  [{"id", "body"}], "history": ["…"]}` at the committed revision, or `404`
+  (also once deleted). `entries` are the transcript's entries in order and
+  `history` the model's messages in order, each the app's own JSON as a
+  string.
+- `PUT /v1/assistant/conversations/{id}` stores the conversation as it is
+  now: `{"revision", "saveId", "title", "createdAt", "updatedAt", "entries",
+  "history"}`, where `revision` is the committed one it builds on (0 for a
+  new conversation) and `saveId` the app's ID for the revision it makes (a
+  new one for every version). It returns `{"conversation": {"id",
+  "revision"}}` with the new committed revision (the same when nothing
+  changed). When the committed revision is already that `saveId`'s, the
+  answer is the same as the first time: a save that committed but whose
+  answer was lost (the replica timed out) succeeds when sent again. It writes only
+  the rows that changed, under the new revision, and commits it last, so a
+  save cut short is never read and the same `PUT` again is safe. `409`
+  (`conflict`) when the conversation moved on since `revision` (another
+  device saved it), `410` (`gone`) once it was deleted. The calling device
+  started it if it is new. An ID is 1 to 100 letters, digits or `-_.:`; each
+  entry's and message's JSON is at most 16 KiB (`400` otherwise): the app
+  cuts long texts and never stores image or file bytes, only their names.
+  A conversation may have any number of entries. Concurrent writers from
+  several devices are not reconciled: the later save gets `409`.
+- `DELETE /v1/assistant/conversations/{id}` deletes it with its rows and
+  leaves a tombstone, which refuses every later save of that ID; it returns
+  `{"ok": true}`, also for an ID the replica never had.
 
 ## Health
 

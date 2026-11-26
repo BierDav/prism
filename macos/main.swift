@@ -4,8 +4,9 @@
 //   pubkey                  print this Mac's device key (authorized_keys form)
 //   self-test               prove the SSHSIG signatures (shared/'s SshSig with a
 //                           P-256 key, as the Secure Enclave signs) against
-//                           ssh-keygen -Y verify, and the shared Kotlin module
-//                           (Shared.swift)
+//                           ssh-keygen -Y verify, the shared Kotlin module
+//                           (Shared.swift), and the hotspot's and calls'
+//                           vectors (Hotspot.swift, PhoneCalls.swift)
 //   sign -n NAMESPACE FILE  sign FILE (or stdin, "-") after Touch ID, like
 //                           ssh-keygen -Y sign: FILE.sig, or stdout for stdin
 //   preview                 the popout in a window, for screenshots (Preview.swift)
@@ -14,7 +15,8 @@
 //                           UUID (Hotspot.swift), by default for the test vector
 //   wifi-status             what WiFiSwitch.swift sees: the Wi-Fi interface,
 //                           whether it is on the phone's hotspot, its network,
-//                           the captive probe and the proven networks
+//                           the captive probe, the phone's hotspot and the
+//                           reliable networks
 
 import CryptoKit
 import Foundation
@@ -38,7 +40,7 @@ func usage() -> Never {
                prism sign -n NAMESPACE [FILE|-]
                prism hotspot-uuid [--release] [KEYHEX WINDOW]
                prism wifi-status
-               prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles] [--expand N] [--live --config FILE] [--snapshot PNG]
+               prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N] [--live --config FILE] [--snapshot PNG]
 
         """.utf8))
     exit(2)
@@ -56,7 +58,9 @@ case "self-test":
     let signatures = SelfTest.run()
     let shared = SharedSelfTest.run()
     let hotspot = Hotspot.selfTest()
-    exit(signatures && shared && hotspot ? 0 : 1)
+    let wifi = WiFiPolicy.selfTest()
+    let calls = PhoneCalls.selfTest()
+    exit(signatures && shared && hotspot && wifi && calls ? 0 : 1)
 
 case "hotspot-uuid":
     var rest = Array(arguments.dropFirst())
@@ -113,6 +117,7 @@ case nil, "--config":
         AppDelegate.store = PrismStore(
             config: config.rocky, device: config.host, relayURL: config.relayUrl, relayTokenFile: config.relayTokenFile)
         AppDelegate.hotspot = Hotspot(keyFile: config.hotspotKeyFile)
+        AppDelegate.calls = PhoneCalls(keyFile: config.calls == true ? config.hotspotKeyFile : nil)
     }
     PrismApp.main()
 

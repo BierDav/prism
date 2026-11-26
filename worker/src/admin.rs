@@ -1,21 +1,18 @@
-//! The owner's admin API: what `prism pair`, `prism machines` and `prism
-//! device-token|device-revoke` call. The Go server ran these in its pod
-//! against PostgreSQL; the worker serves them over HTTP to the admin token,
-//! which `prism` derives from the event key (`auth::verify_admin_token`), so
-//! only where the key is (the worker pod) can call them.
+//! The owner's admin API: what `prism pair`, `machines` and `account-limit`
+//! call. The Go server ran these in its pod against PostgreSQL; the worker
+//! serves them over HTTP to the admin token, which `prism` derives from the
+//! event key (`auth::verify_admin_token`), so only where the key is (the
+//! worker pod) can call them.
 //!
 //! - `POST /v1/t3/pair` `{machine, link, access?}` → `{paired, answer}`
 //! - `GET /v1/machines` → the machines view (`machines.rs`)
-//! - `POST /v1/devices/{device}/token` → `{device, token}`
-//! - `DELETE /v1/devices/{device}/token` → `{device, revoked}`
 //! - `PUT /v1/placement/account-limits/{account}` `{sessionPercent?,
 //!   weeklyPercent?, until?}` → the account's limits; `DELETE` removes it
 //!
-//! Device tokens are `prism_` + 32 random bytes (base64url), as Go minted
-//! them. Only their SHA-256 is stored, in the replicated `settings` table
-//! under `device.token.<device>`; a revoked token's row is emptied.
+//! The `prism_` device tokens (`prism device-token`) are gone: the apps read
+//! everything from their own replica and never used them.
 
-use crate::auth::{is_valid_machine_name, verify_admin_token};
+use crate::auth::verify_admin_token;
 use crate::http::AppState;
 use axum::{
     Json,
@@ -24,14 +21,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use data_encoding::BASE64URL_NOPAD;
-use rocky_prism::PrismClient;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-pub const DEVICE_TOKEN_PREFIX: &str = "prism_";
-const DEVICE_TOKEN_KEY: &str = "device.token.";
 const MAX_ADMIN_BODY: usize = 64 << 10;
 
 pub(crate) fn error(status: StatusCode, message: impl Into<String>, code: &str) -> Response {
@@ -76,83 +68,6 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> 
         "This needs Prism's admin token; run prism where PRISM_EVENT_KEY is, in a prism-worker pod.",
         "unauthorized",
     ))
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceTokenRecord {
-    token_hash: String,
-    created_at: i64,
-}
-
-fn token_digest(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
-}
-
-/// Mints a device's Prism API token, replacing its earlier one.
-pub async fn issue_device_token(
-    client: &PrismClient,
-    device: &str,
-    now: i64,
-) -> Result<Result<String, String>, String> {
-    if !is_valid_machine_name(device) {
-        return Ok(Err(format!("invalid device name {device:?}")));
-    }
-    let mut random = [0u8; 32];
-    getrandom::getrandom(&mut random).map_err(|e| e.to_string())?;
-    let token = format!("{DEVICE_TOKEN_PREFIX}{}", BASE64URL_NOPAD.encode(&random));
-    let record = DeviceTokenRecord {
-        token_hash: token_digest(&token),
-        created_at: now,
-    };
-    client
-        .set_setting(
-            &format!("{DEVICE_TOKEN_KEY}{device}"),
-            &serde_json::to_string(&record).map_err(|e| e.to_string())?,
-            now,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Ok(token))
-}
-
-/// Ends a device's token; whether it had one.
-pub async fn revoke_device(client: &PrismClient, device: &str, now: i64) -> Result<bool, String> {
-    if !is_valid_machine_name(device) {
-        return Ok(false);
-    }
-    let key = format!("{DEVICE_TOKEN_KEY}{device}");
-    let had = client
-        .get_setting(&key)
-        .await
-        .map_err(|e| e.to_string())?
-        .is_some_and(|v| !v.is_empty());
-    if had {
-        client
-            .set_setting(&key, "", now)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(had)
-}
-
-/// The device a `prism_` bearer token belongs to (Go's `authenticate`).
-pub async fn authenticate_device(
-    client: &PrismClient,
-    headers: &HeaderMap,
-) -> Result<Option<String>, String> {
-    let Some(token) =
-        bearer(headers).filter(|t| t.starts_with(DEVICE_TOKEN_PREFIX) && t.len() <= 200)
-    else {
-        return Ok(None);
-    };
-    let digest = token_digest(token);
-    let settings = client.list_settings().await.map_err(|e| e.to_string())?;
-    Ok(settings.into_iter().find_map(|row| {
-        let device = row.key.strip_prefix(DEVICE_TOKEN_KEY)?;
-        let record: DeviceTokenRecord = serde_json::from_str(&row.value).ok()?;
-        (!record.token_hash.is_empty() && record.token_hash == digest).then(|| device.to_string())
-    }))
 }
 
 #[derive(Deserialize)]
@@ -220,29 +135,6 @@ pub async fn get_machines(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 }
 
-/// `POST /v1/devices/{device}/token`: mints a device's Prism API token.
-pub async fn post_device_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device): Path<String>,
-) -> Response {
-    if let Err(resp) = require_admin(&state, &headers) {
-        return resp;
-    }
-    match issue_device_token(&state.client, &device, (state.now_fn)()).await {
-        Ok(Ok(token)) => {
-            println!("prism-worker: minted a Prism API token for {device}");
-            (
-                StatusCode::OK,
-                Json(json!({ "device": device, "token": token })),
-            )
-                .into_response()
-        }
-        Ok(Err(message)) => error(StatusCode::BAD_REQUEST, message, "invalid"),
-        Err(err) => unavailable("device token", err),
-    }
-}
-
 /// `PUT` and `DELETE /v1/placement/account-limits/{account}`: sets or
 /// removes an account's temporary placement limit (`prism account-limit`).
 pub async fn put_account_limit(
@@ -297,25 +189,6 @@ async fn account_limit(
             error(StatusCode::BAD_REQUEST, message, "invalid")
         }
         Err(err) => unavailable("account limit", err),
-    }
-}
-
-/// `DELETE /v1/devices/{device}/token`: revokes a device's Prism API token.
-pub async fn delete_device_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device): Path<String>,
-) -> Response {
-    if let Err(resp) = require_admin(&state, &headers) {
-        return resp;
-    }
-    match revoke_device(&state.client, &device, (state.now_fn)()).await {
-        Ok(revoked) => (
-            StatusCode::OK,
-            Json(json!({ "device": device, "revoked": revoked })),
-        )
-            .into_response(),
-        Err(err) => unavailable("device revoke", err),
     }
 }
 
@@ -384,12 +257,7 @@ mod tests {
         let machine = machine_token(KEY, "david-mb").expect("token");
         let wrong = admin_token(b"another-key-0123456789abcdef0123456789").expect("token");
         for token in ["", machine.as_str(), wrong.as_str()] {
-            for (method, uri) in [
-                ("GET", "/v1/machines"),
-                ("POST", "/v1/t3/pair"),
-                ("POST", "/v1/devices/pixel/token"),
-                ("DELETE", "/v1/devices/pixel/token"),
-            ] {
+            for (method, uri) in [("GET", "/v1/machines"), ("POST", "/v1/t3/pair")] {
                 let (status, body) = call(&app, method, uri, token, json!({})).await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
                 assert_eq!(body["code"], "unauthorized");
@@ -486,76 +354,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_tokens_sign_a_phone_in_until_revoked() {
+    async fn the_workers_session_routes_take_the_machine_token() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (app, client) = app(dir.path(), r#"{"android_publishers": ["builder"]}"#).await;
+        let (app, _) = app(dir.path(), r#"{"machines": {"david-mb": {}}}"#).await;
         let admin = admin_token(KEY).expect("admin");
+        for token in ["", admin.as_str()] {
+            let (status, _) = call(&app, "GET", "/v1/t3/mcp-session", token, Value::Null).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = call(&app, "PUT", "/v1/t3/mcp-session", token, json!({})).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let machine = machine_token(KEY, "david-mb").expect("token");
+        let (status, body) = call(&app, "GET", "/v1/t3/mcp-session", &machine, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"machine": "david-mb", "wanted": true, "access": "full-access",
+                   "paired": false, "expiresAt": 0})
+        );
         let (status, body) = call(
             &app,
-            "POST",
-            "/v1/devices/Bad_Name/token",
-            &admin,
-            Value::Null,
+            "PUT",
+            "/v1/t3/mcp-session",
+            &machine,
+            json!({"origin": "http://david-mb.netbird.cloud:3773", "token": "t", "expiresAt": NOW}),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid device name \"Bad_Name\"");
+        assert_eq!(body, json!({"error": "An unexpired session is required."}));
+    }
 
-        let (status, body) =
-            call(&app, "POST", "/v1/devices/pixel/token", &admin, Value::Null).await;
-        assert_eq!(status, StatusCode::OK);
-        let token = body["token"].as_str().expect("token").to_string();
-        assert!(
-            token.starts_with("prism_") && token.len() == 6 + 43,
-            "{token}"
-        );
-        // Only the digest is stored.
-        let stored = client
-            .get_setting("device.token.pixel")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!stored.contains(&token[6..]), "{stored}");
-
-        let (status, body) = call(&app, "GET", "/v1/android/settings", &token, Value::Null).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(
-            body,
-            json!({"error": "No settings are published for pixel.", "code": "not_found"})
-        );
-
-        // A second token replaces the first.
-        let (_, body) = call(&app, "POST", "/v1/devices/pixel/token", &admin, Value::Null).await;
-        let second = body["token"].as_str().unwrap().to_string();
-        let (status, _) = call(&app, "GET", "/v1/android/settings", &token, Value::Null).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = call(&app, "GET", "/v1/android/settings", &second, Value::Null).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-
-        let (_, body) = call(
-            &app,
-            "DELETE",
-            "/v1/devices/pixel/token",
-            &admin,
-            Value::Null,
-        )
-        .await;
-        assert_eq!(body, json!({"device": "pixel", "revoked": true}));
-        let (_, body) = call(
-            &app,
-            "DELETE",
-            "/v1/devices/pixel/token",
-            &admin,
-            Value::Null,
-        )
-        .await;
-        assert_eq!(body, json!({"device": "pixel", "revoked": false}));
-        let (status, body) = call(&app, "GET", "/v1/android/settings", &second, Value::Null).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            body,
-            json!({"error": "Sign in again.", "code": "unauthorized"})
-        );
+    #[tokio::test]
+    async fn device_tokens_are_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (app, _) = app(dir.path(), "{}").await;
+        let admin = admin_token(KEY).expect("admin");
+        for method in ["POST", "DELETE"] {
+            let (status, _) =
+                call(&app, method, "/v1/devices/pixel/token", &admin, Value::Null).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+        }
+        // The apps read their settings from their replica, not over HTTP.
+        let (status, _) = call(&app, "GET", "/v1/android/settings", "prism_x", Value::Null).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
@@ -624,25 +465,16 @@ mod tests {
         .await;
         assert_eq!(body, json!({"device": "pixel", "changed": false}));
 
-        let (_, minted) = call(
-            &app,
-            "POST",
-            "/v1/devices/pixel/token",
-            &admin_token(KEY).unwrap(),
-            Value::Null,
+        let stored: Value = serde_json::from_str(
+            &client
+                .get_setting("android.settings.pixel")
+                .await
+                .unwrap()
+                .expect("stored"),
         )
-        .await;
-        let (status, body) = call(
-            &app,
-            "GET",
-            "/v1/android/settings",
-            minted["token"].as_str().unwrap(),
-            Value::Null,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+        .unwrap();
         assert_eq!(
-            body,
+            stored,
             json!({"device": "pixel", "settings": {"relay_url": "https://relay", "t3_url": null},
                    "updatedAt": NOW, "updatedBy": "builder"})
         );

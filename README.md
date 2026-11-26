@@ -9,7 +9,7 @@ workers behind them and the `prism` CLI machines report with.
 
 | Path | What |
 |---|---|
-| `cli/` | The `prism` CLI (Rust): `prism run`/`report`/`ping` on every fleet host, `prism pair`/`machines`/`device-token` in a worker pod (`docs/worker.md`); `packages.<system>.prism` |
+| `cli/` | The `prism` CLI (Rust): `prism run`/`report`/`ping` on every fleet host, `register-t3*` on every T3 host, `prism pair`/`machines` in a worker pod (`docs/worker.md`); `packages.<system>.prism` |
 | `worker/` | The prism worker (Rust): Prism's server, a StatefulSet in the cluster serving `prism.quickme.at`, each pod a replica of Prism's Rocky database (`docs/worker.md`). `worker/Dockerfile` builds the image `ghcr.io/bierdav/prism-worker`, which also carries `prism` |
 | `rocky-prism/`, `rocky-prism-ffi/`, `uniffi-bindgen/` | Prism's Rocky schema and client API, shared by the worker and the apps, and the apps' bindings to it |
 | `deploy/` | The Kubernetes manifests Argo CD deploys (`apps/prism.yaml` in selfhosted-platform); CI pins the image here |
@@ -47,7 +47,7 @@ every five minutes, and every host then deploys `main` on its own.
 
 ### Prism for macOS
 
-The menu-bar popout has three tabs:
+The menu-bar popout's tabs:
 
 - **Alerts**: the server's open alerts and machine events, grouped by
   category with their severity; per alert the agents it started (Open in T3)
@@ -62,6 +62,10 @@ The menu-bar popout has three tabs:
   memory (`GET /v1/machines/metrics`); click a host for its filesystems.
 - **Approvals**: what waits for the owner's decision (a click opens it), the
   last decisions and this Mac's public key.
+- **Wi-Fi** (the Wi-Fi icon): the reliable networks the Mac leaves the
+  phone's hotspot for, and the phone's hotspot it joins after asking the
+  phone; add the current, a nearby, a known or a typed network, or remove one
+  (docs/hotspot.md).
 
 Approvals are generic (`shared/`: `Approvals.kt`): something asks, with a
 title, its source, a summary, details and optionally the T3 thread that asks,
@@ -118,7 +122,26 @@ overlay asks again with the same request ID until the agent exists), and the
 overlay stays: it follows the agent live,
 its words and steps, from its T3 thread (`AssistConversation.kt`,
 `GET /v1/agents/{id}/activity`), and what you send next goes to the same
-thread (`POST /v1/agents/{id}/messages`); + starts a new request. The Phone tab's Profiles page configures placement
+thread (`POST /v1/agents/{id}/messages`); + starts a new request. The
+assistant's conversations are kept in Prism's replica (`assistant_*`
+tables, so on every device and across reinstalls); "New chat" starts another
+and keeps the last. The answer panel above the card is Gemini's (its controls
+above it, its bubbles and fading edges). Dragging the card up grows it with
+the finger and, past a threshold, into the conversation full screen in the
+same window (a shared transition; Back shrinks it into the card again), and
+from there the Chats screen (`assistant/AssistHistory.kt`) lists the
+conversations newest first, opens one, continues it and deletes it. Every
+card in a conversation is an A2UI surface (a2ui.org, v1.0), drawn by Google's
+Compose renderer (androidx.a2ui) with Prism's catalog
+(`https://prism.quickme.at/a2ui/catalog/v1`: A2UI's basic components and the
+cards, `assistant/a2ui/`, `assistant/core/PrismCatalog.kt`): a tool's card is
+a surface with its component at the root, and the model composes its own with
+`show_ui` (a picker, a small form), checked against the catalog. Only the
+buttons of a card a tool made act on the phone (call back, a switch, open the
+alarms in Clock, …), and the model hears of it in its next turn; anything on
+a surface the model composed is only ever the next turn, and `show_ui` can't
+change a tool's card. The surfaces are what a conversation stores (old typed cards
+open as surfaces). The Phone tab's Profiles page configures placement
 profiles (ordered models, reasoning levels, on/off switches, and which profile
 alert fixes and the assistant use).
 Android launches the overlay in its assistant layer so it doesn't appear in
@@ -284,9 +307,21 @@ seconds. It pushes a daily notice while a paired session, or its credential
 for the cluster's T3, expires soon. The watcher asks the T3 the agent was
 started on.
 
-To pair Prism with a machine's T3, create a fresh pairing link in that
-machine's T3 access settings, then pass it on stdin in the pod (it never
-appears in arguments or logs):
+Machines in Prism's config with a T3 of their own pair themselves: fleet's
+hourly `prism-t3-client-session` job runs `prism register-t3-mcp
+http://<host>.netbird.cloud:3773` on every T3 host. It asks the workers
+whether they want a session from that machine and when theirs expires
+(`GET /v1/t3/mcp-session`); when it is missing or expires within 15 days, the
+host mints a 30-day MCP session with its own T3 (as `register-t3-devices`
+does for the devices) and registers it (`PUT /v1/t3/mcp-session`), with the
+access the session had (default `full-access`). So a new database or an
+expiring session needs nobody. Today that is david-mb: the cluster machine
+uses its configured credential, and david-mm-linz is reached through
+david-mb's T3 (`via`).
+
+To pair Prism by hand with any other machine's T3, or to choose its access,
+create a fresh pairing link in that machine's T3 access settings, then pass
+it on stdin in the pod (it never appears in arguments or logs):
 
 ```sh
 kubectl -n monitoring exec -i prism-worker-0 -- /prism pair david-mb < link.txt
@@ -404,8 +439,8 @@ leader, enrollment and the HTTP routes. In short:
   `PRISM_ALERTS_TOKEN(_FILE)` (the `prism-alerts` Sealed Secret), because
   the path is public.
 - The owner's admin commands run in a worker pod over the admin routes:
-  `kubectl -n monitoring exec prism-worker-0 -- /prism machines`, `pair`,
-  `device-token <device>`, `device-revoke <device>`.
+  `kubectl -n monitoring exec prism-worker-0 -- /prism machines`, `pair`.
+  There are no device tokens: the apps read from their own replica.
 - Devices that sign approvals are `devices` in the config, each with its
   public key (`key`: the Mac's Secure Enclave key, the phone's StrongBox
   key) and `kind`.

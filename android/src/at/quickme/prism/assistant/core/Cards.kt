@@ -31,9 +31,16 @@ data class WeatherCard(
     val days: List<DayForecast> = emptyList(),
 ) : Card
 
-/** An hour of the forecast: "14:00", its temperature and weather code. */
+/** An hour of the forecast: "14:00", its temperature and weather code; its chance of rain and wind (km/h) where known. */
 @Serializable
-data class HourForecast(val time: String, val temperature: Double, val code: Int, val day: Boolean = true)
+data class HourForecast(
+    val time: String,
+    val temperature: Double,
+    val code: Int,
+    val day: Boolean = true,
+    val precipitationChance: Int? = null,
+    val wind: Double? = null,
+)
 
 /** A day of the forecast: its short name ("Tue"), high, low, weather code. */
 @Serializable
@@ -80,6 +87,8 @@ data class ThreadCard(
     val channel: String,
     val title: String,
     val messages: List<ThreadMessage>,
+    /** Where a reply goes: the number (SMS) or the room ID (Matrix). */
+    val address: String = "",
 ) : Card
 
 @Serializable
@@ -123,7 +132,15 @@ data class ContactEntry(val name: String, val number: String, val label: String 
 data class EventsCard(val events: List<EventEntry>) : Card
 
 @Serializable
-data class EventEntry(val title: String, val start: Long, val end: Long, val allDay: Boolean = false, val location: String = "")
+data class EventEntry(
+    val title: String,
+    val start: Long,
+    val end: Long,
+    val allDay: Boolean = false,
+    val location: String = "",
+    /** The calendar's event ID, which opens it (0: unknown). */
+    val id: Long = 0,
+)
 
 /**
  * A request handed to a T3 Code agent: its [agentId] once the leading worker

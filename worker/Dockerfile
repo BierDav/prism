@@ -1,5 +1,5 @@
 # The prism worker (worker/) and the `prism` CLI (cli/), whose admin
-# commands (pair, machines, device-token, device-revoke) run in the worker's
+# commands (pair, machines) run in the worker's
 # pod: `kubectl exec prism-worker-0 -- /prism machines`.
 #
 # Two ways to build it:

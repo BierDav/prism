@@ -13,8 +13,8 @@ use axum::{
 };
 use chrono::Utc;
 use rocky_prism::{
-    AlertWebhookError, HostEventError, HostEventReport, PlacementSyncRequest, PrismClient,
-    T3ClientSessionRow,
+    AlertWebhookError, HostEventError, HostEventReport, PlacementSyncRequest,
+    PlacementSyncResponse, PrismClient, T3ClientSessionRow,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-const MAX_SYNC_BODY_BYTES: usize = 4 << 20;
+pub(crate) const MAX_SYNC_BODY_BYTES: usize = 4 << 20;
 const MAX_WEBHOOK_BYTES: usize = 2 << 20;
 const MAX_EVENT_BODY_BYTES: usize = 256 << 10;
 
@@ -48,6 +48,9 @@ pub struct AppState {
     pub placement_log: Option<Arc<crate::placement_log::PlacementLog>>,
     /// Where placement reads the accounts' usage, when configured.
     pub usage: Option<Arc<crate::usage::UsageSource>>,
+    /// How often a placement stream ranks its host's last report again
+    /// (`placement_stream.rs`).
+    pub placement_push_every: std::time::Duration,
     /// The coordinator this worker's seals go to (`coordination.rs`).
     #[cfg(feature = "coordinator")]
     pub coordinator: Option<Arc<rocky_prism::coordinator::CoordinatorLink>>,
@@ -71,6 +74,7 @@ impl AppState {
             eligible: watch::channel(Eligibility::Ready).1,
             placement_log: None,
             usage: None,
+            placement_push_every: crate::placement_stream::PUSH_CHECK_EVERY,
             #[cfg(feature = "coordinator")]
             coordinator: None,
         }
@@ -93,6 +97,12 @@ impl AppState {
     #[cfg(test)]
     pub fn with_secrets(mut self, secrets: crate::t3::Secrets) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_placement_push_every(mut self, every: std::time::Duration) -> Self {
+        self.placement_push_every = every;
         self
     }
 
@@ -154,6 +164,10 @@ pub fn router(state: AppState) -> Router {
             post(placement_sync).layer(DefaultBodyLimit::max(MAX_SYNC_BODY_BYTES + 1)),
         )
         .route(
+            "/v1/placement/stream",
+            get(crate::placement_stream::placement_stream),
+        )
+        .route(
             "/v1/events",
             post(post_event).layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES + 1)),
         )
@@ -161,6 +175,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/client-session", put(put_t3_client_session))
         .route("/v1/t3/device-session", put(put_t3_device_session))
         .route("/v1/t3/device-sessions", get(get_t3_device_sessions))
+        .route(
+            "/v1/t3/mcp-session",
+            get(get_t3_mcp_session).put(put_t3_mcp_session),
+        )
         .route(
             "/v1/android/release",
             get(crate::android::get_release).put(crate::android::put_release),
@@ -171,7 +189,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/android/settings",
-            get(crate::android_settings::get_settings).put(crate::android_settings::put_settings),
+            put(crate::android_settings::put_settings),
         )
         .route(
             "/v1/telemetry/write",
@@ -180,10 +198,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/t3/pair", post(crate::admin::post_pair))
         .route("/v1/machines", get(crate::admin::get_machines))
-        .route(
-            "/v1/devices/{device}/token",
-            post(crate::admin::post_device_token).delete(crate::admin::delete_device_token),
-        )
         .route(
             "/v1/placement/account-limits/{account}",
             put(crate::admin::put_account_limit).delete(crate::admin::delete_account_limit),
@@ -297,6 +311,22 @@ async fn placement_sync(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid JSON").into_response(),
     };
 
+    match run_placement_sync(&state, &machine, req, body.len()).await {
+        Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+    }
+}
+
+/// One placement sync for `machine`, as `POST /v1/placement/sync` and the
+/// placement stream (`placement_stream.rs`) run it: ranked with the
+/// accounts' usage, written to the decision log. None when it failed (the
+/// failure is logged); the host tries again.
+pub(crate) async fn run_placement_sync(
+    state: &AppState,
+    machine: &str,
+    req: PlacementSyncRequest,
+    body_len: usize,
+) -> Option<PlacementSyncResponse> {
     let now = (state.now_fn)();
     let (threads, models) = (req.threads.len(), req.models.len());
     let usage = match &state.usage {
@@ -305,24 +335,23 @@ async fn placement_sync(
     };
     match state
         .client
-        .sync_placement_with_usage(machine.clone(), req, now, &usage)
+        .sync_placement_with_usage(machine.to_string(), req, now, &usage)
         .await
     {
         Ok(resp) => {
             if let Some(log) = &state.placement_log {
-                log.record_sync(&machine, now, &resp);
+                log.record_sync(machine, now, &resp);
             }
-            (StatusCode::OK, Json(resp)).into_response()
+            Some(resp)
         }
         Err(err) => {
             if let Some(log) = &state.placement_log {
-                log.record_failure(&machine, now, &err.to_string());
+                log.record_failure(machine, now, &err.to_string());
             }
             eprintln!(
-                "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {} bytes): {err}",
-                body.len()
+                "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {body_len} bytes): {err}",
             );
-            (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()
+            None
         }
     }
 }
@@ -482,6 +511,53 @@ async fn get_t3_device_sessions(State(state): State<AppState>, headers: HeaderMa
             Json(json!({ "error": err.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Whether the workers want an MCP session from this machine, and when
+/// theirs expires (`prism register-t3-mcp`).
+async fn get_t3_mcp_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let machine = match require_machine_token(&state, &headers) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match crate::pairing::host_session_state(&state.client, &state.cfg, &machine, (state.now_fn)())
+        .await
+    {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Registers the workers' MCP session with this machine's T3, which the
+/// machine minted itself (`prism register-t3-mcp`).
+async fn put_t3_mcp_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let machine = match require_machine_token(&state, &headers) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let Ok(payload) = serde_json::from_slice(&body) else {
+        return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+    };
+    match crate::pairing::register_host_session(
+        &state.client,
+        &state.cfg,
+        &machine,
+        payload,
+        (state.now_fn)(),
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err((status, msg)) => (status, Json(json!({ "error": msg }))).into_response(),
     }
 }
 

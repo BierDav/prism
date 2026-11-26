@@ -46,8 +46,8 @@ object Shell {
     /** Default timeout of run(vararg argv). */
     const val DEFAULT_TIMEOUT_MS = 60_000L
 
-    /** Longest timeout run() takes. */
-    const val MAX_TIMEOUT_MS = 30 * 60_000L
+    /** Longest timeout run() takes: a call's bridge (CallBridge.kt) lives as long as the call. */
+    const val MAX_TIMEOUT_MS = 6 * 3600_000L
 
     /** Each of stdout and stderr is cut after this many bytes (Result.truncated). */
     const val MAX_OUTPUT_BYTES = 32 shl 20

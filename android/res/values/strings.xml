@@ -42,4 +42,6 @@
     <string name="matrix_homeserver_about">The owner\'s Matrix homeserver (client-server API base URL), for the assistant\'s Matrix tools</string>
     <string name="matrix_access_token">Matrix access token</string>
     <string name="matrix_access_token_about">The owner\'s Matrix access token: the assistant reads and sends Matrix messages as the owner</string>
+    <string name="call_mac">Mac for calls</string>
+    <string name="call_mac_about">The host name (and :port) of the Mac whose Prism takes this phone\'s calls (docs/calls.md), with the hotspot key shared with it; unset, calls stay on the phone</string>
 </resources>

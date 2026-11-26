@@ -11,7 +11,9 @@ while they answer. It uses NetBird only for the fallback.
 
 Nobody pairs by hand. Every fleet T3 host (`dev-host` and `prism-client`)
 runs fleet's hourly `prism-t3-client-session` timer. The timer registers the
-workers' own approval session (`prism register-t3`) and, with
+workers' own approval session (`prism register-t3`), the workers' own MCP
+session when they want one from that machine (`prism register-t3-mcp`,
+docs/worker.md) and, with
 `prism register-t3-devices http://<host>.netbird.cloud:3773`, each Prism
 device's sessions:
 

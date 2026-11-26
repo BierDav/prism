@@ -3,7 +3,8 @@
 // its action cards (weather, call, messages with the edit button, alarm,
 // timer, settings, contacts, calendar, texts read back, the T3 hand-off with
 // the agent's live activity), the lines of tools at work, and the overlay as a
-// whole with the transcript above the composer.
+// whole with the answer panel above the composer, Gemini's answer page, and
+// the overlay's conversation full screen, where the card grows into.
 
 package at.quickme.prism.previews
 
@@ -13,15 +14,27 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import at.quickme.prism.AssistComposer
 import at.quickme.prism.Tab
 import at.quickme.prism.assistant.AssistantTranscript
 import at.quickme.prism.assistant.FollowedAgent
+import at.quickme.prism.assistant.HistoryChat
+import at.quickme.prism.haloScrim
 import at.quickme.prism.assistant.core.AlarmCard
 import at.quickme.prism.assistant.core.CallCard
 import at.quickme.prism.assistant.core.Card
@@ -74,7 +87,7 @@ private val vienna = WeatherCard(
 private fun Transcript(t: Transcript, running: Boolean = false, agent: FollowedAgent? = null) = Part {
     at.quickme.prism.GeminiColors {
         Box(Modifier.background(BottomSheetDefaults.ScrimColor).padding(12.dp)) {
-            AssistantTranscript(t, running, agent, onNew = {}, onEdit = { _, _ -> null }, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 })
+            AssistantTranscript(t, running, agent, onNew = {}, onAction = null, modifier = Modifier.fillMaxWidth(), now = { NOW + 75_000 })
         }
     }
 }
@@ -178,26 +191,109 @@ private fun AssistantWorkingPreview() = Transcript(
     running = true,
 )
 
-/** The overlay: the transcript above Gemini's input card, over the live app. */
+/** The overlay: the answer panel above Gemini's input card, over the live app, with the overlay's halo. */
 @ScreenPreviews
 @Composable
-private fun AssistantOverlayPreview() = Themed {
+private fun AssistantOverlayPreview() = OverlaySample(
+    transcript(
+        Event.Said("What's the weather like tonight?"),
+        *ran("w", Tools.WEATHER, vienna),
+        Event.Answer("Partly cloudy and **4°** now, with light rain from about 21:00."),
+    ),
+)
+
+/**
+ * The panel as Gemini's answer page: its controls above it, Gemini's user
+ * bubble and the answer, a conversation long enough to scroll (its edges
+ * fade), as tall as the screen allows.
+ */
+@DarkScreenPreview
+@Composable
+private fun AssistantPanelPreview() = OverlaySample(
+    transcript(
+        Event.Said("Is the Paperless backup fresh again?"),
+        Event.Answer(
+            "Not yet: the last restic snapshot of **paperless** is 30 hours old, so #405 still fires. " +
+                "The nightly job on david-server failed at 03:00 with a lock left over from Monday.",
+        ),
+        Event.Said("Remove the stale lock and run it now"),
+        *ran("h", Tools.START_T3, HandoffCard("Remove the stale lock and run the Paperless backup now", "r2", "a8", "selfhosted-platform", "Paperless backup")),
+        Event.Answer("A T3 agent is on it in **selfhosted-platform**. I'll tell you when the snapshot is there."),
+        Event.Said("And the weather tonight?"),
+        *ran("w", Tools.WEATHER, vienna),
+        Event.Answer("Partly cloudy and **4°** now, with light rain from about 21:00."),
+    ),
+)
+
+/** Over the live app: the halo round the card and the panel, the panel above the card in Gemini's 16 dp margins. */
+@Composable
+private fun OverlaySample(t: Transcript) = Themed {
+    var card by remember { mutableStateOf(Rect.Zero) }
+    var panel by remember { mutableStateOf(Rect.Zero) }
     Box(Modifier.fillMaxSize()) {
         SampleHome(Tab.Alerts)
-        Box(Modifier.fillMaxSize().background(BottomSheetDefaults.ScrimColor))
-        val t = remember {
-            transcript(
-                Event.Said("What's the weather like tonight?"),
-                *ran("w", Tools.WEATHER, vienna),
-                Event.Answer("Partly cloudy and **4°** now, with light rain from about 21:00."),
-            )
+        Box(
+            Modifier.fillMaxSize().drawWithContent {
+                val round = if (panel.isEmpty) card else Rect(
+                    minOf(card.left, panel.left), minOf(card.top, panel.top), maxOf(card.right, panel.right), maxOf(card.bottom, panel.bottom),
+                )
+                if (!round.isEmpty) repeat(2) {
+                    drawIntoCanvas { c ->
+                        haloScrim()?.draw(
+                            c.nativeCanvas, size.width, size.height, round.left, round.top, round.right, round.bottom,
+                            28.dp.toPx(), density, dark = true, alpha = 1f,
+                        )
+                    }
+                }
+                drawContent()
+            },
+        ) {
+            at.quickme.prism.GeminiColors {
+                AssistComposer(
+                    text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
+                    onCard = { card = it },
+                    selectors = {
+                        AssistantTranscript(
+                            t, false, null, onNew = {}, onAction = null, onOpen = {}, now = { NOW + 75_000 },
+                            modifier = Modifier.fillMaxWidth().onGloballyPositioned { panel = it.boundsInRoot() },
+                        )
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter).statusBarsPadding().padding(top = 8.dp)
+                        .padding(horizontal = 16.dp).padding(bottom = 8.dp).fillMaxWidth(),
+                )
+            }
         }
-        at.quickme.prism.GeminiColors {
-            AssistComposer(
-                text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
-                selectors = { AssistantTranscript(t, false, null, onNew = {}, onEdit = { _, _ -> null }, modifier = Modifier.fillMaxWidth()) },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp).fillMaxWidth(),
-            )
-        }
+    }
+}
+
+/**
+ * The card dragged up into the full screen: the overlay's conversation in
+ * the chat view (HistoryChat), with Back to the card, Chats, New chat and
+ * Delete above, and the overlay's own card at the bottom.
+ */
+@ScreenPreviews
+@Composable
+private fun AssistantFullChatPreview() = Themed {
+    val t = remember {
+        transcript(
+            Event.Said("What's the weather like tonight?"),
+            *ran("w", Tools.WEATHER, vienna),
+            Event.Answer("Partly cloudy and **4°** now, with light rain from about 21:00."),
+            Event.Said("And tomorrow morning?"),
+            Event.Answer("Around **-1°** at 7:00 with drizzle later; a warm coat and an umbrella."),
+        )
+    }
+    at.quickme.prism.GeminiColors {
+        HistoryChat(
+            transcript = t, running = false, loading = false, error = null, configured = true, canSend = true,
+            text = "", onText = {}, onSend = {}, onAction = null, onNew = {}, onDelete = {}, onBack = {},
+            now = { NOW + 75_000 }, onChats = {},
+            composer = {
+                AssistComposer(
+                    text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
+                    selectors = {}, modifier = Modifier.fillMaxWidth(),
+                )
+            },
+        )
     }
 }

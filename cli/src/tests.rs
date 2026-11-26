@@ -383,44 +383,6 @@ fn pair_sends_the_link_once_with_the_admin_token() {
 }
 
 #[test]
-fn device_tokens_and_refusals() {
-    let (url, seen) = serve(Arc::new(|req: &Seen| {
-        match (req.method.as_str(), req.path.as_str()) {
-            ("POST", "/v1/devices/pixel/token") => {
-                (200, r#"{"device":"pixel","token":"prism_abc"}"#.into())
-            }
-            ("DELETE", "/v1/devices/pixel/token") => {
-                (200, r#"{"device":"pixel","revoked":true}"#.into())
-            }
-            (_, "/v1/devices/Bad%20Name/token") => (
-                400,
-                r#"{"error":"invalid device name \"Bad Name\"","code":"invalid"}"#.into(),
-            ),
-            _ => (401, r#"{"error":"no","code":"unauthorized"}"#.into()),
-        }
-    }));
-    let e = admin_env(&url);
-    assert_eq!(
-        device_command("device-token", "pixel", &e),
-        Ok("prism_abc".into())
-    );
-    assert_eq!(
-        device_command("device-revoke", "pixel", &e),
-        Ok("pixel: token revoked: true".into())
-    );
-    assert_eq!(
-        device_command("device-token", "Bad Name", &e),
-        Err("invalid device name \"Bad Name\"".into())
-    );
-    assert_eq!(
-        device_command("device-token", "other", &e),
-        Err(r#"Prism rejected the request (401): {"error":"no","code":"unauthorized"}"#.into())
-    );
-    assert_eq!(seen.lock().unwrap().len(), 4);
-    assert_eq!(dispatch(&s(&["prism", "device-token"]), &e), 1);
-}
-
-#[test]
 fn machines_render_as_go_did() {
     let view = json!({
         "cluster": {"name": "cluster", "runsOn": "david-server", "workspace": ""},
@@ -456,6 +418,13 @@ fn usage_and_exit_codes() {
     let e = env(vec![("PRISM_EVENT_KEY", KEY.into())]);
     assert_eq!(dispatch(&s(&["prism", "token", "david-mb"]), &e), 0);
     assert_eq!(dispatch(&s(&["prism", "register-t3"]), &e), 1);
+    assert_eq!(dispatch(&s(&["prism", "register-t3-mcp"]), &e), 1);
+    // Device tokens are gone: the apps never used them.
+    assert_eq!(
+        dispatch(&s(&["prism", "device-token", "david-pixel"]), &e),
+        2
+    );
+    assert!(!USAGE.contains("device-token"));
     assert!(USAGE.contains("prism pair <machine> [access] < link"));
     assert!(!USAGE.contains("prism serve"));
 }
@@ -532,7 +501,12 @@ fn register_t3_devices_mints_only_what_is_missing_or_due() {
     let (url, seen) = serve(Arc::new(handler));
     let prism = Client::new(&url, TOKEN);
     let t3 = FakeT3::default();
-    let done = devices::register_devices(&prism, &t3, &format!("{url}/"), NOW).expect("register");
+    // The T3 origin is this host's NetBird name, which it may not reach
+    // itself: the pairing goes to loopback, the sessions name the origin.
+    let port = url.rsplit(':').next().unwrap();
+    let origin = format!("http://t3-host.invalid:{port}");
+    let done =
+        devices::register_devices(&prism, &t3, &format!("{origin}/"), NOW).expect("register");
     assert_eq!(
         done,
         ["david-pixel client", "david-pixel mcp", "david-mb mcp"]
@@ -547,7 +521,18 @@ fn register_t3_devices_mints_only_what_is_missing_or_due() {
     assert_eq!(puts.len(), 3);
     assert_eq!(puts[0]["token"], "tok-Prism on david-pixel");
     assert_eq!(puts[0]["kind"], "client");
-    assert_eq!(puts[0]["origin"], url.as_str());
+    assert_eq!(puts[0]["origin"], origin.as_str());
+    let decision = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.path == "/oauth/mcp/decision")
+        .map(|s| s.body.clone())
+        .expect("a pairing decision");
+    assert_eq!(
+        decision["authorization"]["resource"],
+        format!("{origin}/mcp").as_str()
+    );
     // 2027-02-14T08:00:00Z, as `t3 auth session issue` printed it.
     assert_eq!(puts[0]["expiresAt"], NOW + 30 * DAY);
     assert_eq!(puts[1]["token"], "mcp-token");
@@ -614,4 +599,85 @@ fn account_limits_are_set_and_cleared() {
         assert!(account_limit_command(&s(bad), &e).is_err(), "{bad:?}");
     }
     assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn register_t3_mcp_pairs_the_workers_only_when_they_want_it() {
+    const NOW: i64 = 1_800_000_000;
+    const DAY: i64 = 24 * 60 * 60;
+    let state = Arc::new(Mutex::new(Value::Null));
+    let answer = Arc::clone(&state);
+    let handler = move |seen: &Seen| -> (u16, String) {
+        match (seen.method.as_str(), seen.path.as_str()) {
+            ("GET", "/v1/t3/mcp-session") if seen.auth == format!("Bearer {TOKEN}") => {
+                (200, answer.lock().unwrap().to_string())
+            }
+            ("PUT", "/v1/t3/mcp-session") if seen.auth == format!("Bearer {TOKEN}") => {
+                (200, r#"{"ok":true}"#.into())
+            }
+            ("POST", "/api/auth/pairing-token")
+                if seen.auth == "Bearer tok-Prism device pairing"
+                    && seen.body["label"] == "Prism" =>
+            {
+                (200, r#"{"credential":"PAIR-CODE"}"#.into())
+            }
+            ("POST", "/oauth/mcp/register") if seen.body["software_id"] == "prism" => {
+                (201, r#"{"client_id":"cid"}"#.into())
+            }
+            ("POST", "/oauth/mcp/decision") if seen.body["decision"]["code"] == "PAIR-CODE" => {
+                let state = seen.body["authorization"]["state"].as_str().unwrap_or("");
+                (
+                    200,
+                    json!({"redirectTo": format!("/prism/paired?code=AC&state={state}")})
+                        .to_string(),
+                )
+            }
+            ("POST", "/oauth/mcp/token") => (
+                200,
+                r#"{"access_token":"mcp-token","expires_in":2592000}"#.into(),
+            ),
+            _ => (404, "not found".into()),
+        }
+    };
+    let (url, seen) = serve(Arc::new(handler));
+    let prism = Client::new(&url, TOKEN);
+    let t3 = FakeT3::default();
+    let register = || devices::register_workers(&prism, &t3, &format!("{url}/"), NOW);
+
+    *state.lock().unwrap() = json!({"machine": "david-server", "wanted": false,
+        "reason": "david-server is the cluster machine; Prism uses its configured T3 credential."});
+    assert_eq!(
+        register(),
+        Ok("the workers take no session from david-server: david-server is the cluster machine; Prism uses its configured T3 credential.".into())
+    );
+    for current in [NOW + 20 * DAY, 0] {
+        *state.lock().unwrap() = json!({"machine": "david-mb", "wanted": true,
+            "access": "full-access", "paired": true, "expiresAt": current});
+        assert_eq!(
+            register(),
+            Ok("the workers' session with david-mb is current".into())
+        );
+    }
+    assert!(t3.issued.lock().unwrap().is_empty());
+
+    // Due within 15 days: renewed with the access the owner paired with.
+    *state.lock().unwrap() = json!({"machine": "david-mb", "wanted": true,
+        "access": "read-only", "paired": true, "expiresAt": NOW + 3 * DAY});
+    assert_eq!(
+        register(),
+        Ok("registered the workers' session with david-mb (read-only access)".into())
+    );
+    let seen = seen.lock().unwrap();
+    let decision = seen
+        .iter()
+        .find(|s| s.path == "/oauth/mcp/decision")
+        .expect("decision");
+    assert_eq!(decision.body["decision"]["access"], "read-only");
+    let put = seen.iter().find(|s| s.method == "PUT").expect("registered");
+    assert_eq!(
+        put.body,
+        json!({"origin": url, "token": "mcp-token", "access": "read-only",
+               "expiresAt": NOW + 2_592_000})
+    );
+    assert_eq!(*t3.revoked.lock().unwrap(), ["s1"]);
 }

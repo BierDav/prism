@@ -50,7 +50,9 @@ import ai.koog.serialization.typeToken
 import at.quickme.prism.assistant.core.Args
 import at.quickme.prism.assistant.core.Card
 import at.quickme.prism.assistant.core.Event
+import at.quickme.prism.assistant.core.HandNotes
 import at.quickme.prism.assistant.core.Tools
+import at.quickme.prism.assistant.core.UiChange
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.CancellationException
@@ -61,8 +63,12 @@ import kotlinx.serialization.json.JsonObject
 /** Where the model is: the gateway's base URL, its key, the model, and this phone's name for X-Fleet-Host. */
 data class Gateway(val url: String, val apiKey: String, val model: String, val host: String)
 
-/** What a tool did: [text] for the model, a [card] for the transcript, an [image] the model should see. */
-data class ToolOutput(val text: String, val card: Card? = null, val image: AssistAttachment? = null)
+/**
+ * What a tool did: [text] for the model, a [card] for the transcript (shown
+ * as an A2UI surface), an [image] the model should see, and the surfaces
+ * show_ui creates, changes or removes ([ui]).
+ */
+data class ToolOutput(val text: String, val card: Card? = null, val image: AssistAttachment? = null, val ui: UiChange? = null)
 
 /**
  * A tool of the assistant: its name, what it does (the model reads this),
@@ -151,10 +157,12 @@ class Harness(
         attachments: List<AssistAttachment>,
         emit: suspend (Event) -> Unit,
         saved: (List<Message>) -> Unit,
-        /** What happened since the last turn that the model should know (an edit made by hand on a card). */
+        /** What happened since the last turn that the model should know (an edit or a switch made by hand on a card: HandNotes). */
         note: String = "",
+        /** What the transcript shows the owner said, when not [text] (an action on a surface: "Picked: Anna"). */
+        shown: String? = null,
     ): List<Message> {
-        emit(Event.Said(text, attachments.map { it.name }))
+        emit(Event.Said(shown ?: text, attachments.map { it.name }))
         // The latest output of each tool call, by the tool that made it: tools
         // run one after another, so the one that just ran wrote it.
         var last: ToolOutput? = null
@@ -186,7 +194,7 @@ class Harness(
                     why = null
                     val result = executeTool(call)
                     val output = last?.takeIf { result.resultKind is ToolResultKind.Success }
-                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: why ?: result.output, output?.card, failed = output == null))
+                    emit(Event.ToolFinished(callId, call.tool, output?.text ?: why ?: result.output, output?.card, failed = output == null, ui = output?.ui))
                     result to output?.image
                 }
                 val images = results.mapNotNull { it.second }.map(prepareImage)
@@ -230,7 +238,7 @@ class Harness(
     }
 
     private fun ai.koog.prompt.dsl.RequestMessagePartsBuilder.userParts(turn: Turn) {
-        if (turn.note.isNotBlank()) part(MessagePart.Text("[Since the last turn: ${turn.note}]"))
+        HandNotes.framed(turn.note)?.let { part(MessagePart.Text(it)) }
         part(MessagePart.Text(turn.text.ifBlank { "(no text)" }))
         for (a in turn.attachments) {
             when {
@@ -333,7 +341,20 @@ class Harness(
          * names (the model saw them in their turn; they'd fill the phone's
          * preferences), then [sanitize]d.
          */
-        fun encode(messages: List<Message>): String {
+        fun encode(messages: List<Message>): String = json.encodeToString(listSerializer, light(messages))
+
+        /**
+         * The conversation for Rocky, one JSON per message (each a row,
+         * Conversations.historyRows); as [encode], without images and files.
+         */
+        fun encodeEach(messages: List<Message>): List<String> =
+            light(messages).map { json.encodeToString(Message.serializer(), it) }
+
+        /** The conversation from its rows; messages that don't decode are left out. */
+        fun decodeEach(rows: List<String>): List<Message> =
+            sanitize(rows.mapNotNull { runCatching { json.decodeFromString(Message.serializer(), it) }.getOrNull() })
+
+        private fun light(messages: List<Message>): List<Message> {
             val light = messages.map { m ->
                 if (m !is Message.User) m else m.copy(parts = m.parts.map { p ->
                     when {
@@ -344,7 +365,7 @@ class Harness(
                     }
                 })
             }
-            return json.encodeToString(listSerializer, sanitize(light))
+            return sanitize(light)
         }
 
         fun decode(text: String): List<Message> =

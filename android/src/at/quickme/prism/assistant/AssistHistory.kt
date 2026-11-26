@@ -1,0 +1,538 @@
+// The assistant's chat history, full screen: every conversation stored in
+// Rocky (ConversationStore; those still waiting on the phone too), newest
+// first and grouped by day as Gemini's chat list is; one opens with its
+// transcript (TranscriptView's entries) and goes on with what is typed here,
+// through the same harness (AssistantSession). New chat starts another;
+// Delete removes one everywhere. AssistHistory.open opens the list; the
+// overlay shows its own conversation full screen with HistoryChat, in its
+// window, and opens the list from there.
+
+package at.quickme.prism.assistant
+
+import at.quickme.prism.assistant.a2ui.SurfaceHost
+import at.quickme.prism.assistant.a2ui.rememberSurfaceHost
+import at.quickme.prism.assistant.core.UiAction
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeFlexibleTopAppBar
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import at.quickme.prism.PrismApi
+import at.quickme.prism.Sample
+import at.quickme.prism.Settings
+import at.quickme.prism.assistant.core.Entry
+import at.quickme.prism.assistant.core.Transcript
+import at.quickme.prism.shared.AssistantConversation
+import at.quickme.prism.shared.PrismError
+import at.quickme.prism.ui.EmptyState
+import at.quickme.prism.ui.PageTitle
+import at.quickme.prism.ui.PrismIcons
+import at.quickme.prism.ui.PrismTheme
+import at.quickme.prism.ui.SectionHeader
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
+
+/** The history screen's entry point. */
+object AssistHistory {
+    fun open(c: Context) {
+        c.startActivity(Intent(c, AssistHistoryActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
+class AssistHistoryActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        setContent { PrismTheme { HistoryScreen(onClose = ::finish) } }
+    }
+}
+
+/**
+ * A conversation in the list; [waiting]: kept on the phone, not in the
+ * replica yet; [problem]: why the replica refused it (it stays on the phone).
+ */
+data class HistoryItem(val conversation: AssistantConversation, val waiting: Boolean = false, val problem: String = "")
+
+@Composable
+private fun HistoryScreen(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val device = remember { Settings.deviceName(context) }
+    var items by remember { mutableStateOf<List<HistoryItem>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val storeProblem by ConversationStore.problem.collectAsState()
+    var reload by remember { mutableIntStateOf(0) }
+    // The chat shown (null: the list). Its session is the one holding the
+    // conversation in this process (the overlay's too), so a turn goes on
+    // when the chat is left, and reopening shows it; no session while it loads.
+    var inChat by remember { mutableStateOf(false) }
+    var session by remember { mutableStateOf<AssistantSession?>(null) }
+    var opening by remember { mutableStateOf(false) }
+    var openError by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf<Job?>(null) }
+    var text by remember { mutableStateOf("") }
+
+    LaunchedEffect(reload) {
+        if (Sample.on(context)) {
+            items = emptyList()
+            return@LaunchedEffect
+        }
+        ConversationStore.flush(context)
+        val (kept, deleted) = ConversationStore.pending(context)
+        val stored = try {
+            PrismApi.call(context) { assistantConversations() }.also { error = null }
+        } catch (e: PrismError) {
+            error = e.message
+            emptyList()
+        }
+        val byId = LinkedHashMap<String, HistoryItem>()
+        stored.forEach { byId[it.id] = HistoryItem(it) }
+        for (s in kept) {
+            val known = byId[s.id]?.conversation
+            if (known == null || known.updatedAt <= s.updatedAt || s.problem.isNotEmpty()) {
+                byId[s.id] = HistoryItem(s.summary.copy(device = known?.device ?: device), waiting = true, problem = s.problem)
+            }
+        }
+        items = byId.values.filter { it.conversation.id !in deleted }.sortedByDescending { it.conversation.updatedAt }
+    }
+    // Synced or written here: the list follows; so it does when the outbox
+    // sent a chat, or the replica refused one.
+    LaunchedEffect(Unit) {
+        PrismApi.changes(listOf("assistant_conversations")).collect { if (!inChat) reload++ }
+    }
+    LaunchedEffect(Unit) {
+        ConversationStore.changes.drop(1).collect { if (!inChat) reload++ }
+    }
+    DisposableEffect(Unit) { onDispose { session?.detach() } }
+
+    fun show(s: AssistantSession) {
+        s.attach(context)
+        s.onHandoff = { _, _ -> }
+        s.followed = { null }
+        session = s
+    }
+
+    fun leave() {
+        loading?.cancel()
+        loading = null
+        session?.detach()
+        session = null
+        opening = false
+        openError = null
+        inChat = false
+        reload++
+    }
+
+    fun openConversation(id: String?) {
+        loading?.cancel()
+        session?.detach()
+        session = null
+        openError = null
+        text = ""
+        inChat = true
+        if (id == null) {
+            show(AssistantSession(context, ScreenCapture.None, resume = false))
+            return
+        }
+        AssistantSession.live(id)?.let { return show(it) }
+        opening = true
+        loading = scope.launch {
+            try {
+                val loaded = ConversationStore.load(context, id)
+                // Opened meanwhile by the overlay? Then that session.
+                show(AssistantSession.live(id) ?: AssistantSession(context, ScreenCapture.None, resume = false).also { it.open(loaded) })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                openError = e.message ?: "The conversation did not open."
+            } finally {
+                opening = false
+            }
+        }
+    }
+
+    fun delete(id: String) {
+        ConversationStore.delete(context, id)
+        items = items?.filterNot { it.conversation.id == id }
+    }
+
+    if (!inChat) {
+        HistoryList(
+            items = items, error = error ?: storeProblem, device = device, now = System.currentTimeMillis() / 1000,
+            onOpen = { openConversation(it) }, onNew = { openConversation(null) }, onDelete = ::delete, onBack = onClose,
+        )
+    } else {
+        BackHandler { leave() }
+        val shown = session
+        HistoryChat(
+            transcript = shown?.transcript ?: Transcript(),
+            running = shown?.running == true,
+            loading = opening,
+            error = openError,
+            // Only the chat asked for, once it is there, takes what is typed.
+            configured = shown?.configured ?: true,
+            canSend = shown != null,
+            text = text,
+            onText = { text = it },
+            onSend = {
+                val request = text.trim()
+                if (shown != null && request.isNotEmpty() && !shown.running) {
+                    text = ""
+                    scope.launch { shown.send(request) }
+                }
+            },
+            onAction = { entry, action -> shown?.act(entry, action) },
+            host = shown?.surfaces,
+            onNew = { openConversation(null) },
+            onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
+                delete(shown.conversationId)
+                leave()
+            }),
+            onBack = ::leave,
+        )
+    }
+}
+
+/** The list: conversations by day, newest first, and New chat. */
+@Composable
+internal fun HistoryList(
+    items: List<HistoryItem>?,
+    error: String?,
+    /** This phone's name: other devices' conversations say where they began. */
+    device: String,
+    /** Unix seconds; fixed in previews. */
+    now: Long,
+    onOpen: (String) -> Unit,
+    onNew: () -> Unit,
+    onDelete: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    var confirm by remember { mutableStateOf<HistoryItem?>(null) }
+    Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        topBar = {
+            LargeFlexibleTopAppBar(
+                title = { PageTitle("Chats") },
+                subtitle = { Text(items?.let { if (it.size == 1) "1 conversation with Prism" else "${it.size} conversations with Prism" } ?: "Loading…") },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") } },
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            )
+        },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = onNew,
+                icon = { Icon(Icons.Rounded.Add, null) },
+                text = { Text("New chat") },
+            )
+        },
+    ) { padding ->
+        when {
+            items == null -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
+            items.isEmpty() -> EmptyState(
+                PrismIcons.Chat, "No chats yet",
+                error ?: "What you ask Prism appears here, on every device.",
+                Modifier.padding(padding),
+            )
+            else -> LazyColumn(
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                if (error != null) {
+                    item(key = "error") {
+                        Text(error, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                    }
+                }
+                for ((day, group) in items.groupBy { dayLabel(it.conversation.updatedAt, now) }) {
+                    item(key = "day:$day") { SectionHeader(day, Modifier.padding(start = 4.dp, top = 12.dp)) }
+                    items(group, key = { it.conversation.id }) { item ->
+                        ConversationRow(item, device, now, onOpen = { onOpen(item.conversation.id) }, onDelete = { confirm = item })
+                    }
+                }
+            }
+        }
+    }
+    confirm?.let { item ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text("Delete this chat?") },
+            text = { Text("“${item.conversation.title.ifEmpty { "Untitled" }}” is deleted on every device.") },
+            confirmButton = { TextButton(onClick = { onDelete(item.conversation.id); confirm = null }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun ConversationRow(item: HistoryItem, device: String, now: Long, onOpen: () -> Unit, onDelete: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val c = item.conversation
+    var menu by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth()
+            .background(colors.surfaceContainerLow, RoundedCornerShape(20.dp))
+            .clickable(onClick = onOpen)
+            .padding(start = 20.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(c.title.ifEmpty { "Untitled" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val detail = listOfNotNull(
+                timeLabel(c.updatedAt, now),
+                c.device.takeIf { it.isNotEmpty() && it != device },
+                item.problem.ifEmpty { "Not synced yet" }.takeIf { item.waiting },
+            ).joinToString(" · ")
+            Text(
+                detail, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                color = if (item.problem.isNotEmpty()) colors.error else colors.onSurfaceVariant,
+            )
+        }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "More for ${c.title}") }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    leadingIcon = { Icon(Icons.Rounded.Delete, null) },
+                    onClick = { menu = false; onDelete() },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One conversation, full screen: its transcript and a composer that continues
+ * it. The Chats list opens it, and so does the overlay (AssistActivity), whose
+ * card grows into it: there Back returns to the card, [onChats] opens the list,
+ * and [composer] is the overlay's own card.
+ */
+@Composable
+internal fun HistoryChat(
+    transcript: Transcript,
+    running: Boolean,
+    loading: Boolean,
+    error: String?,
+    configured: Boolean,
+    /** The chat asked for is there (not loading, not failed): what is typed goes to it. */
+    canSend: Boolean,
+    text: String,
+    onText: (String) -> Unit,
+    onSend: () -> Unit,
+    /** What the owner did on a surface (entry, A2UI action): AssistantSession.act; null where the cards only show. */
+    onAction: (suspend (String, UiAction) -> String?)?,
+    onNew: () -> Unit,
+    /** Null for a chat with nothing in it yet. */
+    onDelete: (() -> Unit)?,
+    onBack: () -> Unit,
+    /** The clock timers count from; fixed in previews. */
+    now: (() -> Long)? = null,
+    /** The Chats list, from a chat that isn't in it (the overlay's). */
+    onChats: (() -> Unit)? = null,
+    /** The agent the overlay follows, shown live in the card of hand-off [handoff]. */
+    agent: FollowedAgent? = null,
+    handoff: String? = null,
+    /** In place of the plain field: the overlay's card. */
+    composer: (@Composable () -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
+    host: SurfaceHost? = null,
+) {
+    val colors = MaterialTheme.colorScheme
+    val list = rememberLazyListState()
+    var confirm by remember { mutableStateOf(false) }
+    val entries = transcript.entries
+    val surfaces = rememberSurfaceHost(entries, onAction, host)
+    LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
+        if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
+    }
+    // The overlay's card lies over the chat at its bottom (as in the overlay),
+    // and the list keeps clear of it.
+    var cardHeight by remember { mutableIntStateOf(0) }
+    val cardSpace = with(androidx.compose.ui.platform.LocalDensity.current) { cardHeight.toDp() }
+    Box(modifier) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            at.quickme.prism.assistant.core.Conversations.title(transcript) ?: "New chat",
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, if (onChats != null) "Back" else "Chats") }
+                    },
+                    actions = {
+                        if (onChats != null) IconButton(onClick = onChats) { Icon(PrismIcons.Chat, "Chats") }
+                        IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
+                        if (onDelete != null) IconButton(onClick = { confirm = true }, enabled = !running) { Icon(Icons.Rounded.Delete, "Delete chat") }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                )
+            },
+            bottomBar = {
+                if (composer == null) Surface(color = colors.surface) {
+                    Column(Modifier.navigationBarsPadding().imePadding().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)) {
+                        if (!configured) {
+                            Text("The assistant isn't set up on this phone (assistant_api_key).", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = text,
+                                onValueChange = onText,
+                                placeholder = { Text("Ask Prism") },
+                                enabled = configured && canSend,
+                                maxLines = 5,
+                                shape = RoundedCornerShape(28.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    unfocusedContainerColor = colors.surfaceContainerHigh,
+                                    focusedContainerColor = colors.surfaceContainerHigh,
+                                    unfocusedBorderColor = colors.surfaceContainerHigh,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilledIconButton(
+                                onClick = onSend,
+                                enabled = configured && canSend && !running && text.isNotBlank(),
+                                modifier = Modifier.padding(start = 8.dp).size(52.dp),
+                            ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                        }
+                    }
+                }
+            },
+        ) { padding ->
+            when {
+                loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
+                error != null -> EmptyState(PrismIcons.Chat, "This chat did not open", error, Modifier.padding(padding))
+                entries.isEmpty() && !running -> EmptyState(PrismIcons.Sparkle, "New chat", "Ask Prism anything; it can act on this phone and hand work to T3.", Modifier.padding(padding))
+                else -> LazyColumn(
+                    state = list,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + cardSpace + 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(entries, key = { it.id }) { e -> TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now) }
+                    if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
+                }
+            }
+        }
+        if (composer != null) Box(
+            // The card as Gemini's chat input: 12 dp from the sides and the bottom.
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp)
+                .onSizeChanged { cardHeight = it.height },
+            contentAlignment = Alignment.BottomCenter,
+        ) { composer() }
+    }
+    if (confirm && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Delete this chat?") },
+            text = { Text("It is deleted on every device.") },
+            confirmButton = { TextButton(onClick = { confirm = false; onDelete() }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** "Today", "Yesterday", "Previous 7 days", or the month. */
+internal fun dayLabel(unix: Long, now: Long, zone: ZoneId = ZoneId.systemDefault()): String {
+    val day = Instant.ofEpochSecond(unix).atZone(zone).toLocalDate()
+    val today = Instant.ofEpochSecond(now).atZone(zone).toLocalDate()
+    return when {
+        !day.isBefore(today) -> "Today"
+        day == today.minusDays(1) -> "Yesterday"
+        day.isAfter(today.minusDays(7)) -> "Previous 7 days"
+        day.year == today.year -> day.format(DateTimeFormatter.ofPattern("MMMM", Locale.ENGLISH))
+        else -> day.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH))
+    }
+}
+
+/** The time on the day it was today, else the date. */
+private fun timeLabel(unix: Long, now: Long, zone: ZoneId = ZoneId.systemDefault()): String {
+    val at = Instant.ofEpochSecond(unix).atZone(zone)
+    val today: LocalDate = Instant.ofEpochSecond(now).atZone(zone).toLocalDate()
+    return when {
+        at.toLocalDate() == today -> at.format(DateTimeFormatter.ofPattern("HH:mm"))
+        at.year == today.year -> at.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH))
+        else -> at.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+    }
+}

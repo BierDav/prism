@@ -12,7 +12,7 @@
 //! The phone authenticates with the credential it already holds for
 //! telemetry, basic auth `telemetry_user` (default `prism_phone`) and the
 //! password in `PRISM_TELEMETRY_PASSWORD(_FILE)`, and the worker sends the
-//! same credential upstream. It has no `prism_` device token: its replica's
+//! same credential upstream. It has no Prism token: its replica's
 //! provisioning is its identity (docs/prism-api.md). The check needs no
 //! database, so a push never waits on Rocky's storage.
 

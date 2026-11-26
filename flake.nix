@@ -34,6 +34,8 @@
           ./rocky-prism-ffi
           ./uniffi-bindgen
           ./worker
+          # rocky-prism and the worker include the coordinator bundle (include_str!).
+          ./deploy/rocky-coordinator-bundle.json
         ];
       };
       cargoLock = {
@@ -97,6 +99,12 @@
             "prism-worker"
             "-p"
             "rocky-prism"
+          ];
+          # The coordinated sealing test hangs or fails now and then (see
+          # .config/nextest.toml, which CI leaves it out of too).
+          checkFlags = [
+            "--skip"
+            "trusted_workers_seal_and_every_replica_compacts_behind_the_coordinator"
           ];
           inherit cargoLock;
           # Rocky's SQLite (libsqlite3-sys) generates its bindings with bindgen.

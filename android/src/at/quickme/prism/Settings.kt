@@ -31,6 +31,7 @@ object Settings {
         "telemetry_url", "telemetry_user", "telemetry_password", "netbird_setup_key", "netbird_management_url",
         "background_restricted", "background_charging_only", "activity_recognition_denied", "hotspot_key",
         "assistant_url", "assistant_api_key", "assistant_model", "matrix_homeserver", "matrix_access_token",
+        "call_mac",
     )
 
     /** Sent inside the app after provisioned settings changed. */

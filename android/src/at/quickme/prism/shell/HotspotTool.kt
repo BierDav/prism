@@ -113,7 +113,7 @@ object HotspotTool {
      * build one on a context that names the shell's package, with the
      * tethering service's binder.
      */
-    private fun tetheringManager(context: Context): TetheringManager? {
+    internal fun tetheringManager(context: Context): TetheringManager? {
         val shell = object : ContextWrapper(context) {
             override fun getOpPackageName(): String = SHELL_PACKAGE
             override fun getPackageName(): String = SHELL_PACKAGE
@@ -211,7 +211,7 @@ object HotspotTool {
         null
     }
 
-    private val TETHERING_WIFI: Int by lazy {
+    internal val TETHERING_WIFI: Int by lazy {
         try {
             TetheringManager::class.java.getField("TETHERING_WIFI").getInt(null)
         } catch (e: ReflectiveOperationException) {

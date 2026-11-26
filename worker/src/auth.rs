@@ -85,9 +85,10 @@ pub fn verify_machine_token(key: &[u8], token: &str) -> Option<String> {
 const ADMIN_PREFIX: &str = "admin:";
 
 /// Derives the admin API token from Prism's event key: `prism pair`,
-/// `machines` and `device-*` mint it where the key is (the worker pod) and
-/// the worker checks it. The CLI derives it the same way (`cli/src/token.rs`),
-/// and so does the rollout Job (`prism-worker coordinate`).
+/// `machines` and `account-limit` mint it where the key is (the worker pod)
+/// and the worker checks it. The CLI derives it the same way
+/// (`cli/src/token.rs`), and so does the rollout Job (`prism-worker
+/// coordinate`).
 #[cfg(any(test, feature = "coordinator"))]
 pub fn admin_token(key: &[u8]) -> Option<String> {
     let mut mac = admin_mac(key)?;

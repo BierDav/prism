@@ -11,6 +11,8 @@
 -keep class at.quickme.prism.shell.UserServiceStarter { public static void main(java.lang.String[]); }
 # The hotspot's tool, run the same way by Hotspot.kt (shell/HotspotTool.kt).
 -keep class at.quickme.prism.shell.HotspotTool { public static void main(java.lang.String[]); }
+# A call's bridge to the Mac, run the same way by Calls.kt (shell/CallBridge.kt).
+-keep class at.quickme.prism.shell.CallBridge { public static void main(java.lang.String[]); }
 # Shizuku apps unparcel it by this name (moe/shizuku/api/BinderContainer.kt).
 -keep class moe.shizuku.api.BinderContainer { *; }
 
@@ -70,3 +72,12 @@
 # Ktor's debugger detection (through Koog's Ktor server modules) asks the
 # JVM's management API, which Android doesn't have; it's never reached here.
 -dontwarn java.lang.management.**
+
+# CameraX's Guava (the overlay's camera, AssistCamera.kt) and its other
+# annotation-only dependencies: annotations deps/resolve.py leaves out
+# (jspecify) or that only checkers read; nothing reads them at run time.
+-dontwarn org.jspecify.annotations.**
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn com.google.j2objc.annotations.**
+-dontwarn javax.annotation.**
+-dontwarn org.checkerframework.**

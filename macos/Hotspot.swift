@@ -13,9 +13,13 @@
 //
 // A release (label "prism-hotspot-release/v1") is the same advertisement
 // with another label: WiFiSwitch.swift sends it while the Mac is on the
-// hotspot and a proven Wi-Fi is in range, and the phone switches its instant
-// hotspot off. The Mac can't tell instant from normal mode; the phone ignores
-// a release in normal mode.
+// hotspot and a reliable Wi-Fi is in range (or after it joined that Wi-Fi),
+// and the phone switches its instant hotspot off. The Mac can't tell instant
+// from normal mode; the phone ignores a release in normal mode.
+//
+// While it asks (whether or not Bluetooth lets it advertise: a hotspot in
+// normal mode is on anyway), WiFiSwitch.swift looks for the hotspot and joins
+// it.
 
 import CoreBluetooth
 import CryptoKit
@@ -29,7 +33,7 @@ final class Hotspot: NSObject, ObservableObject {
         case offline
         /// The menu's request, until `until`.
         case asked(until: Date)
-        /// A release: a proven Wi-Fi network (`ssid`) is in range
+        /// A release: a reliable Wi-Fi network (`ssid`) is in range
         /// (WiFiSwitch.swift).
         case release(ssid: String)
 
@@ -54,8 +58,8 @@ final class Hotspot: NSObject, ObservableObject {
     /// The file with the key, from fleet's `hotspotKeyFile` (nil: not set up,
     /// and the popout shows no hotspot row).
     let keyFile: String?
-    /// Leaving the hotspot for a proven Wi-Fi network.
-    let wifi = WiFiSwitch()
+    /// Joining the hotspot, and leaving it for a reliable Wi-Fi network.
+    let wifi: WiFiSwitch
 
     nonisolated static let requestLabel = "prism-hotspot/v1"
     nonisolated static let releaseLabel = "prism-hotspot-release/v1"
@@ -81,9 +85,11 @@ final class Hotspot: NSObject, ObservableObject {
     /// While the Mac leaves the hotspot: no request when the path drops, which
     /// it does until macOS has joined the other network.
     private var holdOffline = false
+    private var releaseAfterTimer: Timer?
 
-    init(keyFile: String?) {
+    init(keyFile: String?, networks: WiFiNetworks? = nil) {
         self.keyFile = keyFile.flatMap { $0.isEmpty ? nil : $0 }
+        wifi = WiFiSwitch(networks: networks ?? WiFiNetworks())
         super.init()
         wifi.hotspot = self
     }
@@ -111,6 +117,23 @@ final class Hotspot: NSObject, ObservableObject {
         return true
     }
 
+    /// No request while the path drops, until `endHold`: the Mac is leaving
+    /// the hotspot for another network.
+    func hold() {
+        holdOffline = true
+        update(stopReason: "")
+    }
+
+    /// The Mac left the hotspot for `ssid` and has working internet there:
+    /// a release for 30 s switches the phone's instant hotspot off now.
+    func releaseAfterLeaving(ssid: String) {
+        guard release(ssid: ssid) else { return }
+        releaseAfterTimer?.invalidate()
+        releaseAfterTimer = Timer.scheduledTimer(withTimeInterval: WiFiSwitch.releaseDuration, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.endHold() }
+        }
+    }
+
     func endRelease(reason: String) {
         guard releasing != nil else { return }
         releasing = nil
@@ -119,6 +142,8 @@ final class Hotspot: NSObject, ObservableObject {
 
     /// Requests again while the path is down (after a release).
     func endHold() {
+        releaseAfterTimer?.invalidate()
+        releaseAfterTimer = nil
         releasing = nil
         holdOffline = false
         update(stopReason: "")
@@ -176,10 +201,12 @@ final class Hotspot: NSObject, ObservableObject {
     /// Brings the advertisement in line with what is wanted; `stopReason` is
     /// logged if this stops it.
     private func update(stopReason: String) {
-        let wanted: Reason? = if let releasing { .release(ssid: releasing) }
-            else if let asked, asked > Date() { .asked(until: asked) }
+        let request: Reason? = if let asked, asked > Date() { .asked(until: asked) }
             else if offline && !holdOffline { .offline }
             else { nil }
+        let wanted: Reason? = if let releasing { .release(ssid: releasing) } else { request }
+        // Joining doesn't need Bluetooth or the key: the hotspot may be on.
+        wifi.setWantsHotspot(request != nil && releasing == nil)
         guard let wanted else {
             problem = nil
             if advertising != nil {

@@ -280,7 +280,43 @@ async fn compact(db: &rocky_sdk::Database) -> Result<u64, PrismError> {
     compacted
 }
 
-/// Compacts `db` every [`COMPACT_EVERY`] until its last handle is dropped.
+/// Follows the replica's bookmark again when it moved past the tip this
+/// replica writes on. That happens when another node's seal ends the tip
+/// (the seal moves the bookmark to its successor) while this replica's own
+/// seal of it lost, e.g. a worker that published a newer schema at open:
+/// until it follows again its writes fail with "followed bookmark moved or
+/// was deleted; workspace is read-only". Rocky follows once the successor's
+/// seal is held here (`follow_when_ready`). True when it asked to.
+async fn refollow(db: &rocky_sdk::Database) -> Result<bool, PrismError> {
+    let session = db.session();
+    let asked = async {
+        let status = session.tip_status().await.map_err(storage_err)?;
+        let Some(name) = status.bookmark.clone() else {
+            return Ok(false);
+        };
+        if status.pending_follow.is_some() {
+            return Ok(false);
+        }
+        let inspection = session.inspect_tips().await.map_err(storage_err)?;
+        let moved = inspection
+            .bookmarks
+            .iter()
+            .find(|bookmark| bookmark.name == name)
+            .and_then(|bookmark| bookmark.tip.as_deref())
+            .is_some_and(|tip| tip != status.tip);
+        if !moved {
+            return Ok(false);
+        }
+        session.follow_when_ready(&name).await.map_err(storage_err)?;
+        Ok(true)
+    }
+    .await;
+    session.close().await;
+    asked
+}
+
+/// Compacts `db` every [`COMPACT_EVERY`] until its last handle is dropped,
+/// following its bookmark again first when it moved ([`refollow`]).
 /// Needs a Tokio runtime, which every Prism device runs.
 pub(crate) fn spawn_compaction(db: &std::sync::Arc<rocky_sdk::Database>) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -291,6 +327,11 @@ pub(crate) fn spawn_compaction(db: &std::sync::Arc<rocky_sdk::Database>) {
         loop {
             tokio::time::sleep(COMPACT_EVERY).await;
             let Some(db) = db.upgrade() else { return };
+            match refollow(&db).await {
+                Ok(false) => {}
+                Ok(true) => eprintln!("rocky-prism: the bookmark moved past this replica's tip; following it again"),
+                Err(err) => eprintln!("rocky-prism: following the moved bookmark failed: {err}"),
+            }
             match compact(&db).await {
                 Ok(0) => {}
                 Ok(pruned) => eprintln!("rocky-prism: compacted {pruned} operations of history"),
@@ -309,6 +350,16 @@ fn storage_err(err: impl std::fmt::Display) -> PrismError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_bookmark_in_place_is_not_followed_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = crate::PrismClient::open_or_create(dir.path().display().to_string(), None)
+            .await
+            .expect("open");
+        assert!(!refollow(&client.db).await.expect("refollow"));
+        assert!(!refollow(&client.db).await.expect("refollow again"));
+    }
 
     #[tokio::test]
     async fn a_root_signer_reads_the_phrase_or_the_whole_root() {
