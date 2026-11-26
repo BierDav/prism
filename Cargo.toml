@@ -11,13 +11,8 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/BierDav/prism"
 
 [workspace.dependencies]
-rocky-sdk = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
-rocky-tcp = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d", features = ["websocket"] }
-# Seal coordination (rocky-prism's `coordinator` feature): the client of the
-# public voters at rocky.quickme.at, reached over iroh through their relay.
-rocky-coordinator = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
-rocky-iroh = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
-rocky-voter = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
+rocky-sdk = { git = "https://github.com/BierDav/rocky", rev = "029f9381784660b42ef414b6c57082a61fa37675" }
+rocky-tcp = { git = "https://github.com/BierDav/rocky", rev = "029f9381784660b42ef414b6c57082a61fa37675", features = ["websocket"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 serde = { version = "1", features = ["derive"] }

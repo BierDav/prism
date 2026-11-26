@@ -3,8 +3,7 @@
 //! through sync. A task on the worker's replica stands in for the leader.
 
 use rocky_prism::{
-    AGENT_STOP, AgentRow, AlertActionOutcome, ApprovalRow, MachineRow, PrismClient, PrismRoot,
-    QuestionRow, peer_contact,
+    AGENT_STOP, AgentRow, AlertActionOutcome, ApprovalRow, MachineRow, PrismClient, QuestionRow,
 };
 use rocky_prism_ffi::{ApiRequest, Replica, open_provisioned_replica};
 use rocky_sdk::Network;
@@ -25,15 +24,6 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_secs() as i64
-}
-
-async fn contact(provisioning: &str, address: &str) -> String {
-    let advertised = rocky_tcp::Attachment::external(address);
-    let contact = peer_contact(provisioning, Network::Borrowed(advertised.transport()))
-        .await
-        .expect("peer contact");
-    advertised.close().await;
-    contact
 }
 
 async fn call(replica: &Replica, method: &str, path: &str, body: Option<Value>) -> (i32, Value) {
@@ -231,29 +221,21 @@ async fn lead(worker: Arc<PrismClient>, running: Arc<AtomicBool>, seen: Seen) {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_phone_reads_and_acts_through_its_replica() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let root = PrismRoot::create().await.expect("root");
-    let w = root.provision(WORKER).await.expect("w");
-    let phone = root.provision("david-pixel").await.expect("phone");
 
     let attach_w = rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
         .websocket()
         .start()
         .await
         .expect("worker attachment");
-    let route = format!("ws://{}", attach_w.local_addr().expect("address"));
     let worker = Arc::new(
-        PrismClient::open_provisioned(
+        PrismClient::open_or_create(
             dir.path().join("w").display().to_string(),
-            w.provisioning.clone(),
             Some(Network::Borrowed(attach_w.transport())),
         )
         .await
         .expect("worker"),
     );
-    worker
-        .add_peers(vec![contact(&phone.provisioning, "127.0.0.1:9").await])
-        .await
-        .expect("worker peers");
+    let phone_inv = worker.invite(Some("david-pixel")).await.expect("invite phone");
 
     // What the leader keeps in the replica.
     let firing = json!({"status": "firing", "alerts": [{
@@ -326,8 +308,8 @@ async fn the_phone_reads_and_acts_through_its_replica() {
 
     let on_phone = open_provisioned_replica(
         dir.path().join("phone").display().to_string(),
-        phone.provisioning.clone(),
-        vec![contact(&w.provisioning, &route).await],
+        phone_inv,
+        Vec::new(),
     )
     .await
     .expect("open provisioned");

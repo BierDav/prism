@@ -18,27 +18,13 @@ const SUMMARY_EVERY: Duration = Duration::from_secs(60 * 60);
 /// A status read waits behind the replica's other work; give up after this.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The status in one line: alerts, blockers and the coordination mode, each
-/// as Rocky's JSON, so a skipped seal names its reason.
+/// The status in one line: alerts and blockers.
 pub fn summary(status: &DatabaseStatus) -> String {
-    let json = |v: &dyn erased::Json| v.json();
     format!(
-        "alerts {}, blockers {}, coordination {}",
-        json(&status.alerts),
-        json(&status.data.blockers),
-        json(&status.coordination.mode),
+        "alerts {:?}, blockers {:?}",
+        status.alerts(),
+        status.blockers(),
     )
-}
-
-mod erased {
-    pub trait Json {
-        fn json(&self) -> String;
-    }
-    impl<T: serde::Serialize> Json for T {
-        fn json(&self) -> String {
-            serde_json::to_string(self).unwrap_or_else(|err| format!("<{err}>"))
-        }
-    }
 }
 
 /// The bytes of the replica's SQLite files (`rocky.sqlite` and its WAL).
@@ -86,7 +72,7 @@ mod tests {
         let status = client.rocky_status().await.expect("status");
         let line = summary(&status);
         assert!(line.starts_with("alerts ["), "{line}");
-        assert!(line.contains("coordination \"not_configured\""), "{line}");
+        assert!(line.contains("blockers ["), "{line}");
         assert!(replica_bytes(dir.path()) > 0);
         client.close().await.expect("close");
     }

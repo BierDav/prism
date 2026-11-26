@@ -4,7 +4,7 @@
 //! near the limit, about 1 MB in all), so sync must carry it in frames
 //! under Rocky's 128 KiB.
 
-use rocky_prism::{ASSISTANT_MAX_BODY_BYTES, PrismClient, PrismRoot, peer_contact};
+use rocky_prism::{ASSISTANT_MAX_BODY_BYTES, PrismClient};
 use rocky_prism_ffi::{ApiRequest, Replica, open_provisioned_replica};
 use rocky_sdk::Network;
 use serde_json::{Value, json};
@@ -12,15 +12,6 @@ use std::{
     net::SocketAddr,
     time::{Duration, Instant},
 };
-
-async fn contact(provisioning: &str, address: &str) -> String {
-    let advertised = rocky_tcp::Attachment::external(address);
-    let contact = peer_contact(provisioning, Network::Borrowed(advertised.transport()))
-        .await
-        .expect("peer contact");
-    advertised.close().await;
-    contact
-}
 
 async fn call(replica: &Replica, method: &str, path: &str, body: Option<Value>) -> (i32, Value) {
     let response = replica
@@ -43,30 +34,22 @@ async fn call(replica: &Replica, method: &str, path: &str, body: Option<Value>) 
 #[tokio::test(flavor = "multi_thread")]
 async fn conversations_are_saved_on_the_phone_and_reach_the_workers() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let root = PrismRoot::create().await.expect("root");
-    let w = root.provision("prism-worker-0").await.expect("w");
-    let phone = root.provision("david-pixel").await.expect("phone");
     let attach_w = rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
         .websocket()
         .start()
         .await
         .expect("worker attachment");
-    let route = format!("ws://{}", attach_w.local_addr().expect("address"));
-    let worker = PrismClient::open_provisioned(
+    let worker = PrismClient::open_or_create(
         dir.path().join("w").display().to_string(),
-        w.provisioning.clone(),
         Some(Network::Borrowed(attach_w.transport())),
     )
     .await
     .expect("worker");
-    worker
-        .add_peers(vec![contact(&phone.provisioning, "127.0.0.1:9").await])
-        .await
-        .expect("worker peers");
+    let phone_inv = worker.invite(Some("david-pixel")).await.expect("invite phone");
     let on_phone = open_provisioned_replica(
         dir.path().join("phone").display().to_string(),
-        phone.provisioning.clone(),
-        vec![contact(&w.provisioning, &route).await],
+        phone_inv,
+        Vec::new(),
     )
     .await
     .expect("phone");

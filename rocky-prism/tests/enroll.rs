@@ -1,7 +1,7 @@
-//! A root provisions devices; they open from their provisioning and sync
-//! with each other over rocky-tcp on loopback.
+//! A creator invites devices; they join over rocky-tcp on loopback, sync both
+//! ways, and reopen their directory.
 
-use rocky_prism::{PrismClient, PrismRoot, PutPlacementProfileRequest, peer_contact};
+use rocky_prism::{PrismClient, PutPlacementProfileRequest};
 use rocky_sdk::Network;
 use std::{
     net::SocketAddr,
@@ -11,32 +11,21 @@ use std::{
 
 const SYNC_WAIT: Duration = Duration::from_secs(60);
 
-async fn loopback() -> (rocky_tcp::Attachment, String) {
-    let attachment = rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
+async fn loopback() -> rocky_tcp::Attachment {
+    rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
         .start()
         .await
-        .expect("rocky-tcp on loopback");
-    let address = attachment.local_addr().expect("bound address").to_string();
-    (attachment, address)
+        .expect("rocky-tcp on loopback")
 }
 
-async fn contact(provisioning: &str, address: &str) -> String {
-    let advertised = rocky_tcp::Attachment::external(address);
-    let contact = peer_contact(provisioning, Network::Borrowed(advertised.transport()))
-        .await
-        .expect("peer contact");
-    advertised.close().await;
-    contact
-}
-
-async fn open(dir: &Path, provisioning: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
-    PrismClient::open_provisioned(
+async fn open(dir: &Path, invitation: &str, attachment: &rocky_tcp::Attachment) -> PrismClient {
+    PrismClient::open_invited(
         dir.display().to_string(),
-        provisioning.to_owned(),
+        invitation.to_owned(),
         Some(Network::Borrowed(attachment.transport())),
     )
     .await
-    .expect("open from provisioning")
+    .expect("open from invitation")
 }
 
 async fn profile_ids(client: &PrismClient) -> Vec<String> {
@@ -79,151 +68,39 @@ async fn wait_for(client: &PrismClient, expected: &[&str]) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn provisioned_devices_sync_both_ways_and_reopen_their_directory() {
+async fn invited_devices_sync_both_ways_and_reopen_their_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let attach_a = loopback().await;
+    let attach_b = loopback().await;
 
-    // fleet: create the root once, store its text, provision from the stored copy.
-    let root = PrismRoot::parse(&PrismRoot::create().await.expect("root").encode())
-        .expect("root round trip");
-    assert!(!root.root_key().expect("root key").is_empty());
-    let a = root.provision("prism-worker-0").await.expect("provision a");
-    let b = root.provision("david-pixel").await.expect("provision b");
-    assert_ne!(a.node, b.node);
-    assert!(root.provision("Not A Label").await.is_err());
-
-    let (attach_a, addr_a) = loopback().await;
-    let (attach_b, addr_b) = loopback().await;
-    let contacts = vec![
-        contact(&a.provisioning, &addr_a).await,
-        contact(&b.provisioning, &addr_b).await,
-    ];
-
-    let dir_a = dir.path().join("a");
-    let client_a = open(&dir_a, &a.provisioning, &attach_a).await;
-    let client_b = open(&dir.path().join("b"), &b.provisioning, &attach_b).await;
-    assert_eq!(client_a.node().await.expect("node a"), a.node);
-    assert_eq!(client_b.node().await.expect("node b"), b.node);
-    // Both get the same list; each skips itself.
-    assert_eq!(
-        client_a.add_peers(contacts.clone()).await.expect("peers"),
-        1
+    let client_a = PrismClient::open_or_create(
+        dir.path().join("a").display().to_string(),
+        Some(Network::Borrowed(attach_a.transport())),
+    )
+    .await
+    .expect("open a");
+    let inv_b = client_a.invite(Some("david-pixel")).await.expect("invite b");
+    let client_b = open(&dir.path().join("b"), &inv_b, &attach_b).await;
+    assert_ne!(
+        client_a.node().await.expect("node a"),
+        client_b.node().await.expect("node b")
     );
-    assert_eq!(
-        client_b.add_peers(contacts.clone()).await.expect("peers"),
-        1
-    );
-    // A provisioned device seeds nothing.
-    assert!(profile_ids(&client_a).await.is_empty());
 
     put_profile(&client_a, "from-a").await;
+    wait_for(&client_b, &["from-a"]).await;
+
     put_profile(&client_b, "from-b").await;
     wait_for(&client_a, &["from-a", "from-b"]).await;
+
+    let node_b = client_b.node().await.expect("node b");
+    client_b.close().await.expect("close b");
+
+    let client_b = open(&dir.path().join("b"), &inv_b, &attach_b).await;
+    assert_eq!(client_b.node().await.expect("reopen node b"), node_b);
     wait_for(&client_b, &["from-a", "from-b"]).await;
 
-    // A second start reuses the data directory; the provisioning is not reinstalled.
     client_a.close().await.expect("close a");
-    let reopened = open(&dir_a, &a.provisioning, &attach_a).await;
-    assert_eq!(reopened.node().await.expect("node"), a.node);
-    assert_eq!(profile_ids(&reopened).await, ["from-a", "from-b"]);
-    assert_eq!(reopened.add_peers(contacts).await.expect("peers"), 1);
-    put_profile(&reopened, "again-a").await;
-    wait_for(&client_b, &["again-a", "from-a", "from-b"]).await;
-
-    reopened.close().await.expect("close a");
     client_b.close().await.expect("close b");
     attach_a.close().await;
     attach_b.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_provisioning_of_a_new_database_replaces_the_old_replica() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let replica = dir.path().join("rocky");
-    let (attachment, _) = loopback().await;
-
-    let old = PrismRoot::create().await.expect("old root");
-    let old_device = old.provision("david-pixel").await.expect("provision old");
-    let client = open(&replica, &old_device.provisioning, &attachment).await;
-    put_profile(&client, "old").await;
-    client.close().await.expect("close");
-
-    // The same provisioning again keeps the replica.
-    let client = open(&replica, &old_device.provisioning, &attachment).await;
-    assert_eq!(profile_ids(&client).await, ["old"]);
-    client.close().await.expect("close");
-
-    // A provisioning from a new root: the old replica goes, the device
-    // enrolls in the new database.
-    let new = PrismRoot::create().await.expect("new root");
-    let new_device = new.provision("david-pixel").await.expect("provision new");
-    let client = open(&replica, &new_device.provisioning, &attachment).await;
-    assert_eq!(client.node().await.expect("node"), new_device.node);
-    assert!(profile_ids(&client).await.is_empty());
-    client.close().await.expect("close");
-
-    // And it stays: the next open reuses the new replica.
-    let client = open(&replica, &new_device.provisioning, &attachment).await;
-    assert_eq!(client.node().await.expect("node"), new_device.node);
-    client.close().await.expect("close");
-    attachment.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn peers_of_another_database_never_drop_a_replica() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let replica = dir.path().join("rocky");
-    let (attachment, _) = loopback().await;
-
-    let old = PrismRoot::create().await.expect("old root");
-    let old_device = old.provision("david-pixel").await.expect("provision");
-    let old_worker = old.provision("prism-worker-0").await.expect("provision");
-    let new = PrismRoot::create().await.expect("new root");
-    let new_device = new.provision("david-pixel").await.expect("provision");
-    let new_worker = new.provision("prism-worker-0").await.expect("provision");
-    let old_peer = contact(&old_worker.provisioning, "127.0.0.1:9").await;
-    let new_peer = contact(&new_worker.provisioning, "127.0.0.1:9").await;
-
-    let open_with_peers = |provisioning: String, peers: Vec<String>| {
-        let replica = replica.display().to_string();
-        let network = Network::Borrowed(attachment.transport());
-        async move {
-            PrismClient::open_provisioned_with_peers(
-                replica,
-                provisioning,
-                Some(network),
-                None,
-                peers,
-            )
-            .await
-        }
-    };
-    let (client, added) = open_with_peers(old_device.provisioning.clone(), vec![old_peer.clone()])
-        .await
-        .expect("old database");
-    assert_eq!(added, 1);
-    put_profile(&client, "old").await;
-    client.close().await.expect("close");
-
-    // The old provisioning with the new database's peers: they disagree, so
-    // the open fails and the replica stays.
-    assert!(
-        open_with_peers(old_device.provisioning.clone(), vec![new_peer.clone()])
-            .await
-            .is_err()
-    );
-    let (client, _) = open_with_peers(old_device.provisioning.clone(), vec![old_peer])
-        .await
-        .expect("old database again");
-    assert_eq!(profile_ids(&client).await, ["old"]);
-    client.close().await.expect("close");
-
-    // The new provisioning with the new peers: the device enrolls anew.
-    let (client, added) = open_with_peers(new_device.provisioning.clone(), vec![new_peer])
-        .await
-        .expect("new database");
-    assert_eq!(added, 1);
-    assert_eq!(client.node().await.expect("node"), new_device.node);
-    assert!(profile_ids(&client).await.is_empty());
-    client.close().await.expect("close");
-    attachment.close().await;
 }

@@ -6,13 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-default = ["coordinator"]
-# Seal coordination (src/coordination.rs): the link to the public Rocky
-# coordinator and the rollout Job. rocky-prism-ffi turns it off, so the apps
-# don't carry iroh.
-coordinator = ["rocky-prism/coordinator"]
-
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 chrono.workspace = true
@@ -38,7 +31,7 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
 [dev-dependencies]
-rocky-core = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
+rocky-core = { git = "https://github.com/BierDav/rocky", rev = "029f9381784660b42ef414b6c57082a61fa37675" }
 axum = { version = "0.8", features = ["ws"] }
 http-body-util = "0.1"
 p256 = { version = "0.13", features = ["ecdsa"] }

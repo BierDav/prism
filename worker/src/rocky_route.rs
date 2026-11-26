@@ -114,22 +114,48 @@ pub async fn rocky_upgrade(
 }
 
 async fn forward(io: TokioIo<hyper::upgrade::Upgraded>, address: &str) -> Result<(), Failure> {
-    let websocket = rocky_tcp::websocket_stream(io).await;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncReadExt;
+    use tokio_tungstenite::tungstenite::{Message, protocol::Role};
+
+    let websocket =
+        tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, None).await;
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await??;
     tcp.set_nodelay(true)?;
-    let (mut ws_read, mut ws_write) = tokio::io::split(websocket);
+    let (mut ws_sink, mut ws_stream) = websocket.split();
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
-    // Each direction reports when its copy ends; from the first report on,
-    // the shutdowns and the other direction get CLOSE_TIMEOUT in total.
-    let (ended, mut first_end) = tokio::sync::mpsc::channel(2);
+    let (ended, mut first_end) = tokio::sync::mpsc::channel::<Result<(), Failure>>(2);
     let up_ended = ended.clone();
     let up = async move {
-        let _ = up_ended.try_send(tokio::io::copy(&mut ws_read, &mut tcp_write).await);
+        let res: Result<(), Failure> = async {
+            while let Some(msg) = ws_stream.next().await {
+                match msg? {
+                    Message::Binary(data) => tcp_write.write_all(&data).await?,
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let _ = up_ended.try_send(res);
         let _ = tcp_write.shutdown().await;
     };
     let down = async move {
-        let _ = ended.try_send(tokio::io::copy(&mut tcp_read, &mut ws_write).await);
-        let _ = ws_write.shutdown().await;
+        let res: Result<(), Failure> = async {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let n = tcp_read.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                ws_sink.send(Message::Binary(buf[..n].to_vec().into())).await?;
+            }
+            Ok(())
+        }
+        .await;
+        let _ = ended.try_send(res);
+        let _ = ws_sink.close().await;
     };
     let both = async { tokio::join!(up, down) };
     tokio::pin!(both);
@@ -211,7 +237,8 @@ mod tests {
         tokio::spawn(answer_once(own_port, b"from worker-0"));
         tokio::spawn(answer_once(other_port, b"from worker-1"));
 
-        let caller = Options::dialer().transport();
+        let caller_attach = Options::dialer().start().await.expect("dialer");
+        let caller = caller_attach.transport();
         let own_url = format!("ws://{http}/rocky/worker-0");
         let other_url = format!("ws://{http}/rocky/worker-1");
         assert_eq!(

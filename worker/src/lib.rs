@@ -10,8 +10,6 @@ pub mod android_settings;
 pub mod approvals;
 pub mod auth;
 pub mod config;
-#[cfg(feature = "coordinator")]
-pub mod coordination;
 pub mod direct;
 pub mod health;
 pub mod http;

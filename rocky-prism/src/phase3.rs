@@ -283,10 +283,11 @@ pub struct AndroidReleaseRow {
 
 impl PrismClient {
     async fn exec_one(&self, sql: &str, args: Vec<SqlValue>) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(sql, args).await.map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
-        Ok(())
+        let sql = sql.to_owned();
+        self.db
+            .write(async move |tx| tx.execute(&sql, args).await)
+            .await
+            .map_err(storage_err)
     }
 
     async fn insert_one(
@@ -295,12 +296,16 @@ impl PrismClient {
         sql: &str,
         mut args: Vec<SqlValue>,
     ) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        let id = tx.next_id(table, vec![]).await.map_err(storage_err)?;
-        args.insert(0, id.into());
-        tx.execute(sql, args).await.map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
-        Ok(())
+        let table = table.to_owned();
+        let sql = sql.to_owned();
+        self.db
+            .write(async move |tx| {
+                let id = tx.next_id(&table).await?;
+                args.insert(0, id.into());
+                tx.execute(&sql, args).await
+            })
+            .await
+            .map_err(storage_err)
     }
 
     async fn request_exists(&self, table: &str, request_id: &str) -> Result<bool, PrismError> {
@@ -360,29 +365,31 @@ impl PrismClient {
     pub async fn prune_phase3(&self, now: i64, keep_secs: i64) -> Result<(), PrismError> {
         let before = now - keep_secs;
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for table in [
-            "approval_answers",
-            "question_answers",
-            "agent_requests",
-            "agent_messages",
-        ] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE done_at IS NOT NULL AND done_at < ?"),
-                params![before],
-            )
+        self.db
+            .write(async move |tx| {
+                for table in [
+                    "approval_answers",
+                    "question_answers",
+                    "agent_requests",
+                    "agent_messages",
+                ] {
+                    tx.execute(
+                        &format!("DELETE FROM {table} WHERE done_at IS NOT NULL AND done_at < ?"),
+                        params![before],
+                    )
+                    .await?;
+                }
+                for table in ["approvals", "questions"] {
+                    tx.execute(
+                        &format!("DELETE FROM {table} WHERE state != 'open' AND updated_at < ?"),
+                        params![before],
+                    )
+                    .await?;
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
             .map_err(storage_err)?;
-        }
-        for table in ["approvals", "questions"] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE state != 'open' AND updated_at < ?"),
-                params![before],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -427,34 +434,34 @@ impl PrismClient {
 
     pub async fn upsert_t3_session(&self, row: &T3SessionRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM t3_sessions WHERE machine = ?",
-            params![row.machine.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx
-            .next_id("t3_sessions", vec![])
+        let row = row.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM t3_sessions WHERE machine = ?",
+                    params![row.machine.clone()],
+                )
+                .await?;
+                let id = tx.next_id("t3_sessions").await?;
+                tx.execute(
+                    "INSERT INTO t3_sessions (id, machine, origin, token, environment_id, label, access, paired_at, expires_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        id,
+                        row.machine,
+                        row.origin,
+                        row.token,
+                        row.environment_id,
+                        row.label,
+                        row.access,
+                        row.paired_at,
+                        row.expires_at,
+                    ],
+                )
+                .await
+            })
             .await
             .map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO t3_sessions (id, machine, origin, token, environment_id, label, access, paired_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id,
-                row.machine.clone(),
-                row.origin.clone(),
-                row.token.clone(),
-                row.environment_id.clone(),
-                row.label.clone(),
-                row.access.clone(),
-                row.paired_at,
-                row.expires_at,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -490,31 +497,31 @@ impl PrismClient {
         row: &T3ClientSessionRow,
     ) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM t3_client_sessions WHERE machine = ?",
-            params![row.machine.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx
-            .next_id("t3_client_sessions", vec![])
+        let row = row.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM t3_client_sessions WHERE machine = ?",
+                    params![row.machine.clone()],
+                )
+                .await?;
+                let id = tx.next_id("t3_client_sessions").await?;
+                tx.execute(
+                    "INSERT INTO t3_client_sessions (id, machine, origin, token, environment_id, expires_at)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    params![
+                        id,
+                        row.machine,
+                        row.origin,
+                        row.token,
+                        row.environment_id,
+                        row.expires_at,
+                    ],
+                )
+                .await
+            })
             .await
             .map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO t3_client_sessions (id, machine, origin, token, environment_id, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![id,
-                row.machine.clone(),
-                row.origin.clone(),
-                row.token.clone(),
-                row.environment_id.clone(),
-                row.expires_at,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1004,48 +1011,50 @@ impl PrismClient {
 
     pub async fn save_agent(&self, a: &AgentRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM agents WHERE thread_id = ?",
-            params![a.thread_id.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx.next_id("agents", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO agents (id,
-                thread_id, kind, title, alert_id, target, client, environment_id, host, link,
-                request_text, state, run_status, question_pending, last_message, requested_by,
-                created_at, updated_at, next_check, reported_run, terminal_run, terminal_seen
-             ) VALUES (?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            params![
-                id,
-                a.thread_id.clone(),
-                a.kind.clone(),
-                a.title.clone(),
-                a.alert_id,
-                a.target.clone(),
-                a.client.clone(),
-                a.environment_id.clone(),
-                a.host.clone(),
-                a.link.clone(),
-                a.request_text.clone(),
-                a.state.clone(),
-                a.run_status.clone(),
-                if a.question_pending { 1_i64 } else { 0_i64 },
-                a.last_message.clone(),
-                a.requested_by.clone(),
-                a.created_at,
-                a.updated_at,
-                a.next_check,
-                a.reported_run.clone(),
-                a.terminal_run.clone(),
-                a.terminal_seen,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let a = a.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM agents WHERE thread_id = ?",
+                    params![a.thread_id.clone()],
+                )
+                .await?;
+                let id = tx.next_id("agents").await?;
+                tx.execute(
+                    "INSERT INTO agents (id,
+                        thread_id, kind, title, alert_id, target, client, environment_id, host, link,
+                        request_text, state, run_status, question_pending, last_message, requested_by,
+                        created_at, updated_at, next_check, reported_run, terminal_run, terminal_seen
+                     ) VALUES (?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![
+                        id,
+                        a.thread_id,
+                        a.kind,
+                        a.title,
+                        a.alert_id,
+                        a.target,
+                        a.client,
+                        a.environment_id,
+                        a.host,
+                        a.link,
+                        a.request_text,
+                        a.state,
+                        a.run_status,
+                        if a.question_pending { 1_i64 } else { 0_i64 },
+                        a.last_message,
+                        a.requested_by,
+                        a.created_at,
+                        a.updated_at,
+                        a.next_check,
+                        a.reported_run,
+                        a.terminal_run,
+                        a.terminal_seen,
+                    ],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1371,29 +1380,23 @@ impl PrismClient {
 
     pub async fn save_agent_activity(&self, row: &AgentActivityRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM agent_activity WHERE agent_id = ?",
-            params![row.agent_id.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx
-            .next_id("agent_activity", vec![])
+        let row = row.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM agent_activity WHERE agent_id = ?",
+                    params![row.agent_id.clone()],
+                )
+                .await?;
+                let id = tx.next_id("agent_activity").await?;
+                tx.execute(
+                    "INSERT INTO agent_activity (id, agent_id, status, items_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    params![id, row.agent_id, row.status, row.items_json, row.updated_at],
+                )
+                .await
+            })
             .await
             .map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO agent_activity (id, agent_id, status, items_json, updated_at) VALUES (?, ?, ?, ?, ?)",
-            params![id,
-                row.agent_id.clone(),
-                row.status.clone(),
-                row.items_json.clone(),
-                row.updated_at,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1425,26 +1428,23 @@ impl PrismClient {
 
     pub async fn upsert_machine(&self, row: &MachineRow) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM machines WHERE name = ?",
-            params![row.name.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx.next_id("machines", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO machines (id, name, status_json, metrics_json, updated_at) VALUES (?, ?, ?, ?, ?)",
-            params![id,
-                row.name.clone(),
-                row.status_json.clone(),
-                row.metrics_json.clone(),
-                row.updated_at,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let row = row.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM machines WHERE name = ?",
+                    params![row.name.clone()],
+                )
+                .await?;
+                let id = tx.next_id("machines").await?;
+                tx.execute(
+                    "INSERT INTO machines (id, name, status_json, metrics_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    params![id, row.name, row.status_json, row.metrics_json, row.updated_at],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1474,28 +1474,31 @@ impl PrismClient {
 
     pub async fn replace_projects(&self, projects: &[ProjectRow]) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute("DELETE FROM projects", params![])
+        let projects = projects.to_vec();
+        self.db
+            .write(async move |tx| {
+                tx.execute("DELETE FROM projects", params![]).await?;
+                for p in projects {
+                    let id = tx.next_id("projects").await?;
+                    tx.execute(
+                        "INSERT INTO projects (id, project_id, name, icon_json, machines_json, repository, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            id,
+                            p.project_id,
+                            p.name,
+                            p.icon_json,
+                            p.machines_json,
+                            if p.repository { 1_i64 } else { 0_i64 },
+                            p.updated_at,
+                        ],
+                    )
+                    .await?;
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
             .map_err(storage_err)?;
-        for p in projects {
-            let id = tx.next_id("projects", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO projects (id, project_id, name, icon_json, machines_json, repository, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![id,
-                    p.project_id.clone(),
-                    p.name.clone(),
-                    p.icon_json.clone(),
-                    p.machines_json.clone(),
-                    if p.repository { 1_i64 } else { 0_i64 },
-                    p.updated_at,
-                ],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1527,18 +1530,21 @@ impl PrismClient {
 
     pub async fn set_setting(&self, key: &str, value: &str, now: i64) -> Result<(), PrismError> {
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute("DELETE FROM settings WHERE key = ?", params![key])
+        let key = key.to_owned();
+        let value = value.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute("DELETE FROM settings WHERE key = ?", params![key.clone()])
+                    .await?;
+                let id = tx.next_id("settings").await?;
+                tx.execute(
+                    "INSERT INTO settings (id, key, value, updated_at) VALUES (?, ?, ?, ?)",
+                    params![id, key, value, now],
+                )
+                .await
+            })
             .await
             .map_err(storage_err)?;
-        let id = tx.next_id("settings", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO settings (id, key, value, updated_at) VALUES (?, ?, ?, ?)",
-            params![id, key, value, now],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1653,34 +1659,34 @@ impl PrismClient {
             return Ok(false);
         }
         drop(existing);
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM android_releases WHERE package = ?",
-            params![row.package.clone()],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx
-            .next_id("android_releases", vec![])
+        let row = row.clone();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM android_releases WHERE package = ?",
+                    params![row.package.clone()],
+                )
+                .await?;
+                let id = tx.next_id("android_releases").await?;
+                tx.execute(
+                    "INSERT INTO android_releases (id, package, version_code, version_name, sha256, size, uploaded_at, uploaded_by, stored_on)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        id,
+                        row.package,
+                        row.version_code,
+                        row.version_name,
+                        row.sha256,
+                        row.size,
+                        row.uploaded_at,
+                        row.uploaded_by,
+                        row.stored_on,
+                    ],
+                )
+                .await
+            })
             .await
             .map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO android_releases (id, package, version_code, version_name, sha256, size, uploaded_at, uploaded_by, stored_on)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id,
-                row.package.clone(),
-                row.version_code,
-                row.version_name.clone(),
-                row.sha256.clone(),
-                row.size,
-                row.uploaded_at,
-                row.uploaded_by.clone(),
-                row.stored_on.clone(),
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         Ok(true)
     }
 }

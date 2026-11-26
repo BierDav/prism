@@ -6,19 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-# Seal coordination: trust grants, the coordinator's domain and an iroh link
-# to its voters. The workers turn it on; the apps (rocky-prism-ffi) don't
-# need it, since only trusted devices talk to the coordinator.
-coordinator = ["dep:rocky-coordinator", "dep:rocky-iroh"]
-
 [dependencies]
 chrono.workspace = true
 chrono-tz.workspace = true
 data-encoding = "2"
 flate2 = "1"
-rocky-coordinator = { workspace = true, optional = true }
-rocky-iroh = { workspace = true, optional = true }
 rocky-sdk.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -29,13 +21,6 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-rocky-core = { git = "https://github.com/BierDav/rocky", rev = "85559db8f449d32d6402b4b6a10fd29bdcc7696d" }
-rocky-coordinator.workspace = true
-rocky-iroh.workspace = true
+rocky-core = { git = "https://github.com/BierDav/rocky", rev = "029f9381784660b42ef414b6c57082a61fa37675" }
 rocky-tcp.workspace = true
-rocky-voter.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-
-[[test]]
-name = "coordinated"
-required-features = ["coordinator"]

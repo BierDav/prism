@@ -183,14 +183,18 @@ impl PrismClient {
                 .to_rfc3339_opts(SecondsFormat::Secs, true);
             let (summary, payload) = build_event_payload(machine, &report, &starts_at);
             let _guard = self.alerts_lock.lock().await;
-            let mut tx = self.db.transaction().await.map_err(storage_err)?;
-            tx.execute(
-                "UPDATE alerts SET payload = ?, severity = ?, summary = ? WHERE key = ?",
-                params![payload, report.severity, summary, current.key.clone()],
-            )
-            .await
-            .map_err(storage_err)?;
-            tx.commit().await.map_err(storage_err)?;
+            let key = current.key.clone();
+            let severity = report.severity.clone();
+            self.db
+                .write(async move |tx| {
+                    tx.execute(
+                        "UPDATE alerts SET payload = ?, severity = ?, summary = ? WHERE key = ?",
+                        params![payload, severity, summary, key],
+                    )
+                    .await
+                })
+                .await
+                .map_err(storage_err)?;
             return Ok("firing".into());
         }
 
@@ -209,30 +213,35 @@ impl PrismClient {
         let key = format!("{fp}:{starts_at}");
         let (summary, payload) = build_event_payload(machine, &report, &starts_at);
         let _guard = self.alerts_lock.lock().await;
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        let id = tx.next_id("alerts", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, resolved_at, missing_since)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            params![
-                id,
-                key,
-                fp,
-                starts_at,
-                payload,
-                EVENT_ALERT_NAME,
-                report.check,
-                report.severity,
-                machine,
-                summary,
-                ALERT_OPEN,
-                now,
-                SqlValue::Null,
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let check = report.check.clone();
+        let severity = report.severity.clone();
+        let machine_owned = machine.to_owned();
+        self.db
+            .write(async move |tx| {
+                let id = tx.next_id("alerts").await?;
+                tx.execute(
+                    "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, resolved_at, missing_since)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                    params![
+                        id,
+                        key,
+                        fp,
+                        starts_at,
+                        payload,
+                        EVENT_ALERT_NAME,
+                        check,
+                        severity,
+                        machine_owned,
+                        summary,
+                        ALERT_OPEN,
+                        now,
+                        SqlValue::Null,
+                    ],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok("firing".into())
     }
 }
@@ -259,16 +268,19 @@ mod tests {
         let mut report = failed();
         report.normalize().unwrap();
         let (summary, payload) = build_event_payload("host-a", &report, &starts_at);
-        let mut tx = client.db.transaction().await.unwrap();
-        let id = tx.next_id("alerts", vec![]).await.unwrap();
-        tx.execute(
-            "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, resolved_at, missing_since)
-             VALUES (?, ?, ?, ?, ?, ?, 'disk', 'warning', 'host-a', ?, ?, ?, ?, 0)",
-            params![id, format!("{fp}:{starts_at}"), fp, starts_at, payload, EVENT_ALERT_NAME, summary, ALERT_OPEN, now, SqlValue::Null],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
+        client
+            .db
+            .write(async move |tx| {
+                let id = tx.next_id("alerts").await?;
+                tx.execute(
+                    "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, resolved_at, missing_since)
+                     VALUES (?, ?, ?, ?, ?, ?, 'disk', 'warning', 'host-a', ?, ?, ?, ?, 0)",
+                    params![id, format!("{fp}:{starts_at}"), fp, starts_at, payload, EVENT_ALERT_NAME, summary, ALERT_OPEN, now, SqlValue::Null],
+                )
+                .await
+            })
+            .await
+            .unwrap();
     }
 
     async fn open_keys(client: &PrismClient) -> Vec<String> {

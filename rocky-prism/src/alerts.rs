@@ -918,29 +918,34 @@ impl PrismClient {
         }
         let key = alert_key(fingerprint, episode);
         let fields = AlertFields::of(alert);
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        if row.as_ref().is_some_and(|r| r.key == key) {
-            // Back after reconciliation: the same episode (and number), seen anew.
-            tx.execute(
-                "UPDATE alerts SET state = ?, received_at = ?, resolved_at = NULL, missing_since = 0, payload = ? WHERE key = ?",
-                params![ALERT_OPEN, now, raw, key],
-            )
+        let is_same_key = row.as_ref().is_some_and(|r| r.key == key);
+        let fingerprint = fingerprint.to_owned();
+        let episode = episode.to_owned();
+        let raw = raw.to_owned();
+        self.db
+            .write(async move |tx| {
+                if is_same_key {
+                    // Back after reconciliation: the same episode (and number), seen anew.
+                    tx.execute(
+                        "UPDATE alerts SET state = ?, received_at = ?, resolved_at = NULL, missing_since = 0, payload = ? WHERE key = ?",
+                        params![ALERT_OPEN, now, raw, key],
+                    )
+                    .await
+                } else {
+                    let id = tx.next_id("alerts").await?;
+                    tx.execute(
+                        "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, missing_since) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                        params![
+                            id, key, fingerprint, episode, raw, fields.name, fields.check, fields.severity,
+                            fields.machine, fields.summary, ALERT_OPEN, now
+                        ],
+                    )
+                    .await
+                }
+            })
             .await
             .map_err(storage_err)?;
-        } else {
-            let id = tx.next_id("alerts", vec![]).await.map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO alerts (id, key, fingerprint, episode, payload, name, check_name, severity, machine, summary, state, received_at, missing_since) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                params![
-                    id, key, fingerprint, episode, raw, fields.name, fields.check, fields.severity,
-                    fields.machine, fields.summary, ALERT_OPEN, now
-                ],
-            )
-            .await
-            .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -951,39 +956,50 @@ impl PrismClient {
         raw: &str,
     ) -> Result<(), PrismError> {
         let fields = AlertFields::of(alert);
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "UPDATE alerts SET payload = ?, name = ?, check_name = ?, severity = ?, machine = ?, summary = ?, missing_since = 0 WHERE key = ?",
-            params![raw, fields.name, fields.check, fields.severity, fields.machine, fields.summary, key],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let key = key.to_owned();
+        let raw = raw.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "UPDATE alerts SET payload = ?, name = ?, check_name = ?, severity = ?, machine = ?, summary = ?, missing_since = 0 WHERE key = ?",
+                    params![raw, fields.name, fields.check, fields.severity, fields.machine, fields.summary, key],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
     /// Ends an open episode with `state`.
     async fn end_alert(&self, key: &str, state: &str, now: i64) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "UPDATE alerts SET state = ?, resolved_at = ? WHERE key = ? AND state = ?",
-            params![state, now, key, ALERT_OPEN],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let key = key.to_owned();
+        let state = state.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "UPDATE alerts SET state = ?, resolved_at = ? WHERE key = ? AND state = ?",
+                    params![state, now, key, ALERT_OPEN],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
     async fn set_alert_missing(&self, key: &str, since: i64) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "UPDATE alerts SET missing_since = ? WHERE key = ?",
-            params![since, key],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let key = key.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "UPDATE alerts SET missing_since = ? WHERE key = ?",
+                    params![since, key],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1115,26 +1131,31 @@ impl PrismClient {
             None => 0,
         };
         drop(rows_numbers);
-        let unnumbered: Vec<&AlertRow> = rows.iter().filter(|r| r.number == 0).collect();
+        let unnumbered: Vec<String> = rows
+            .iter()
+            .filter(|r| r.number == 0)
+            .map(|r| r.key.clone())
+            .collect();
         if unnumbered.is_empty() {
             return Ok(0);
         }
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        for row in &unnumbered {
-            last += 1;
-            let id = tx
-                .next_id("alert_numbers", vec![])
-                .await
-                .map_err(storage_err)?;
-            tx.execute(
-                "INSERT INTO alert_numbers (id, key, number, at) VALUES (?, ?, ?, ?)",
-                params![id, row.key.clone(), last, now],
-            )
+        let count = unnumbered.len();
+        self.db
+            .write(async move |tx| {
+                for key in unnumbered {
+                    last += 1;
+                    let id = tx.next_id("alert_numbers").await?;
+                    tx.execute(
+                        "INSERT INTO alert_numbers (id, key, number, at) VALUES (?, ?, ?, ?)",
+                        params![id, key, last, now],
+                    )
+                    .await?;
+                }
+                Ok::<_, rocky_sdk::Error>(())
+            })
             .await
             .map_err(storage_err)?;
-        }
-        tx.commit().await.map_err(storage_err)?;
-        Ok(unnumbered.len())
+        Ok(count)
     }
 
     /// Alerts as the apps list them, newest first, with their requests.
@@ -1259,23 +1280,28 @@ impl PrismClient {
             .ok_or(PrismError::NotFound)?;
         check_action(&row, &req.kind, &instruction)?;
 
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        let id = tx
-            .next_id("alert_actions", vec![])
+        let req_id_in = req.request_id.clone();
+        let req_alert = req.alert.clone();
+        let req_kind = req.kind.clone();
+        let req_by = req.requested_by.clone();
+        let request_id = self
+            .db
+            .write(async move |tx| {
+                let id = tx.next_id("alert_actions").await?;
+                let request_id = if req_id_in.is_empty() {
+                    id.to_string()
+                } else {
+                    req_id_in
+                };
+                tx.execute(
+                    "INSERT INTO alert_actions (id, request_id, alert, kind, instruction, requested_by, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![id, request_id.clone(), req_alert, req_kind, instruction, req_by, now],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(request_id)
+            })
             .await
             .map_err(storage_err)?;
-        let request_id = if req.request_id.is_empty() {
-            id.to_string()
-        } else {
-            req.request_id.clone()
-        };
-        tx.execute(
-            "INSERT INTO alert_actions (id, request_id, alert, kind, instruction, requested_by, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![id, request_id.clone(), req.alert, req.kind, instruction, req.requested_by, now],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
         self.alert_action(&request_id)
             .await?
             .ok_or(PrismError::NotFound)
@@ -1325,17 +1351,21 @@ impl PrismClient {
         now: i64,
         stale_before: i64,
     ) -> Result<bool, PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "UPDATE alert_actions SET claimed_by = ?, claimed_at = ? \
-             WHERE request_id = ? AND done_at IS NULL \
-             AND (claimed_by IS NULL OR claimed_by = ? \
-             OR (claimed_at < ? AND claimed_by NOT LIKE 'device:%'))",
-            params![worker, now, request_id, worker, stale_before],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let worker_owned = worker.to_owned();
+        let request_id_owned = request_id.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "UPDATE alert_actions SET claimed_by = ?, claimed_at = ? \
+                     WHERE request_id = ? AND done_at IS NULL \
+                     AND (claimed_by IS NULL OR claimed_by = ? \
+                     OR (claimed_at < ? AND claimed_by NOT LIKE 'device:%'))",
+                    params![worker_owned.clone(), now, request_id_owned, worker_owned, stale_before],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(self
             .alert_action(request_id)
             .await?
@@ -1350,22 +1380,26 @@ impl PrismClient {
         now: i64,
         outcome: AlertActionOutcome,
     ) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "UPDATE alert_actions SET done_at = ?, thread_id = ?, link = ?, error = ? \
-             WHERE request_id = ? AND claimed_by = ? AND done_at IS NULL",
-            params![
-                now,
-                outcome.thread_id,
-                outcome.link,
-                outcome.error,
-                request_id,
-                worker
-            ],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let request_id = request_id.to_owned();
+        let worker = worker.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "UPDATE alert_actions SET done_at = ?, thread_id = ?, link = ?, error = ? \
+                     WHERE request_id = ? AND claimed_by = ? AND done_at IS NULL",
+                    params![
+                        now,
+                        outcome.thread_id,
+                        outcome.link,
+                        outcome.error,
+                        request_id,
+                        worker
+                    ],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1465,21 +1499,23 @@ impl PrismClient {
     /// Records that the leader posted (or dropped) the push `key`, and forgets
     /// pushes older than `PUSH_KEEP_SECS`.
     pub async fn record_push(&self, key: &str, now: i64) -> Result<(), PrismError> {
-        let mut tx = self.db.transaction().await.map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM pushes WHERE at < ?",
-            params![now - PUSH_KEEP_SECS],
-        )
-        .await
-        .map_err(storage_err)?;
-        let id = tx.next_id("pushes", vec![]).await.map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO pushes (id, key, at) VALUES (?, ?, ?)",
-            params![id, key, now],
-        )
-        .await
-        .map_err(storage_err)?;
-        tx.commit().await.map_err(storage_err)?;
+        let key = key.to_owned();
+        self.db
+            .write(async move |tx| {
+                tx.execute(
+                    "DELETE FROM pushes WHERE at < ?",
+                    params![now - PUSH_KEEP_SECS],
+                )
+                .await?;
+                let id = tx.next_id("pushes").await?;
+                tx.execute(
+                    "INSERT INTO pushes (id, key, at) VALUES (?, ?, ?)",
+                    params![id, key, now],
+                )
+                .await
+            })
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 }
