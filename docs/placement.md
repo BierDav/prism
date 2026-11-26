@@ -243,8 +243,10 @@ On the machine event API (`https://prism-events.quickme.at`, the host's
 machine token as `Authorization: Bearer`, as `prism report` uses; T3 reads
 it from `placementSource.tokenFile`). The T3 server calls it every 30
 seconds, and right away when a profile thread starts or a run ends and its
-last answer is older than 30 seconds. A replica that is not the leader
-answers too: placement is a pure function of the replicated rows.
+last answer is older than 30 seconds. A host connected to the stream
+(below) syncs over it instead, at once on every change. A replica that is
+not the leader answers too: placement is a pure function of the replicated
+rows.
 
 Request:
 
@@ -349,6 +351,62 @@ Response:
 
 T3 acknowledges a move in its next request with
 `"moves": [{"id": "…", "state": "continued" | "failed", "detail": "…"}]`.
+
+### The stream: `GET /v1/placement/stream`
+
+The same sync over a WebSocket, so a host hears a new move or a changed
+profile within seconds instead of at its next 30-second sync
+(`worker/src/placement_stream.rs`). The protocol is JSON-RPC 2.0, one
+message per text frame, subprotocol `jsonrpc-2.0`; the upgrade carries the
+machine token as `Authorization: Bearer`, as the POST does (`401` without
+it).
+
+- The host calls `placement.sync` with the request above as `params`; the
+  `result` is the response above.
+
+  ```json
+  {"jsonrpc": "2.0", "id": 7, "method": "placement.sync", "params": {"v": 1, "environmentId": "env-…", "models": […], "threads": […]}}
+  {"jsonrpc": "2.0", "id": 7, "result": {"v": 1, "checkedAt": "…", "profiles": […], "moves": […]}}
+  ```
+
+- Prism keeps the host's last report (without its acknowledgements) and
+  ranks it again every 5 seconds while it is at most 3 minutes old. When
+  the answer differs from the last one the host got (`checkedAt` aside),
+  Prism sends it as the notification `placement.update` (no `id`): a
+  changed profile, policy or action, a new move, or a ranking that moved
+  with the accounts' usage.
+
+  ```json
+  {"jsonrpc": "2.0", "method": "placement.update", "params": {"v": 1, "checkedAt": "…", "profiles": […], "moves": […]}}
+  ```
+
+- Errors are JSON-RPC's: `-32700` (not JSON), `-32600` (not a request, or
+  a batch, which Prism doesn't take), `-32601` (another method), `-32602`
+  (params that are no sync request) and `-32000` (the sync failed on
+  Prism's side, the POST's `503`: try again).
+- Prism pings every 20 seconds and closes a connection it heard nothing
+  from, not even a pong, for 90 seconds.
+
+T3 keeps one stream open and syncs over it, and over the POST while it is
+down. Over the stream it reports every change to its profile threads (a
+run starting or ending, a thread changing account) and every
+acknowledgement on its next 5-second tick instead of waiting out the 30
+seconds, and still sends a full report every 30 seconds. It carries out a
+pushed move the moment it arrives.
+
+### How T3 moves a running thread
+
+T3 moves a live run through the thread's queue, so nothing waits for its
+next sync: it queues `/compact` on the account the thread leaves (left out
+when that account has no usage left), then the continuation on the new
+account, both ahead of any message already queued, and only then
+interrupts the run. The thread runs the compaction as soon as the
+interrupt ends the run, and the continuation after it, and T3 acknowledges
+the move as `continued` right away. An in-place compaction (`to` equal to
+`from`) works the same, on one account. If the run fails on its usage
+limit before the interrupt lands, the thread stops its queue while that
+provider is limited; T3 then takes the queued compaction and continuation
+out of it and starts the continuation on the new account by itself.
 
 ## The phone's API
 

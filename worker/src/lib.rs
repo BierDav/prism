@@ -22,6 +22,7 @@ pub mod magic;
 pub mod metrics;
 pub mod pairing;
 pub mod placement_log;
+pub mod placement_stream;
 pub mod provision;
 pub mod push;
 pub mod questions;
