@@ -608,6 +608,7 @@ in
         run OutboxTestKt
         run HotspotTestKt
         run AttachmentTestKt
+        run CallLinkTestKt
         run MetricsTestKt remote-write.bin
         python3 tests/remote_write_decode.py remote-write.bin
         touch $out

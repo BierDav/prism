@@ -12,6 +12,7 @@ package at.quickme.prism.shell
 
 import android.content.AttributionSource
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ChangedPackages
 import android.content.pm.PackageInfo
 import android.content.pm.ProviderInfo
@@ -223,6 +224,53 @@ internal object Hidden {
     fun systemContext(): Context {
         val thread = call(Class.forName("android.app.ActivityThread"), "systemMain") ?: throw IllegalStateException("no ActivityThread")
         return call(thread, "getSystemContext") as Context
+    }
+
+    /**
+     * Sets up the mainline modules' service managers, which an app's process
+     * gets from ActivityThread.main and app_process doesn't: without them
+     * telephony's managers (SubscriptionManager, a TelephonyManager's calls
+     * into the phone service) throw NullPointerException.
+     */
+    fun initMainlineModules() {
+        try {
+            call(Class.forName("android.app.ActivityThread"), "initializeMainlineModules")
+        } catch (e: IllegalStateException) {
+            // Already set up.
+        }
+    }
+
+    /**
+     * A context that names the shell's package (com.android.shell) as the
+     * caller, and is its own application context. A manager made on the
+     * system context or a package context of it takes the application
+     * context, the system's ("android"), and services that check the
+     * caller's package refuse it for uid 2000 ("Package android does not
+     * belong to 2000"): TelephonyRegistry, Telecom, the tethering module,
+     * Bluetooth.
+     */
+    fun shellContext(base: Context): Context = object : ContextWrapper(base) {
+        override fun getOpPackageName(): String = SHELL_PACKAGE
+        override fun getPackageName(): String = SHELL_PACKAGE
+        override fun getAttributionTag(): String? = null
+        override fun getApplicationContext(): Context = this
+        // Bluetooth's managers take the caller from here.
+        override fun getAttributionSource(): AttributionSource =
+            AttributionSource.Builder(Process.myUid()).setPackageName(SHELL_PACKAGE).build()
+    }
+
+    const val SHELL_PACKAGE = "com.android.shell"
+
+    /**
+     * A manager built on `c` with its (hidden) constructor taking a Context,
+     * so it calls as `c` names; the system's own if there's no such
+     * constructor.
+     */
+    fun <T> manager(cls: Class<T>, c: Context): T = try {
+        cls.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }.newInstance(c)
+    } catch (e: ReflectiveOperationException) {
+        Log.w(TAG, "${cls.simpleName}(Context): $e; using the system's")
+        c.getSystemService(cls)
     }
 
     /** An app's context with its code, in that app's user. */

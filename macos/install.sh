@@ -88,7 +88,8 @@ cat > "$BUILT/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSBluetoothAlwaysUsageDescription</key><string>Prism asks your phone over Bluetooth to switch on its hotspot when this Mac is offline.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Prism asks your phone over Bluetooth to switch on its hotspot when this Mac is offline, and carries the phone's calls to this Mac.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Prism lets you talk on your phone's calls from this Mac.</string>
   <key>NSLocationUsageDescription</key><string>Prism reads the names of nearby Wi-Fi networks to leave your phone's hotspot for a Wi-Fi network that worked before.</string>
   <key>NSLocationWhenInUseUsageDescription</key><string>Prism reads the names of nearby Wi-Fi networks to leave your phone's hotspot for a Wi-Fi network that worked before.</string>
   <key>NSHumanReadableCopyright</key><string>fleet</string>

@@ -27,6 +27,9 @@ struct Config: Decodable {
     /// The file with the key that asks the phone for its hotspot (64 hex
     /// characters, docs/hotspot.md; none: the Mac doesn't ask).
     var hotspotKeyFile: String?
+    /// The phone's calls on this Mac (docs/calls.md), with the same key as
+    /// the hotspot (hotspotKeyFile).
+    var calls: Bool?
     /// This Mac's replica of Prism's database, for the popout's alerts and
     /// the approvals (none: not connected).
     let rocky: RockyConfig?

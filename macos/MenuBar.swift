@@ -7,6 +7,7 @@
 // phone's hotspot.
 
 import AppKit
+import Combine
 import PrismShared
 import SwiftUI
 import UserNotifications
@@ -16,7 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor static var approver: Approver!
     @MainActor static var store: PrismStore!
     @MainActor static var hotspot: Hotspot!
+    @MainActor static var calls: PhoneCalls!
     private var panel: ApprovalPanel?
+    private var callPanel: CallPanel?
+    private var hotspotWatch: AnyCancellable?
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,6 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         approver.start()
         Self.store.start()
         Self.hotspot.start()
+        let calls = Self.calls!
+        let callPanel = CallPanel(calls: calls)
+        calls.onChange = { [weak callPanel] in callPanel?.update() }
+        self.callPanel = callPanel
+        // The call's Bluetooth advertisement steps aside for the hotspot's.
+        let hotspot = Self.hotspot!
+        calls.hotspotAdvertising = { hotspot.advertising != nil }
+        hotspotWatch = hotspot.$advertising.sink { _ in
+            // @Published tells before the change: read it after.
+            DispatchQueue.main.async { calls.hotspotChanged() }
+        }
+        calls.start()
     }
 
     /// A notification about an agent opens its thread in T3 Code.
