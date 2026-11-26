@@ -1021,8 +1021,9 @@ object CallBridge {
         pipe?.offer(pcm)
     }
 
+    /** Until the link closes: after the call ends too, until the Mac has "ended" and closes it (finish). */
     private fun read(l: Link) {
-        while (!ended) {
+        while (true) {
             val frame = l.read()
             when (frame.type) {
                 CallLink.AUDIO -> heard(l, frame.payload)
