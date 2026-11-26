@@ -52,7 +52,7 @@ object CallLink {
     /** A frame's payload is at most this (a JSON message; audio is 640). */
     const val MAX_PAYLOAD = 16 * 1024
 
-    /** K = HMAC-SHA256(hotspot key, "prism-call/v1"). */
+    /** K = HMAC-SHA256(hotspot key, "prism-call/v2"). */
     @JvmStatic
     fun key(hotspotKey: ByteArray): ByteArray = hmac(hotspotKey, LABEL.toByteArray(Charsets.US_ASCII))
 

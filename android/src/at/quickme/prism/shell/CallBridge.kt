@@ -418,7 +418,8 @@ object CallBridge {
     // --- The audio ---
 
     private fun startAudio(attempt: Int) {
-        if (pipe != null || ended) return
+        // A retry finds the owner moved the call back meanwhile: it stays.
+        if (pipe != null || ended || !wantMac) return
         try {
             audio.mode = AudioManager.MODE_CALL_REDIRECT
             // What AudioManager's getCallDownlinkExtractionAudioRecord and

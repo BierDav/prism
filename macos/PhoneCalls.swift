@@ -364,9 +364,9 @@ final class PhoneCalls: ObservableObject {
             audioLink.link?.sendAudio(frame)
         }
         audio.muted = muted
-        audio.onRestart = { [weak self] what, withoutVoiceProcessing in
+        audio.onRestart = { [weak self, weak audio] what, withoutVoiceProcessing in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let audio else { return }
                 self.log("calls: audio: \(what)")
                 if withoutVoiceProcessing, self.audio === audio {
                     self.call?.error = "Echo cancellation stopped working on this Mac, so the caller may hear themselves. Headphones help."
@@ -1638,15 +1638,20 @@ final class CallAudio: @unchecked Sendable {
         }
     }
 
+    /// On micQueue, like the watchdog: a rebuild under way finishes first,
+    /// and its engine is the one that stops.
     func stop() {
-        watchdog?.cancel()
-        watchdog = nil
-        let (engine, player) = lock.withLock {
-            running = false
-            return (self.engine, self.player)
+        onRestart = nil
+        micQueue.sync {
+            watchdog?.cancel()
+            watchdog = nil
+            let (engine, player) = lock.withLock {
+                running = false
+                return (self.engine, self.player)
+            }
+            player.stop()
+            engine.stop()
         }
-        player.stop()
-        engine.stop()
     }
 
     /// The microphone (its first channel, float), converted to the wire's
