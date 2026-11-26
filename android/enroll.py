@@ -202,7 +202,7 @@ def install(adb, args):
         os.remove(ks)
         subprocess.run(["apksigner", "verify", signed], check=True)
         log("installing %s %d" % (adb.package, args.version_code) + (" over %d" % have if have else ""))
-        adb.run("install", "-r", signed)
+        adb.run("install", "--no-incremental", "-r", signed)
 
 
 def make_owner(adb):
