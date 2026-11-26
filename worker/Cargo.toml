@@ -14,7 +14,7 @@ default = ["coordinator"]
 coordinator = ["rocky-prism/coordinator"]
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono.workspace = true
 data-encoding = "2"
 ed25519-dalek = "2"
