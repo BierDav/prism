@@ -12,6 +12,7 @@ struct AlertsView: View {
     /// The alert open at the start (`prism preview --expand N`).
     @MainActor static var initiallyExpanded: Int64?
     @State private var expanded: Int64? = AlertsView.initiallyExpanded
+    @Environment(\.popoutNavigation) private var navigation
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -38,6 +39,13 @@ struct AlertsView: View {
                 .padding(.vertical, 6)
             }
         }
+        .onAppear {
+            navigation?.dismissSubstate = {
+                guard expanded != nil else { return false }
+                withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { expanded = nil }
+                return true
+            }
+        }
     }
 
     @ViewBuilder
@@ -60,8 +68,8 @@ struct AlertsView: View {
     }
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+        PopoutScrollView {
+            VStack(alignment: .leading, spacing: 0) {
                 if store.alerts.isEmpty {
                     EmptyState(symbol: "checkmark.seal.fill", title: "All clear", detail: nil, tint: .green)
                 }
@@ -78,7 +86,11 @@ struct AlertsView: View {
                     ForEach(group.alerts) { alert in
                         AlertRow(
                             store: store, alert: alert, expanded: expanded == alert.id,
-                            toggle: { withAnimation(.smooth(duration: 0.2)) { expanded = expanded == alert.id ? nil : alert.id } })
+                            toggle: {
+                                withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
+                                    expanded = expanded == alert.id ? nil : alert.id
+                                }
+                            })
                     }
                 }
                 if !store.tasks.isEmpty {
@@ -96,10 +108,8 @@ struct AlertsView: View {
                 }
             }
             .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(maxHeight: 500)
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -184,10 +194,11 @@ private struct AlertRow: View {
                 .buttonStyle(.plain)
                 .accessibilityValue(expanded ? "Expanded" : "Collapsed")
                 .accessibilityHint(expanded ? "Collapse alert details" : "Expand alert details")
+                .zIndex(1)
             if expanded {
                 details
                     .padding(.top, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.verticalReveal)
             }
         }
         .padding(.horizontal, 14)
@@ -255,16 +266,13 @@ private struct AlertRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !alert.output.isEmpty {
-                ScrollView {
+                PopoutScrollView(maxHeight: 110, defaultAnchor: .bottom) {
                     Text(visibleLines(alert.output))
                         .font(.system(size: 10, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(8)
                 }
-                .defaultScrollAnchor(.bottom)
-                .frame(maxHeight: 110)
-                .fixedSize(horizontal: false, vertical: true)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(nsColor: .textBackgroundColor).opacity(0.7)))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.separator, lineWidth: 1))
             }

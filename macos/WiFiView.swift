@@ -10,6 +10,7 @@ struct WiFiView: View {
     @ObservedObject var hotspot: Hotspot
     @ObservedObject var wifi: WiFiSwitch
     @ObservedObject var networks: WiFiNetworks
+    @Environment(\.popoutNavigation) private var navigation
 
     private enum InlineField: Hashable { case reliable, hotspot }
 
@@ -31,34 +32,55 @@ struct WiFiView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                currentRow
-                if let problem = wifi.problem {
-                    Label(problem, systemImage: "location.slash")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+        PopoutScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    currentRow
+                    if let problem = wifi.problem {
+                        Label(problem, systemImage: "location.slash")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !hotspotConfigured {
+                        Text("The phone's hotspot isn't set up for this Mac (no hotspot key), so Prism doesn't switch networks; the lists are kept for when it is.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                if !hotspotConfigured {
-                    Text("The phone's hotspot isn't set up for this Mac (no hotspot key), so Prism doesn't switch networks; the lists are kept for when it is.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                Divider()
+                hotspotSection
+                Divider()
+                reliableSection
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            Divider()
-            reliableSection
-            Divider()
-            hotspotSection
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             wifi.refreshCurrent()
             known = wifi.knownNetworks()
             savedPasswords = Set(networks.hotspots.filter(HotspotPassword.has))
+            navigation?.dismissSubstate = {
+                if passwordFor != nil {
+                    password = ""
+                    passwordError = nil
+                    passwordFor = nil
+                    return true
+                }
+                if addingReliable {
+                    typed = ""
+                    addingReliable = false
+                    return true
+                }
+                if addingHotspot {
+                    typedHotspot = ""
+                    addingHotspot = false
+                    return true
+                }
+                return false
+            }
         }
     }
 
@@ -138,32 +160,28 @@ struct WiFiView: View {
             .padding(.bottom, 4)
             if networks.list.isEmpty {
                 Text("None yet. Add the networks that have working internet.")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(networks.list) { network in
-                            ReliableRow(
-                                network: network,
-                                detail: detail(network),
-                                rssi: wifi.nearby[network.ssid],
-                                makeHotspot: { networks.addHotspot(network.ssid) },
-                                remove: { networks.removeReliable(network.ssid) }
-                            )
-                        }
+                VStack(spacing: 0) {
+                    ForEach(networks.list) { network in
+                        ReliableRow(
+                            network: network,
+                            detail: detail(network),
+                            rssi: wifi.nearby[network.ssid],
+                            makeHotspot: { networks.addHotspot(network.ssid) },
+                            remove: { networks.removeReliable(network.ssid) }
+                        )
                     }
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 200)
-                .fixedSize(horizontal: false, vertical: true)
             }
             if addingReliable {
                 HStack(spacing: 6) {
                     TextField("Network name", text: $typed)
                         .textFieldStyle(.roundedBorder)
+                        .font(.callout)
                         .focused($focusedField, equals: .reliable)
                         .onSubmit(addTyped)
                         .onExitCommand {
@@ -183,16 +201,21 @@ struct WiFiView: View {
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Cancel adding network")
                 }
+                .controlSize(.small)
                 .padding(.horizontal, 14)
                 .padding(.top, 6)
             }
-            Toggle("Add networks with working internet automatically", isOn: $networks.learns)
-                .font(.caption)
-                .toggleStyle(.checkbox)
-                .help("A network on which Prism saw working internet joins this list, unless you removed it before.")
-                .padding(.horizontal, 14)
-                .padding(.top, 8)
-                .padding(.bottom, 12)
+            Toggle(isOn: $networks.learns) {
+                Text("Add networks with working internet automatically")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .help("A network on which Prism saw working internet joins this list, unless you removed it before.")
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
         }
     }
 
@@ -243,8 +266,8 @@ struct WiFiView: View {
             .padding(.bottom, 4)
             if networks.hotspots.isEmpty {
                 Text("Not known yet. Add its name, or join it once: Prism recognises an Android hotspot.")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
@@ -290,6 +313,7 @@ struct WiFiView: View {
                 HStack(spacing: 6) {
                     TextField("Hotspot name", text: $typedHotspot)
                         .textFieldStyle(.roundedBorder)
+                        .font(.callout)
                         .focused($focusedField, equals: .hotspot)
                         .onSubmit(addTypedHotspot)
                         .onExitCommand {
@@ -309,6 +333,7 @@ struct WiFiView: View {
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Cancel adding hotspot")
                 }
+                .controlSize(.small)
                 .padding(.horizontal, 14)
                 .padding(.top, 6)
             }
@@ -481,6 +506,7 @@ private struct HotspotRow: View {
                 HStack(spacing: 6) {
                     SecureField("Password", text: $password)
                         .textFieldStyle(.roundedBorder)
+                        .font(.callout)
                         .focused($passwordFocused)
                         .onSubmit(savePassword)
                         .onExitCommand(perform: cancelPassword)
@@ -498,6 +524,7 @@ private struct HotspotRow: View {
                     .accessibilityLabel("Cancel password entry")
                     .help("Cancel")
                 }
+                .controlSize(.small)
                 .padding(.leading, 24)
                 .onAppear { passwordFocused = true }
                 if let passwordError {

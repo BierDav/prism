@@ -214,48 +214,100 @@ struct PopoutView: View {
     @ObservedObject var store: PrismStore
     @ObservedObject var hotspot: Hotspot
     @AppStorage("popoutTab") private var tab = Tab.alerts
+    @StateObject private var navigation = PopoutNavigation()
     @State private var refreshTrigger = 0
+    @State private var screenHeight: CGFloat = NSScreen.main?.visibleFrame.height ?? 800
+    @State private var chromeHeight: CGFloat = 124
+    @State private var animatedHeight: CGFloat?
+
+    private var maxWindowHeight: CGFloat { max(360, screenHeight - 20) }
+    private var maxContentHeight: CGFloat { max(220, maxWindowHeight - chromeHeight) }
+
+    private var tabBinding: Binding<Tab> {
+        Binding(
+            get: { tab },
+            set: { next in navigation.select(next, current: tab) { tab = $0 } }
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 10)
-            ForEach(approver.problems, id: \.self) { problem in
-                Label(problem, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 0) {
+                header
                     .padding(.horizontal, 14)
-                    .padding(.bottom, 6)
+                    .padding(.top, 12)
+                    .padding(.bottom, 10)
+                ForEach(approver.problems, id: \.self) { problem in
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 6)
+                }
+                if hotspot.keyFile != nil {
+                    HotspotBanner(hotspot: hotspot, wifi: hotspot.wifi, showWifiProblem: tab != .wifi)
+                }
+                PopoutTabBar(selection: tabBinding, approver: approver, store: store, hotspot: hotspot, wifi: hotspot.wifi)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+                Divider()
             }
-            if hotspot.keyFile != nil {
-                HotspotBanner(hotspot: hotspot, wifi: hotspot.wifi, showWifiProblem: tab != .wifi)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if abs(height - chromeHeight) > 0.5 { chromeHeight = height }
             }
-            PopoutTabBar(selection: $tab, approver: approver, store: store, hotspot: hotspot, wifi: hotspot.wifi)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
-            Divider()
-            switch tab {
-            case .alerts: AlertsView(store: store)
-            case .machines: MachinesView(store: store)
-            case .profiles: ProfilesView(store: store)
-            case .approvals: ApprovalTab(approver: approver)
-            case .wifi: WiFiView(hotspot: hotspot, wifi: hotspot.wifi, networks: hotspot.wifi.networks)
+            Group {
+                switch tab {
+                case .alerts: AlertsView(store: store)
+                case .machines: MachinesView(store: store)
+                case .profiles: ProfilesView(store: store)
+                case .approvals: ApprovalTab(approver: approver)
+                case .wifi: WiFiView(hotspot: hotspot, wifi: hotspot.wifi, networks: hotspot.wifi.networks)
+                }
+            }
+            .environment(\.popoutMaxContentHeight, maxContentHeight)
+            .environment(\.popoutNavigation, navigation)
+        }
+        .frame(width: 400)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+            let target = min(max(120, height), maxWindowHeight)
+            if animatedHeight == nil {
+                animatedHeight = target
+            } else if abs(target - (animatedHeight ?? 0)) > 0.5 {
+                withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
+                    animatedHeight = target
+                }
             }
         }
-        .background { tabShortcuts }
-        .frame(width: 400)
+        .modifier(AnimatedPopoutHeight(height: animatedHeight))
+        .background {
+            PopoutWindowBridge(
+                onScreenHeight: { height in
+                    if abs(height - screenHeight) > 1 { screenHeight = height }
+                },
+                onBack: { navigation.goBack(current: tab) { tab = $0 } },
+                onForward: { navigation.goForward(current: tab) { tab = $0 } }
+            )
+            tabShortcuts
+        }
     }
 
     private var tabShortcuts: some View {
         Group {
             ForEach(Tab.allCases) { item in
                 Button("") {
-                    withAnimation(.snappy(duration: 0.2)) { tab = item }
+                    navigation.select(item, current: tab) { tab = $0 }
                 }
                 .keyboardShortcut(item.shortcutKey, modifiers: .command)
             }
+            Button("") {
+                navigation.goBack(current: tab) { tab = $0 }
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            Button("") {
+                navigation.goForward(current: tab) { tab = $0 }
+            }
+            .keyboardShortcut("]", modifiers: .command)
         }
         .frame(width: 0, height: 0)
         .opacity(0)
@@ -672,24 +724,24 @@ private struct ServerStatus: View {
     }
 }
 
-/// Approvals: what waits for the owner (a click shows it in the dialog), the
-/// last decisions, this Mac's public key.
+/// Approvals: what waits for the owner (a click shows it in the dialog) and
+/// the last decisions.
 struct ApprovalTab: View {
     @ObservedObject var approver: Approver
-    @State private var copiedKey = false
+    @Environment(\.popoutNavigation) private var navigation
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if !approver.pending.isEmpty {
-                pending
-                Divider()
+        PopoutScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if !approver.pending.isEmpty {
+                    pending
+                    Divider()
+                }
+                history
             }
-            history
-            Divider()
-            publicKey
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onAppear { navigation?.dismissSubstate = nil }
     }
 
     private func heading(_ text: String, count: Int? = nil) -> some View {
@@ -726,50 +778,13 @@ struct ApprovalTab: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 18)
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(Array(approver.history.enumerated()), id: \.offset) { _, decision in
-                            HistoryRow(decision: decision)
-                        }
+                VStack(spacing: 0) {
+                    ForEach(Array(approver.history.enumerated()), id: \.offset) { _, decision in
+                        HistoryRow(decision: decision)
                     }
-                    .padding(.bottom, 6)
                 }
-                .frame(maxHeight: 300)
-                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
             }
-        }
-    }
-
-    private var publicKey: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                SectionLabel("This Mac's public key")
-                Spacer()
-                if let key = approver.key?.publicKeyLine {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(key, forType: .string)
-                        copiedKey = true
-                        Task {
-                            try? await Task.sleep(for: .milliseconds(1500))
-                            copiedKey = false
-                        }
-                    } label: {
-                        Label(copiedKey ? "Copied" : "Copy", systemImage: copiedKey ? "checkmark" : "doc.on.doc")
-                            .font(.caption2.weight(.medium))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(copiedKey ? .green : .secondary)
-                    .accessibilityLabel("Copy public key")
-                    .help("Copy this Mac's public key")
-                }
-            }
-            Text(approver.key?.publicKeyLine ?? "No key")
-                .font(.system(size: 11, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

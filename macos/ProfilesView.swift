@@ -1,11 +1,22 @@
+import AppKit
 import PrismShared
 import SwiftUI
 
 struct ProfilesView: View {
     @ObservedObject var store: PrismStore
+    @Environment(\.popoutNavigation) private var navigation
     @State private var draft: Draft?
     @State private var confirmingDelete = false
     @State private var limitDraft: LimitDraft?
+    @State private var draggedProfileID: String?
+    @State private var liveProfileOrder: [String]?
+    @State private var profileDragOffset: CGFloat = 0
+    @State private var profileDragBaseY: CGFloat = 0
+    @State private var profileRowHeights: [String: CGFloat] = [:]
+    @State private var draggedEntryKey: String?
+    @State private var entryDragOffset: CGFloat = 0
+    @State private var entryDragBaseY: CGFloat = 0
+    @State private var entryRowHeights: [String: CGFloat] = [:]
 
     private struct Draft {
         var original: PlacementProfile?
@@ -53,9 +64,14 @@ struct ProfilesView: View {
                 } else if limitDraft != nil {
                     limitEditor(placement)
                 } else {
-                    profileList(placement)
-                    Divider()
-                    accountLimits(placement)
+                    PopoutScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            profileList(placement)
+                            Divider()
+                            accountLimits(placement)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             } else {
                 unavailableState
@@ -63,6 +79,19 @@ struct ProfilesView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .disabled(store.savingProfiles)
+        .onAppear {
+            navigation?.dismissSubstate = {
+                if draft != nil {
+                    withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { draft = nil }
+                    return true
+                }
+                if limitDraft != nil {
+                    withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { limitDraft = nil }
+                    return true
+                }
+                return false
+            }
+        }
     }
 
     @ViewBuilder
@@ -129,48 +158,117 @@ struct ProfilesView: View {
         .padding(.bottom, 4)
     }
 
+    private func orderedProfiles(from profiles: [PlacementProfile]) -> [PlacementProfile] {
+        guard let liveProfileOrder else { return profiles }
+        let byID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+        let ordered = liveProfileOrder.compactMap { byID[$0] }
+        let seen = Set(ordered.map(\.id))
+        return ordered + profiles.filter { !seen.contains($0.id) }
+    }
+
     private func profileList(_ placement: Placement) -> some View {
-        let profiles = placement.profiles
+        let profiles = orderedProfiles(from: placement.profiles)
         return VStack(alignment: .leading, spacing: 0) {
             sectionHeader("Profiles", count: profiles.count, saving: store.savingProfiles)
             if profiles.isEmpty {
                 Text("No profiles yet.")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(profiles.indices, id: \.self) { index in
-                            let profile = profiles[index]
-                            ProfileRow(
-                                title: profile.displayLabel,
-                                subtitle: entryCount(profile),
-                                canMoveUp: index > 0,
-                                canMoveDown: index < profiles.count - 1,
-                                open: { draft = Draft(original: profile, label: profile.displayLabel, entries: profile.configuredEntries) },
-                                moveUp: { reorder(profiles, index, index - 1) },
-                                moveDown: { reorder(profiles, index, index + 1) }
-                            )
+                VStack(spacing: 0) {
+                    ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
+                        let dragging = draggedProfileID == profile.id
+                        ProfileRow(
+                            title: profile.displayLabel,
+                            subtitle: entryCount(profile),
+                            canMoveUp: index > 0,
+                            canMoveDown: index < profiles.count - 1,
+                            dragging: dragging,
+                            open: { draft = Draft(original: profile, label: profile.displayLabel, entries: profile.configuredEntries) },
+                            moveUp: { reorder(profiles, index, index - 1) },
+                            moveDown: { reorder(profiles, index, index + 1) },
+                            dragGesture: profileDragGesture(for: profile.id, in: placement.profiles)
+                        )
+                        .background {
+                            Color.clear.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                if h > 0 { profileRowHeights[profile.id] = h }
+                            }
                         }
+                        .offset(y: dragging ? profileDragOffset : 0)
+                        .zIndex(dragging ? 1 : 0)
                     }
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 260)
-                .fixedSize(horizontal: false, vertical: true)
+                .coordinateSpace(name: "profileList")
             }
             HStack {
                 Button { draft = Draft() } label: {
-                    Label("New Profile", systemImage: "plus")
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("New Profile")
+                            .font(.caption.weight(.medium))
+                    }
+                    .modifier(CapsuleChipShape())
                 }
-                .buttonStyle(PillStyle(width: nil, compact: true))
+                .buttonStyle(.plain)
                 Spacer()
             }
             .padding(.horizontal, 14)
             .padding(.top, 8)
             .padding(.bottom, 12)
         }
+    }
+
+    private func profileDragGesture(for id: String, in baseProfiles: [PlacementProfile]) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("profileList"))
+            .onChanged { value in
+                if draggedProfileID == nil {
+                    draggedProfileID = id
+                    liveProfileOrder = orderedProfiles(from: baseProfiles).map(\.id)
+                    profileDragBaseY = value.startLocation.y
+                }
+                guard draggedProfileID == id, var order = liveProfileOrder,
+                      var index = order.firstIndex(of: id) else { return }
+                var offset = value.location.y - profileDragBaseY
+                while index < order.count - 1 {
+                    let nextHeight = profileRowHeights[order[index + 1]] ?? 44
+                    guard offset > nextHeight * 0.55 else { break }
+                    withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                        order.swapAt(index, index + 1)
+                        liveProfileOrder = order
+                    }
+                    profileDragBaseY += nextHeight
+                    offset -= nextHeight
+                    index += 1
+                }
+                while index > 0 {
+                    let prevHeight = profileRowHeights[order[index - 1]] ?? 44
+                    guard offset < -prevHeight * 0.55 else { break }
+                    withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                        order.swapAt(index, index - 1)
+                        liveProfileOrder = order
+                    }
+                    profileDragBaseY -= prevHeight
+                    offset += prevHeight
+                    index -= 1
+                }
+                profileDragOffset = offset
+            }
+            .onEnded { _ in
+                let finalOrder = liveProfileOrder
+                let originalOrder = baseProfiles.map(\.id)
+                withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                    profileDragOffset = 0
+                    draggedProfileID = nil
+                }
+                guard let finalOrder, finalOrder != originalOrder else { return }
+                Task {
+                    let persisted = await store.changeProfiles { try await $0.setPlacementOrder(ids: finalOrder) }
+                    if persisted { liveProfileOrder = nil }
+                }
+            }
     }
 
     private func editorHeader(_ title: String, back: @escaping () -> Void) -> some View {
@@ -197,98 +295,122 @@ struct ProfilesView: View {
         .padding(.vertical, 10)
     }
 
+    private func entryKey(_ entry: PlacementEntry) -> String {
+        "\(entry.instanceId)|\(entry.model)"
+    }
+
     private func editor(_ placement: Placement) -> some View {
         let indices = (draft?.entries ?? []).enumerated().compactMap { index, entry in
             isVisible(entry, in: placement.models) ? index : nil
         }
         let headerTitle = draft?.original.map { "Edit \($0.displayLabel)" } ?? "New Profile"
-        return VStack(alignment: .leading, spacing: 0) {
-            editorHeader(headerTitle) { draft = nil }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                TextField("Profile name", text: Binding(
-                    get: { draft?.label ?? "" }, set: { draft?.label = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
-                if indices.isEmpty {
-                    Text("No models or profiles yet. Add one below to set the priority order.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.vertical, 6)
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(indices.indices, id: \.self) { position in
-                                entryRow(position, indices: indices, placement: placement)
-                                Divider()
-                            }
-                        }
-                    }
-                    .scrollBounceBehavior(.basedOnSize)
-                    .frame(maxHeight: 260)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                let models = placement.models.filter { !$0.hidden && $0.instanceId != PlacementEntry.companion.PROFILE_INSTANCE }
-                // Profiles it may use: not itself, and none that uses it (the server refuses cycles).
-                let profiles = placement.referenceCandidates(profileId: draft?.original?.id ?? "", held: draft?.entries ?? [])
-                Menu {
-                    Section("Models") {
-                        ForEach(Array(models.enumerated()), id: \.offset) { _, model in
-                            Button("\(model.displayLabel) · \(model.displayProvider)") {
-                                draft?.entries.append(PlacementEntry.companion.of(model: model))
-                            }
-                            .disabled(draft?.entries.contains { $0.instanceId == model.instanceId && $0.model == model.model } == true)
-                        }
-                    }
-                    if !profiles.isEmpty {
-                        Section("Profiles") {
-                            ForEach(profiles, id: \.id) { profile in
-                                Button("Profile · \(profile.displayLabel)", systemImage: "square.stack.3d.up") {
-                                    draft?.entries.append(PlacementEntry.companion.reference(profile: profile, enabled: true))
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Label(profiles.isEmpty ? "Add Model" : "Add Entry", systemImage: "plus")
-                        .modifier(PillShape(width: nil, compact: true))
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .disabled(models.isEmpty && profiles.isEmpty)
-                HStack {
-                    if let id = draft?.original?.id, !placement.profileUsedBy(profileId: id).isEmpty {
-                        Text("Used by \(placement.profileUsedBy(profileId: id).joined(separator: ", ")), so it can't be deleted.")
+        return PopoutScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                editorHeader(headerTitle) { draft = nil }
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Profile name", text: Binding(
+                        get: { draft?.label ?? "" }, set: { draft?.label = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout)
+                    if indices.isEmpty {
+                        Text("No models or profiles yet. Add one below to set the priority order.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                    } else if let id = draft?.original?.id {
-                        Button("Delete…", role: .destructive) { confirmingDelete = true }
-                            .confirmationDialog("Delete this profile?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                                Button("Delete Profile", role: .destructive) {
-                                    Task {
-                                        if await store.changeProfiles({ try await $0.deletePlacementProfile(id: id) }) { draft = nil }
+                            .padding(.vertical, 6)
+                    } else {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(indices.enumerated()), id: \.element) { position, index in
+                                if let entries = draft?.entries, entries.indices.contains(index) {
+                                    let key = entryKey(entries[index])
+                                    let dragging = draggedEntryKey == key
+                                    entryRow(position, indices: indices, placement: placement, dragging: dragging, key: key)
+                                        .background {
+                                            Color.clear.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                                if h > 0 { entryRowHeights[key] = h }
+                                            }
+                                        }
+                                        .offset(y: dragging ? entryDragOffset : 0)
+                                        .zIndex(dragging ? 1 : 0)
+                                }
+                            }
+                        }
+                        .coordinateSpace(name: "profileEntries")
+                    }
+                    let models = placement.models.filter { !$0.hidden && $0.instanceId != PlacementEntry.companion.PROFILE_INSTANCE }
+                    // Profiles it may use: not itself, and none that uses it (the server refuses cycles).
+                    let profiles = placement.referenceCandidates(profileId: draft?.original?.id ?? "", held: draft?.entries ?? [])
+                    Menu {
+                        Section("Models") {
+                            ForEach(Array(models.enumerated()), id: \.offset) { _, model in
+                                Button("\(model.displayLabel) · \(model.displayProvider)") {
+                                    draft?.entries.append(PlacementEntry.companion.of(model: model))
+                                }
+                                .disabled(draft?.entries.contains { $0.instanceId == model.instanceId && $0.model == model.model } == true)
+                            }
+                        }
+                        if !profiles.isEmpty {
+                            Section("Profiles") {
+                                ForEach(profiles, id: \.id) { profile in
+                                    Button("Profile · \(profile.displayLabel)", systemImage: "square.stack.3d.up") {
+                                        draft?.entries.append(PlacementEntry.companion.reference(profile: profile, enabled: true))
                                     }
                                 }
                             }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(profiles.isEmpty ? "Add Model" : "Add Entry")
+                                .font(.caption.weight(.medium))
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .modifier(CapsuleChipShape())
                     }
-                    Spacer()
-                    if store.savingProfiles {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityLabel("Saving")
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .disabled(models.isEmpty && profiles.isEmpty)
+                    HStack {
+                        if let id = draft?.original?.id, !placement.profileUsedBy(profileId: id).isEmpty {
+                            Text("Used by \(placement.profileUsedBy(profileId: id).joined(separator: ", ")), so it can't be deleted.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else if let id = draft?.original?.id {
+                            Button("Delete…", role: .destructive) { confirmingDelete = true }
+                                .confirmationDialog("Delete this profile?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                                    Button("Delete Profile", role: .destructive) {
+                                        Task {
+                                            if await store.changeProfiles({ try await $0.deletePlacementProfile(id: id) }) { draft = nil }
+                                        }
+                                    }
+                                }
+                        }
+                        Spacer()
+                        if store.savingProfiles {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .accessibilityLabel("Saving")
+                        }
+                        Button("Cancel") { draft = nil }
+                            .keyboardShortcut(.cancelAction)
+                        Button("Save") { save() }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(draft?.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
                     }
-                    Button("Cancel") { draft = nil }
-                        .keyboardShortcut(.cancelAction)
-                    Button("Save") { save() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(draft?.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
                 }
+                .padding(14)
+                .font(.callout)
+                .controlSize(.small)
             }
-            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -296,8 +418,57 @@ struct ProfilesView: View {
         !models.contains { $0.hidden && $0.instanceId == entry.instanceId && $0.model == entry.model }
     }
 
+    private func entryDragGesture(for key: String, placement: Placement) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("profileEntries"))
+            .onChanged { value in
+                if draggedEntryKey == nil {
+                    draggedEntryKey = key
+                    entryDragBaseY = value.startLocation.y
+                }
+                guard draggedEntryKey == key, let entries = draft?.entries else { return }
+                let visibleIndices = entries.enumerated().compactMap { idx, entry in
+                    isVisible(entry, in: placement.models) ? idx : nil
+                }
+                guard var pos = visibleIndices.firstIndex(where: { entryKey(entries[$0]) == key }) else { return }
+                var offset = value.location.y - entryDragBaseY
+                while pos < visibleIndices.count - 1 {
+                    let nextEntry = entries[visibleIndices[pos + 1]]
+                    let nextHeight = entryRowHeights[entryKey(nextEntry)] ?? 46
+                    guard offset > nextHeight * 0.55 else { break }
+                    let from = visibleIndices[pos]
+                    let to = visibleIndices[pos + 1]
+                    withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                        self.draft?.entries.swapAt(from, to)
+                    }
+                    entryDragBaseY += nextHeight
+                    offset -= nextHeight
+                    pos += 1
+                }
+                while pos > 0 {
+                    let prevEntry = entries[visibleIndices[pos - 1]]
+                    let prevHeight = entryRowHeights[entryKey(prevEntry)] ?? 46
+                    guard offset < -prevHeight * 0.55 else { break }
+                    let from = visibleIndices[pos]
+                    let to = visibleIndices[pos - 1]
+                    withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                        self.draft?.entries.swapAt(from, to)
+                    }
+                    entryDragBaseY -= prevHeight
+                    offset += prevHeight
+                    pos -= 1
+                }
+                entryDragOffset = offset
+            }
+            .onEnded { _ in
+                withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                    entryDragOffset = 0
+                    draggedEntryKey = nil
+                }
+            }
+    }
+
     @ViewBuilder
-    private func entryRow(_ position: Int, indices: [Int], placement: Placement) -> some View {
+    private func entryRow(_ position: Int, indices: [Int], placement: Placement, dragging: Bool, key: String) -> some View {
         let index = indices[position]
         if let draft, draft.entries.indices.contains(index) {
             let entry = draft.entries[index]
@@ -305,15 +476,20 @@ struct ProfilesView: View {
                 $0.instanceId == entry.instanceId && $0.model == entry.model
             }?.reasoning?.levels ?? []
             VStack(alignment: .leading, spacing: 5) {
-                HStack {
+                HStack(spacing: 8) {
+                    DragHandle(dragging: dragging)
+                        .gesture(entryDragGesture(for: key, placement: placement))
+                        .accessibilityLabel("Reorder \(entry.displayLabel)")
+                        .help("Drag to reorder")
                     Toggle(isOn: Binding(get: { entry.enabled }, set: { enabled in
                         update(index, enabled: enabled)
                     })) {
                         if entry.isProfileReference {
                             // Another profile, used whole: its enabled models rank here, in its order.
                             Label {
-                                VStack(alignment: .leading) {
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text("Profile · \(placement.profiles.first { $0.id == entry.model }?.displayLabel ?? entry.displayLabel)")
+                                        .font(.callout.weight(.medium))
                                     if !entry.reason.isEmpty {
                                         Text(entry.reason).font(.caption).foregroundStyle(.secondary)
                                     }
@@ -322,19 +498,14 @@ struct ProfilesView: View {
                                 Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
                             }
                         } else {
-                            VStack(alignment: .leading) {
-                                Text(entry.displayLabel)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(entry.displayLabel).font(.callout.weight(.medium))
                                 Text(entry.displayProvider).font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
-                    Spacer()
-                    moveButton(up: true, disabled: position == 0) {
-                        self.draft?.entries.swapAt(index, indices[position - 1])
-                    }
-                    moveButton(up: false, disabled: position == indices.count - 1) {
-                        self.draft?.entries.swapAt(index, indices[position + 1])
-                    }
+                    .toggleStyle(.checkbox)
+                    Spacer(minLength: 4)
                     Button(entry.isProfileReference ? "Remove profile" : "Remove model", systemImage: "minus.circle") {
                         self.draft?.entries.remove(at: index)
                     }
@@ -350,7 +521,24 @@ struct ProfilesView: View {
                         }
                         ForEach(levels.filter { !$0.isEmpty }, id: \.self) { Text($0).tag($0) }
                     }
+                    .padding(.leading, 22)
                 }
+                Divider()
+                    .padding(.top, 3)
+            }
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(dragging ? Color(nsColor: .controlBackgroundColor).opacity(0.95) : .clear)
+                    .shadow(color: dragging ? Color.black.opacity(0.18) : .clear, radius: 4, y: 2)
+            )
+            .contextMenu {
+                Button("Move Up") { self.draft?.entries.swapAt(index, indices[position - 1]) }
+                    .disabled(position == 0)
+                Button("Move Down") { self.draft?.entries.swapAt(index, indices[position + 1]) }
+                    .disabled(position == indices.count - 1)
+                Divider()
+                Button("Remove", role: .destructive) { self.draft?.entries.remove(at: index) }
             }
         }
     }
@@ -406,9 +594,15 @@ struct ProfilesView: View {
                 Button {
                     limitDraft = LimitDraft(adding: true, account: free.first ?? "")
                 } label: {
-                    Label("Add Limit", systemImage: "plus")
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Add Limit")
+                            .font(.caption.weight(.medium))
+                    }
+                    .modifier(CapsuleChipShape())
                 }
-                .buttonStyle(PillStyle(width: nil, compact: true))
+                .buttonStyle(.plain)
                 .disabled(free.isEmpty)
                 .help(free.isEmpty ? "Every account already has a limit" : "Hold back part of an account's quota")
                 Spacer()
@@ -505,15 +699,9 @@ struct ProfilesView: View {
                 }
             }
             .padding(14)
+            .font(.callout)
+            .controlSize(.small)
         }
-    }
-
-    private func moveButton(up: Bool, disabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(up ? "Move up" : "Move down", systemImage: up ? "chevron.up" : "chevron.down", action: action)
-            .labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
-            .disabled(disabled)
-            .help(up ? "Move up" : "Move down")
     }
 
     private func update(_ index: Int, enabled: Bool? = nil, reasoning: String? = nil) {
@@ -529,7 +717,11 @@ struct ProfilesView: View {
     private func reorder(_ profiles: [PlacementProfile], _ index: Int, _ destination: Int) {
         var ids = profiles.map(\.id)
         ids.swapAt(index, destination)
-        Task { _ = await store.changeProfiles { try await $0.setPlacementOrder(ids: ids) } }
+        liveProfileOrder = ids
+        Task {
+            let persisted = await store.changeProfiles { try await $0.setPlacementOrder(ids: ids) }
+            if persisted { liveProfileOrder = nil }
+        }
     }
 
     private func sameSettings(_ lhs: PlacementEntry, _ rhs: PlacementEntry) -> Bool {
@@ -567,18 +759,49 @@ struct ProfilesView: View {
     }
 }
 
-private struct ProfileRow: View {
+private struct DragHandle: View {
+    let dragging: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(dragging ? AnyShapeStyle(.primary) : hovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            .frame(width: 18, height: 22)
+            .contentShape(Rectangle())
+            .onHover { over in
+                hovering = over
+                if !dragging {
+                    (over ? NSCursor.openHand : NSCursor.arrow).set()
+                }
+            }
+            .onChange(of: dragging) { _, isDragging in
+                (isDragging ? NSCursor.closedHand : hovering ? NSCursor.openHand : NSCursor.arrow).set()
+            }
+            .onDisappear {
+                if hovering || dragging { NSCursor.arrow.set() }
+            }
+    }
+}
+
+private struct ProfileRow<Drag: Gesture>: View {
     let title: String
     let subtitle: String
     let canMoveUp: Bool
     let canMoveDown: Bool
+    let dragging: Bool
     let open: () -> Void
     let moveUp: () -> Void
     let moveDown: () -> Void
+    let dragGesture: Drag
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
+            DragHandle(dragging: dragging)
+                .gesture(dragGesture)
+                .accessibilityLabel("Reorder \(title)")
+                .help("Drag to reorder")
             Button(action: open) {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -600,24 +823,16 @@ private struct ProfileRow: View {
             .buttonStyle(.plain)
             .accessibilityHint("Edit profile \(title)")
             .help("Edit \(title)")
-            Divider()
-                .frame(height: 14)
-            HStack(spacing: 4) {
-                Button("Move \(title) up", systemImage: "chevron.up", action: moveUp)
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .disabled(!canMoveUp)
-                    .help("Move up")
-                Button("Move \(title) down", systemImage: "chevron.down", action: moveDown)
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .disabled(!canMoveDown)
-                    .help("Move down")
-            }
         }
-        .padding(.horizontal, 14)
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
         .padding(.vertical, 7)
-        .background(hovering ? Color.primary.opacity(0.05) : .clear)
+        .background(
+            dragging
+                ? AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.95))
+                : hovering ? AnyShapeStyle(Color.primary.opacity(0.05)) : AnyShapeStyle(.clear)
+        )
+        .shadow(color: dragging ? Color.black.opacity(0.18) : .clear, radius: 5, y: 2)
         .onHover { hovering = $0 }
         .contextMenu {
             Button("Edit \(title)", action: open)

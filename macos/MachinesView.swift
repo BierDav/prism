@@ -14,10 +14,18 @@ struct MachinesView: View {
     /// The popout's window. A closed menu-bar popout keeps its views, so
     /// polling asks whether the window is on screen.
     @State private var window: NSWindow?
+    @Environment(\.popoutNavigation) private var navigation
 
     var body: some View {
         content
             .background(WindowReader { window = $0 })
+            .onAppear {
+                navigation?.dismissSubstate = {
+                    guard expanded != nil else { return false }
+                    withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { expanded = nil }
+                    return true
+                }
+            }
             .task(id: store.connected) {
                 // Fresh numbers every 30 seconds while the popout shows the
                 // tab, and at once when it opens again; the server caches for
@@ -73,8 +81,8 @@ struct MachinesView: View {
             ("Online", healthy),
             ("Offline", offline),
         ].filter { !$0.1.isEmpty }
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        return PopoutScrollView {
+            VStack(alignment: .leading, spacing: 0) {
                 if let error = store.metricsError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -94,16 +102,16 @@ struct MachinesView: View {
                     .padding(.bottom, 3)
                     ForEach(list) { host in
                         HostRow(host: host, now: now, expanded: expanded == host.name) {
-                            withAnimation(.smooth(duration: 0.2)) { expanded = expanded == host.name ? nil : host.name }
+                            withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
+                                expanded = expanded == host.name ? nil : host.name
+                            }
                         }
                     }
                 }
             }
             .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(maxHeight: 520)
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Worst metric severity level (0 normal, 1 high, 2 critical) across CPU, memory and filesystems.
@@ -153,19 +161,23 @@ private struct HostRow: View {
     private var rowContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
+                .zIndex(1)
             if host.online {
                 if expanded {
-                    Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
-                    Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
-                    Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
-                    facts
-                    if host.cpuHistory.contains(where: { $0 != nil }) {
-                        Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
+                        Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
+                        Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
+                        facts
+                        if host.cpuHistory.contains(where: { $0 != nil }) {
+                            Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
+                        }
+                        details
                     }
-                    details
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.verticalReveal)
                 } else {
                     compactMeters
+                        .transition(.opacity)
                 }
             }
         }
