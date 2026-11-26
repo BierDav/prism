@@ -75,6 +75,8 @@ object ConversationStore {
     private const val DELETED = ".deleted"
     /** A delete sent: kept so no save here brings it back. */
     private const val GONE = ".gone"
+    /** The conversation as last saved or read here, kept for good: it opens from the phone. */
+    private const val KEPT = ".chat"
 
     private val json = Json { ignoreUnknownKeys = true }
     private val record = Outbox.serializer(ConversationSnapshot.serializer())
@@ -91,6 +93,22 @@ object ConversationStore {
     /** One sender at a time, so every save builds on the revision the one before committed. */
     private val sending = Mutex()
     private var retry: Job? = null
+
+    /**
+     * The conversations last loaded or saved in this process, newest last: a
+     * chat opens from here at once (the last chat's chip loads its own ahead)
+     * instead of waiting on the replica, which can take seconds to open.
+     * For [RECENT_MS] only: another device may go on with it meanwhile.
+     */
+    private val recent = object : LinkedHashMap<String, Pair<ConversationSnapshot, Long>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<ConversationSnapshot, Long>>?) = size > RECENT
+    }
+
+    private fun remembered(id: String): ConversationSnapshot? = synchronized(recent) {
+        recent[id]?.takeIf { android.os.SystemClock.elapsedRealtime() - it.second < RECENT_MS }?.first
+    }
+
+    private fun remember(s: ConversationSnapshot) = synchronized(recent) { recent[s.id] = s to android.os.SystemClock.elapsedRealtime() }
     private var backoff = FIRST_RETRY_MS
 
     /** Why the outbox couldn't write or send, for the history screen; null while all is well. */
@@ -118,11 +136,13 @@ object ConversationStore {
      */
     fun save(c: Context, s: ConversationSnapshot) {
         val app = c.applicationContext
+        remember(s)
         scope.launch {
             files.withLock {
                 if (tombstoned(app, s.id)) return@launch
                 val f = file(app, s.id, JSON)
                 write(f, (read(f) ?: Outbox()).queued(s, PrismClient.requestId()))
+                keep(app, s)
             }
             changed()
             send(app)
@@ -138,10 +158,12 @@ object ConversationStore {
         val app = c.applicationContext
         AssistantSession.deleted(id)
         AssistantMemory(app).forget(id)
+        synchronized(recent) { recent.remove(id) }
         scope.launch {
             files.withLock {
                 writeText(file(app, id, DELETED), id)
                 file(app, id, JSON).delete()
+                file(app, id, KEPT).delete()
             }
             changed()
             send(app)
@@ -168,9 +190,84 @@ object ConversationStore {
             }
         }
         if (local != null) return local
-        val s = PrismApi.call(c) { assistantConversation(id) }
+        remembered(id)?.let { return it }
+        val app = c.applicationContext
+        val kept = withContext(Dispatchers.IO) { files.withLock { kept(app, id) } }
+        if (kept != null) {
+            remember(kept)
+            // Gone on with on another device meanwhile? Then that, next time.
+            scope.launch { runCatching { fetch(app, id) } }
+            return kept
+        }
+        return fetch(app, id)
+    }
+
+    /** Conversation [id] from the replica (which can take long to open), then kept on the phone if it is newer. */
+    private suspend fun fetch(app: Context, id: String): ConversationSnapshot {
+        val started = android.os.SystemClock.elapsedRealtime()
+        val s = PrismApi.call(app) { assistantConversation(id) }
+        Log.i(TAG, "conversation read from the replica in ${android.os.SystemClock.elapsedRealtime() - started} ms")
         val c = s.conversation
-        return ConversationSnapshot(c.id, c.title, c.createdAt, c.updatedAt, revision = c.revision, entries = s.entries, history = s.history)
+        val read = ConversationSnapshot(c.id, c.title, c.createdAt, c.updatedAt, revision = c.revision, entries = s.entries, history = s.history)
+        return withContext(Dispatchers.IO) {
+            files.withLock {
+                if (tombstoned(app, id)) throw PrismError(410, "gone", "This chat was deleted.")
+                val mine = kept(app, id)
+                if (mine == null || read.updatedAt > mine.updatedAt) {
+                    keep(app, read)
+                    read
+                } else mine
+            }
+        }.also { remember(it) }
+    }
+
+    /** The copy of [id] kept on the phone, if any. Hold [files]. */
+    private fun kept(app: Context, id: String): ConversationSnapshot? {
+        val f = file(app, id, KEPT)
+        if (!f.exists()) return null
+        return runCatching { json.decodeFromString(ConversationSnapshot.serializer(), f.readText()) }.getOrNull()
+    }
+
+    /** Keeps [s] on the phone for good (no problem or save ID with it). Hold [files]. */
+    private fun keep(app: Context, s: ConversationSnapshot) {
+        runCatching { writeText(file(app, s.id, KEPT), json.encodeToString(ConversationSnapshot.serializer(), s.with(s.revision, "", ""))) }
+            .onFailure { Log.w(TAG, "a conversation was not kept on the phone: ${it.message}") }
+    }
+
+    /**
+     * Keeps every conversation of [ids] (the replica's list) that isn't on
+     * the phone yet, one after another, so each opens from the phone.
+     */
+    fun keepAll(c: Context, ids: List<String>) {
+        val app = c.applicationContext
+        scope.launch {
+            for (id in ids) {
+                val have = files.withLock { tombstoned(app, id) || file(app, id, KEPT).exists() }
+                if (have) continue
+                try {
+                    fetch(app, id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.i(TAG, "keeping a conversation on the phone: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /** Loads conversation [id] ahead (into [recent]), for a chat about to be opened; failures are left to the open. */
+    fun prefetch(c: Context, id: String) {
+        if (remembered(id) != null) return
+        val app = c.applicationContext
+        scope.launch {
+            try {
+                load(app, id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.i(TAG, "prefetching a conversation: ${e.message}")
+            }
+        }
     }
 
     /** Sends what waits in the outbox (the replica opened, a screen asks); on failure it tries again later. */
@@ -308,6 +405,8 @@ object ConversationStore {
         }
     }
 
+    private const val RECENT = 8
+    private const val RECENT_MS = 10 * 60_000L
     private const val FIRST_RETRY_MS = 5_000L
     private const val LAST_RETRY_MS = 5 * 60_000L
 }

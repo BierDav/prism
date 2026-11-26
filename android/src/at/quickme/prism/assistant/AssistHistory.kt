@@ -40,6 +40,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.layout.statusBars
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -101,6 +104,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -281,6 +289,8 @@ internal suspend fun loadHistory(context: Context, device: String): Pair<List<Hi
         error = e.message
         emptyList()
     }
+    // Each opens from the phone from now on.
+    ConversationStore.keepAll(context, stored.map { it.id })
     val byId = LinkedHashMap<String, HistoryItem>()
     stored.forEach { byId[it.id] = HistoryItem(it) }
     for (s in kept) {
@@ -516,10 +526,19 @@ internal fun HistoryChat(
     /** In place of the plain field: the overlay's card. */
     composer: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
+    /** Its parts in the overlay's shared transition with the card: its background, what is on it, its handle. */
+    backgroundModifier: Modifier = Modifier,
+    contentModifier: Modifier = Modifier,
+    handleModifier: Modifier = Modifier,
     /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
+    /** Whether a gesture is taking it back to the card now (the overlay shows what is behind it). */
+    onPeek: (Boolean) -> Unit = {},
+    /** Where it is on the screen as it goes (the overlay's halo follows it). */
+    onBounds: (androidx.compose.ui.geometry.Rect) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
+    val peekNow by androidx.compose.runtime.rememberUpdatedState(onPeek)
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val entries = transcript.entries
@@ -528,18 +547,27 @@ internal fun HistoryChat(
         if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
+    // Gone back to the card: from here the shared transition moves it.
+    var collapsing by remember { mutableStateOf(false) }
     // How far the chat has gone back towards the card: by predictive Back
     // (0..1) or the handle dragged down (px).
     val back = remember { Animatable(0f) }
     var pulled by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val view = androidx.compose.ui.platform.LocalView.current
+    /** Into the card: the transition takes the chat from where the gesture left it. */
+    fun collapseNow() {
+        val go = onCollapse ?: return
+        // The transition goes from where the chat shows now (its top down).
+        collapsing = true
+        go()
+    }
     if (onCollapse != null) {
         // The drawer handles Back itself (predictively) while it is open.
         PredictiveBackHandler(enabled = collapseOnBack && drawer.isClosed && drawer.targetValue == DrawerValue.Closed) { progress ->
             try {
                 progress.collect { back.snapTo(CollapseEasing.transform(it.progress)) }
-                onCollapse()
+                collapseNow()
             } catch (e: CancellationException) {
                 scope.launch { back.animateTo(0f, spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMedium)) }
                 throw e
@@ -551,7 +579,19 @@ internal fun HistoryChat(
     var cardHeight by remember { mutableIntStateOf(0) }
     val cardSpace = with(density) { cardHeight.toDp() }
     val reach = with(density) { CollapseReach.toPx() }
-    val drag = rememberDraggableState { dy ->
+    // The pull down to the card: by the handle and the top bar, on an empty
+    // chat anywhere, and by the list scrolled down past its top.
+    val collapse by androidx.compose.runtime.rememberUpdatedState(onCollapse)
+    var fullHeight by remember { mutableIntStateOf(0) }
+    /**
+     * How far the chat's top has come down: with the finger (less and less
+     * past the threshold), or a quarter of the screen at the end of Back.
+     */
+    fun drop(): Float = maxOf(
+        with(density) { pullDrop(pulled, CollapseDrag.toPx()) },
+        back.value * 0.25f * fullHeight,
+    )
+    fun pull(dy: Float) {
         val threshold = with(density) { CollapseDrag.toPx() }
         val before = pulled
         val next = (before + dy).coerceAtLeast(0f)
@@ -563,27 +603,59 @@ internal fun HistoryChat(
             )
         }
     }
+    /** Let go at [velocity] (px/s, down positive): into the card past the threshold or on a fling down, else back. */
+    suspend fun release(velocity: Float) {
+        val (threshold, fling) = with(density) { CollapseDrag.toPx() to CollapseFlingDpPerS.dp.toPx() }
+        if (collapse != null && (pulled >= threshold || (velocity >= fling && pulled > 0f))) {
+            collapseNow()
+        } else {
+            // Without a bounce: past its rest the chat would cut its system
+            // bars' room away again.
+            androidx.compose.animation.core.animate(
+                pulled, 0f, animationSpec = spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow),
+            ) { v, _ -> pulled = v.coerceAtLeast(0f) }
+        }
+    }
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.snapshotFlow { back.value > 0f || pulled > 0f }.collect { peekNow(it) }
+    }
+    val drag = rememberDraggableState { dy -> pull(dy) }
+    val pullDown = if (onCollapse == null) Modifier else Modifier.draggable(
+        drag, Orientation.Vertical, onDragStopped = { velocity -> release(velocity) },
+    )
+    // The list's overscroll at its top goes into the pull, and a pull
+    // started so is taken back first when the finger goes up again.
+    val overscrollPull = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): Offset {
+                if (collapse == null || pulled <= 0f || available.y >= 0f || source != androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput) return Offset.Zero
+                val take = maxOf(available.y, -pulled)
+                pull(take)
+                return Offset(0f, take)
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): Offset {
+                if (collapse == null || available.y <= 0f || source != androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput) return Offset.Zero
+                pull(available.y)
+                return Offset(0f, available.y)
+            }
+
+            override suspend fun onPreFling(available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
+                if (collapse == null || pulled <= 0f) return androidx.compose.ui.unit.Velocity.Zero
+                release(available.y)
+                return available
+            }
+        }
+    }
     val content: @Composable () -> Unit = {
         Box(Modifier.fillMaxSize()) {
             Scaffold(
-                containerColor = colors.surface,
+                containerColor = Color.Transparent,
                 topBar = {
                     Column(
                         Modifier.background(colors.surface)
                             .then(
-                                if (onCollapse == null) Modifier else Modifier.draggable(
-                                    drag, Orientation.Vertical,
-                                    onDragStopped = { velocity ->
-                                        val (threshold, fling) = with(density) { CollapseDrag.toPx() to CollapseFlingDpPerS.dp.toPx() }
-                                        if (pulled >= threshold || (velocity >= fling && pulled > 0f)) {
-                                            onCollapse()
-                                        } else {
-                                            androidx.compose.animation.core.animate(
-                                                pulled, 0f, animationSpec = spring(Spring.DampingRatioLowBouncy, Spring.StiffnessMediumLow),
-                                            ) { v, _ -> pulled = v }
-                                        }
-                                    },
-                                ),
+                                pullDown,
                             ),
                     ) {
                         if (onCollapse != null) {
@@ -593,7 +665,7 @@ internal fun HistoryChat(
                                     .semantics { contentDescription = "Drag handle" },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Box(Modifier.size(32.dp, 4.dp).background(colors.outlineVariant, RoundedCornerShape(2.dp)))
+                                DragHandle(handleModifier)
                             }
                         }
                         TopAppBar(
@@ -614,7 +686,7 @@ internal fun HistoryChat(
                                 IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
                             },
                             windowInsets = if (onCollapse != null) WindowInsets(0) else TopAppBarDefaults.windowInsets,
-                            colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent),
                         )
                     }
                 },
@@ -626,13 +698,13 @@ internal fun HistoryChat(
                         PrismIcons.Sparkle, "New chat",
                         if (configured) "Ask Prism anything; it can act on this phone and hand work to T3."
                         else "The assistant isn't set up on this phone (assistant_api_key).",
-                        Modifier.padding(padding).padding(bottom = cardSpace),
+                        Modifier.fillMaxSize().then(pullDown).padding(padding).padding(bottom = cardSpace),
                     )
                     else -> LazyColumn(
                         state = list,
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + cardSpace + 16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.fillMaxSize().fadeUnderBar(list, padding.calculateTopPadding()),
+                        modifier = Modifier.fillMaxSize().nestedScroll(overscrollPull).fadeUnderBar(list, padding.calculateTopPadding()),
                     ) {
                         items(entries, key = { it.id }) { e -> TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now) }
                         if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
@@ -661,26 +733,103 @@ internal fun HistoryChat(
             }
         }
     }
-    Box(
-        modifier.graphicsLayer {
-            // Going back to the card: smaller towards the bottom, where the
-            // card is, and down with the finger, the corners rounding.
-            val p = maxOf(back.value, (pulled / reach).coerceIn(0f, 1f))
-            val s = 1f - 0.1f * p
-            scaleX = s
-            scaleY = s
-            transformOrigin = TransformOrigin(0.5f, 1f)
-            translationY = pulled * 0.5f
-            shape = RoundedCornerShape(CollapseRadius * p)
-            clip = p > 0f
-        },
-    ) {
-        if (chats == null) content() else ModalNavigationDrawer(
-            drawerState = drawer,
-            drawerContent = { chats { scope.launch { drawer.close() } } },
-            content = content,
-        )
+    // The system bars' room is cut away as soon as a gesture takes the chat
+    // back (and while it shrinks into the card), less and less as it nears
+    // the card's size.
+    val crop by androidx.compose.animation.core.animateFloatAsState(
+        if (collapsing || back.value > 0f || pulled > 0f) 1f else 0f, tween(150), label = "crop",
+    )
+    val topInset = WindowInsets.statusBars.getTop(density).toFloat()
+    val bottomInset = WindowInsets.navigationBars.getBottom(density).toFloat()
+    // Where it shows on the screen (its top cut away as it comes down), for the overlay's halo.
+    var laidOut by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    val boundsNow by androidx.compose.runtime.rememberUpdatedState(onBounds)
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.snapshotFlow {
+            val r = laidOut
+            if (r.isEmpty) r else r.copy(top = minOf(r.bottom, r.top + topInset * crop))
+        }.collect { boundsNow(it) }
     }
+    Box(
+        Modifier
+            // Its top comes down (a layout, so the card's shared bounds go
+            // from where it shows): the field stays at the bottom, the rest
+            // follows the top.
+            .layout { measurable, constraints ->
+                val d = drop().roundToInt().coerceIn(0, if (constraints.hasBoundedHeight) constraints.maxHeight else 0)
+                val p = measurable.measure(
+                    constraints.copy(
+                        minHeight = (constraints.minHeight - d).coerceAtLeast(0),
+                        maxHeight = if (constraints.hasBoundedHeight) constraints.maxHeight - d else constraints.maxHeight,
+                    ),
+                )
+                layout(p.width, p.height + d) { p.place(0, d) }
+            }
+            .then(modifier)
+            .onSizeChanged { if (!collapsing) fullHeight = maxOf(fullHeight, it.height) }
+            .graphicsLayer {
+                // Going back to the card: its top edge comes down with the
+                // finger (or Back), the field staying where it is at the
+                // bottom, the corners rounding.
+                val p = maxOf(back.value, (pulled / reach).coerceIn(0f, 1f))
+                val near = if (fullHeight > 0) ((size.height + drop() - 0.2f * fullHeight) / (0.8f * fullHeight)).coerceIn(0f, 1f) else 1f
+                val c = crop * near
+                val radius = CollapseRadius.toPx() * maxOf(p, if (collapsing) 1f else 0f)
+                shape = InsetRoundShape(topInset * c, bottomInset * c, radius)
+                clip = c > 0f || radius > 0f
+            }
+            .onGloballyPositioned { laidOut = it.boundsInRoot() },
+    ) {
+        // The chat's background, the container's (its own fade in the transition).
+        Box(Modifier.matchParentSize().then(backgroundModifier).background(colors.surface))
+        Box(Modifier.fillMaxSize().then(contentModifier)) {
+            if (chats == null) content() else ModalNavigationDrawer(
+                drawerState = drawer,
+                drawerContent = { chats { scope.launch { drawer.close() } } },
+                content = content,
+            )
+        }
+    }
+}
+
+/** How far the chat's top follows a pull of [pull] px: with the finger to [threshold], then half as fast and less and less. */
+private fun pullDrop(pull: Float, threshold: Float): Float {
+    if (pull <= threshold || threshold <= 0f) return pull.coerceAtLeast(0f)
+    return threshold + threshold * (1f - kotlin.math.exp(-(pull - threshold) / (2 * threshold)))
+}
+
+/**
+ * Gemini's handle (32 by 2 dp, measured on the owner's Pixel): on the
+ * overlay's card and at the top of the full-screen chat, one element that
+ * moves between them.
+ */
+@Composable
+internal fun DragHandle(modifier: Modifier = Modifier) {
+    Box(modifier.size(32.dp, 2.dp).background(MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(1.dp)))
+}
+
+/** The top [height] px of a layout. */
+private class TopPartShape(val height: Float) : androidx.compose.ui.graphics.Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        density: androidx.compose.ui.unit.Density,
+    ): androidx.compose.ui.graphics.Outline =
+        androidx.compose.ui.graphics.Outline.Rectangle(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, height.coerceIn(0f, size.height)))
+}
+
+/** A rectangle with [top] and [bottom] cut away and corners of [radius]. */
+private class InsetRoundShape(val top: Float, val bottom: Float, val radius: Float) : androidx.compose.ui.graphics.Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        density: androidx.compose.ui.unit.Density,
+    ): androidx.compose.ui.graphics.Outline = androidx.compose.ui.graphics.Outline.Rounded(
+        androidx.compose.ui.geometry.RoundRect(
+            0f, top, size.width, (size.height - bottom).coerceAtLeast(top),
+            androidx.compose.ui.geometry.CornerRadius(radius),
+        ),
+    )
 }
 
 /**
@@ -698,6 +847,9 @@ private fun Modifier.fadeUnderBar(list: androidx.compose.foundation.lazy.LazyLis
             topLeft = Offset(0f, t), size = Size(size.width, l), blendMode = BlendMode.DstOut,
         )
     }
+
+/** The gesture's own shrink gives way over this long (ms): the overlay's transition. */
+private const val CollapseMs = 500
 
 /** The handle dragged this far down takes the chat back into the card. */
 private val CollapseDrag = 96.dp

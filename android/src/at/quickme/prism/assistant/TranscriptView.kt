@@ -17,7 +17,7 @@ package at.quickme.prism.assistant
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.gestures.draggable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
@@ -26,6 +26,9 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -179,13 +182,22 @@ fun AssistantTranscript(
     onLastChat: () -> Unit = {},
     /** Between the controls and the panel: Gemini's snackbar. */
     banner: @Composable () -> Unit = {},
+    /** The panel's and the last chat's chip's parts in the overlay's shared transition (the panel and a chip are one container). */
+    panelMorph: Morph = Morph.None,
+    lastChatMorph: Morph = Morph.None,
+    /** On New chat, which has no counterpart. */
+    newChatModifier: Modifier = Modifier,
+    /** On the panel as it is drawn (its container's bounds as they move). */
+    panelModifier: Modifier = Modifier,
     /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
-    val list = rememberLazyListState()
     val entries = transcript.entries
+    // At its end from the first frame (a panel that appears at once shows
+    // no jump from its top): a list scrolled past its end stops at it.
+    val list = rememberLazyListState(entries.size, 100_000)
     val handoff = transcript.latestHandoff()?.first
     val surfaces = rememberSurfaceHost(entries, onAction, host)
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
@@ -199,22 +211,43 @@ fun AssistantTranscript(
         }
     }
     Column(modifier) {
-        AssistControls(lastChat = lastChat, onLastChat = onLastChat, onNew = onNew, newEnabled = !running)
+        AssistControls(
+            lastChat = lastChat, onLastChat = onLastChat, onNew = onNew, newEnabled = !running,
+            lastChatMorph = lastChatMorph, newChatModifier = newChatModifier,
+        )
         banner()
         Box(
             Modifier
                 .fillMaxWidth()
-                // 12 dp to the card, with the composer's 8.
-                .padding(bottom = 4.dp)
-                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, PanelRadius)
-                .clip(RoundedCornerShape(PanelRadius))
-                .animateContentSize(tween(350, easing = PanelEasing)),
+                // 12 dp to the card, with the composer's 4.
+                .padding(bottom = 8.dp)
+                .animateContentSize(tween(350, easing = PanelEasing))
+                .then(panelMorph.container)
+                .then(panelModifier)
+                .clip(RoundedCornerShape(PanelRadius)),
         ) {
+            Box(Modifier.matchParentSize().then(panelMorph.background).geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, PanelRadius))
+            // Android's stretch overscroll, also on an answer that fits the
+            // panel: Compose only stretches a list that can scroll, so a drag
+            // on one that can't goes to the same effect here.
+            val overscroll = androidx.compose.foundation.rememberOverscrollEffect()
+            val fits = !list.canScrollForward && !list.canScrollBackward
+            val stretch = androidx.compose.foundation.gestures.rememberDraggableState { dy ->
+                overscroll?.applyToScroll(Offset(0f, dy), androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput) { Offset.Zero }
+            }
             LazyColumn(
                 state = list,
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth().fadingEdges(list, 48.dp),
+                userScrollEnabled = !fits,
+                overscrollEffect = overscroll,
+                modifier = Modifier.fillMaxWidth().then(panelMorph.content).fadingEdges(list, 48.dp).draggable(
+                    stretch, androidx.compose.foundation.gestures.Orientation.Vertical,
+                    enabled = fits && overscroll != null,
+                    onDragStopped = { velocity ->
+                        overscroll?.applyToFling(androidx.compose.ui.unit.Velocity(0f, velocity)) { androidx.compose.ui.unit.Velocity.Zero }
+                    },
+                ),
             ) {
                 items(entries, key = { it.id }) { e ->
                     TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now)
@@ -261,13 +294,21 @@ private fun Modifier.fadingEdges(list: androidx.compose.foundation.lazy.LazyList
  * and, to its right, New chat ([onNew]; none without it).
  */
 @Composable
-fun AssistControls(lastChat: String?, onLastChat: () -> Unit, onNew: (() -> Unit)?, newEnabled: Boolean = true, modifier: Modifier = Modifier) {
+fun AssistControls(
+    lastChat: String?,
+    onLastChat: () -> Unit,
+    onNew: (() -> Unit)?,
+    newEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    /** The last chat's chip's parts in the overlay's shared transition; on New chat's. */
+    lastChatMorph: Morph = Morph.None,
+    newChatModifier: Modifier = Modifier,
+) {
     if (lastChat == null && onNew == null) return
     Row(
-        // Its chips sit [ChipGap] apart, and as far above what follows: the
-        // 48 dp touch target leaves 4 dp under each 40 dp chip, the panel's
-        // soft dark edge takes about as much again, the rest is here.
-        modifier.fillMaxWidth().padding(bottom = ChipGap).offset(x = 4.dp),
+        // Its chips sit [ChipGap] apart, and as far above what follows (the
+        // panel; 12 dp above the card, with the composer's 4, as Gemini's).
+        modifier.fillMaxWidth().padding(bottom = ChipGap),
         horizontalArrangement = Arrangement.spacedBy(ChipGap, Alignment.End),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -275,41 +316,78 @@ fun AssistControls(lastChat: String?, onLastChat: () -> Unit, onNew: (() -> Unit
             PrismIcons.Chat, lastChat.ifEmpty { "Last chat" }, onLastChat, enabled = true,
             description = "Back to the last chat: ${lastChat.ifEmpty { "untitled" }}",
             modifier = Modifier.weight(1f, fill = false),
+            morph = lastChatMorph,
         )
-        if (onNew != null) ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = newEnabled, modifier = Modifier.padding(end = 4.dp))
+        if (onNew != null) ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = newEnabled, modifier = newChatModifier)
     }
 }
 
 /**
  * Gemini's suggestion chip ("What can Gemini do", above its card): a pill in
  * black (white in the light) with the primary colour glowing along its inner
- * edge (GeminiPlate.kt's chip shader), 40 dp tall in a 48 dp touch target,
- * the icon 18 dp, 12 dp before it and 16 dp after the label.
+ * edge (GeminiPlate.kt's chip shader), 48 dp tall, a 20 dp icon 16 dp in,
+ * 8 dp to the label (16 sp) and 16 dp after it (measured on the owner's Pixel).
  */
 @Composable
 private fun ControlChip(
     icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean,
     modifier: Modifier = Modifier, description: String? = null,
+    /** Its parts in a shared transition. */
+    morph: Morph = Morph.None,
 ) {
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
-    Box(modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-        Surface(
-            onClick = onClick, enabled = enabled, shape = CircleShape, color = Color.Transparent,
-            contentColor = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
-            modifier = Modifier
-                // Fully round: the shader takes the smaller of this and half the height.
-                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, 1000.dp)
+    val tint = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
+    // The ripple fills the pill exactly. It is drawn with the background,
+    // not on the container: as the chip grows into its panel (one container)
+    // it goes with the chip's background, rather than greying the panel.
+    val interactions = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .then(morph.container)
+                .height(ChipHeight)
+                .clip(ChipShape)
+                .clickable(
+                    interactionSource = interactions, indication = null,
+                    enabled = enabled, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick,
+                )
                 .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier),
         ) {
-            Row(Modifier.height(40.dp).padding(start = 12.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, Modifier.size(18.dp))
+            // Fully round: the shader takes the smaller of its radius and half the height.
+            Box(
+                Modifier.matchParentSize().then(morph.background)
+                    .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, PanelRadius)
+                    .indication(interactions, androidx.compose.material3.ripple()),
+            )
+            Row(
+                Modifier.then(morph.content).fillMaxHeight().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(icon, null, Modifier.size(20.dp), tint = tint)
                 Text(
-                    label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    label, style = MaterialTheme.typography.bodyLarge, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 8.dp),
                 )
             }
         }
+    }
+}
+
+/** Gemini's chip's height. */
+private val ChipHeight = 48.dp
+
+/** A chip's corners: round at its 48 dp, and the panel's 28 dp once it grows (they share a container). */
+private val ChipShape = RoundedCornerShape(28.dp)
+
+/**
+ * The parts of a container in a shared transition: the [container] (its
+ * bounds, shared), its [background] (it stays while the container morphs)
+ * and its [content] (which crossfades with the other end's).
+ */
+class Morph(val container: Modifier = Modifier, val background: Modifier = Modifier, val content: Modifier = Modifier) {
+    companion object {
+        val None = Morph()
     }
 }
 

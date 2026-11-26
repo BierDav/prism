@@ -101,7 +101,6 @@ private fun attachColors(): AttachColors {
 }
 
 private val TileShape = RoundedCornerShape(40.dp)
-private val TileWidth = 104.dp
 private val TileGap = 12.dp
 private val MenuSide = 16.dp
 private val MenuRadius = 28.dp
@@ -121,35 +120,27 @@ internal fun AttachMenu(actions: AttachActions, modifier: Modifier = Modifier) {
             .semantics { contentDescription = "Add to your request" },
     ) {
         val sheet = actions.cameraSheet
-        if (sheet != null) sheet() else BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val tiles = 3
-            // Gemini's tiles are 104 dp and scroll; three fit here, narrower if need be.
-            val room = maxWidth - MenuSide * 2 - TileGap * (tiles - 1)
-            val width = minOf(TileWidth, room / tiles).coerceAtLeast(72.dp)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(start = MenuSide, end = MenuSide, top = 12.dp, bottom = 20.dp),
-                horizontalArrangement = Arrangement.spacedBy(TileGap),
-                verticalAlignment = Alignment.Top,
-            ) {
-                AttachTile(GeminiIcons.Camera, "Camera", width, colors, actions.camera)
-                AttachTile(GeminiIcons.Photo, "Photos", width, colors, actions.photos)
-                AttachTile(GeminiIcons.AttachFile, "Files", width, colors, actions.files)
-            }
+        if (sheet != null) sheet() else Row(
+            // Three tiles, each exactly a third of what is between the sides.
+            Modifier.fillMaxWidth().padding(start = MenuSide, end = MenuSide, top = 12.dp, bottom = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(TileGap),
+            verticalAlignment = Alignment.Top,
+        ) {
+            AttachTile(GeminiIcons.Camera, "Camera", colors, actions.camera, Modifier.weight(1f))
+            AttachTile(GeminiIcons.Photo, "Photos", colors, actions.photos, Modifier.weight(1f))
+            AttachTile(GeminiIcons.AttachFile, "Files", colors, actions.files, Modifier.weight(1f))
         }
     }
 }
 
 @Composable
-private fun AttachTile(icon: ImageVector, label: String, width: Dp, colors: AttachColors, onClick: () -> Unit) {
+private fun AttachTile(icon: ImageVector, label: String, colors: AttachColors, onClick: () -> Unit, modifier: Modifier) {
     Surface(
         onClick = onClick,
         shape = TileShape,
         color = colors.tile,
         contentColor = colors.onTile,
-        modifier = Modifier.width(width),
+        modifier = modifier,
     ) {
         Column(
             Modifier.fillMaxWidth().padding(vertical = 20.dp),
