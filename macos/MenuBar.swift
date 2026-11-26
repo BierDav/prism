@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor static var store: PrismStore!
     @MainActor static var hotspot: Hotspot!
     @MainActor static var calls: PhoneCalls!
+    /// True for `prism preview --menu-bar`: sample data in a second menu-bar
+    /// icon, without opening Rocky, Bluetooth, Wi-Fi switching, or calls.
+    @MainActor static var previewMode = false
     private var panel: ApprovalPanel?
     private var callPanel: CallPanel?
     private var hotspotWatch: AnyCancellable?
@@ -26,8 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         let approver = Self.approver!
         let panel = ApprovalPanel(approver: approver)
-        approver.onQueueChange = { [weak panel] in panel?.update() }
         self.panel = panel
+        if Self.previewMode {
+            approver.onQueueChange = { [weak panel, weak approver] in
+                if approver?.chosenID != nil || approver?.pending.isEmpty == true {
+                    panel?.update()
+                }
+            }
+            approver.loadKey()
+            approver.watch()
+            return
+        }
+        approver.onQueueChange = { [weak panel] in panel?.update() }
         UNUserNotificationCenter.current().delegate = self
         approver.start()
         Self.store.start()

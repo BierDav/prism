@@ -84,7 +84,7 @@ final class Approver: ObservableObject {
     @Published private(set) var problems: [String] = []
     /// The approval the owner picked in the popout; the dialog shows the
     /// oldest otherwise.
-    @Published private var chosenID: String?
+    @Published private(set) var chosenID: String?
     /// False for a preview snapshot, which can't take a touch: the dialog
     /// then shows its waiting state.
     var listens = true

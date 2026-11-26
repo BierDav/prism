@@ -40,7 +40,7 @@ func usage() -> Never {
                prism sign -n NAMESPACE [FILE|-]
                prism hotspot-uuid [--release] [KEYHEX WINDOW]
                prism wifi-status
-               prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N] [--live --config FILE] [--snapshot PNG]
+               prism preview [--menu-bar] [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N] [--live --config FILE] [--snapshot PNG]
 
         """.utf8))
     exit(2)

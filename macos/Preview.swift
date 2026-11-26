@@ -1,6 +1,7 @@
-// `prism preview [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N]
+// `prism preview [--menu-bar] [--dark|--light] [--approval|--approvals|--machines|--profiles|--wifi] [--expand N]
 // [--live --config FILE] [--snapshot PNG]`: the popout in an ordinary window,
-// for screenshots (`screencapture -l <id>`; it prints the window id).
+// for screenshots (`screencapture -l <id>`; it prints the window id), or with
+// --menu-bar as a live menu-bar icon next to the installed app.
 // --approvals opens it on the Approvals tab, --approval shows the approval
 // dialog instead. --snapshot draws the window itself into PNG after a few
 // seconds and quits: no screen recording permission needed, so it works over
@@ -42,6 +43,14 @@ enum Preview {
         }
         if let index = options.firstIndex(of: "--expand"), index + 1 < options.count {
             AlertsView.initiallyExpanded = Int64(options[index + 1])
+        }
+        if options.contains("--menu-bar") {
+            AppDelegate.previewMode = true
+            AppDelegate.approver = Approver.sample(config: config)
+            AppDelegate.store = store
+            AppDelegate.hotspot = sampleHotspot()
+            PrismApp.main()
+            exit(0)
         }
         let snapshot = options.firstIndex(of: "--snapshot").flatMap { $0 + 1 < options.count ? options[$0 + 1] : nil }
         let approver = Approver.sample(config: config)
