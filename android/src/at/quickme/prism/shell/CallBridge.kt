@@ -150,6 +150,9 @@ object CallBridge {
     /** The Mac wants the call's audio (it answered, or moved it there). */
     private var wantMac = false
 
+    /** Whether we asked AudioManager for MODE_CALL_REDIRECT and haven't handed it back yet. */
+    private var redirected = false
+
     @Volatile private var ended = false
     private val link = AtomicReference<Link?>()
     private val sender = Executors.newSingleThreadExecutor { r -> Thread(r, "call-send") }
@@ -280,7 +283,16 @@ object CallBridge {
     private fun callChanged(id: Int, simState: Int, phoneNumber: String?) {
         if (!phoneNumber.isNullOrBlank() && phoneNumber != number) {
             number = phoneNumber
-            name = lookup(phoneNumber)
+            name = null
+            Thread({
+                val found = lookup(phoneNumber) ?: return@Thread
+                main.post {
+                    if (number == phoneNumber && !ended) {
+                        name = found
+                        sendState()
+                    }
+                }
+            }, "call-contact").start()
         }
         states[id] = simState
         val s = aggregate()
@@ -388,12 +400,11 @@ object CallBridge {
     }
 
     private fun exit() {
-        sender.execute {
-            link.getAndSet(null)?.close()
-            println("call ended")
-            System.out.flush()
-            System.exit(0)
-        }
+        // Don't queue on `sender`: a blocked Bluetooth write would hold up the 3 s fallback.
+        link.getAndSet(null)?.close()
+        println("call ended")
+        System.out.flush()
+        System.exit(0)
     }
 
     private fun sendState() {
@@ -422,6 +433,7 @@ object CallBridge {
         if (pipe != null || ended || !wantMac) return
         try {
             audio.mode = AudioManager.MODE_CALL_REDIRECT
+            redirected = true
             // What AudioManager's getCallDownlinkExtractionAudioRecord and
             // getCallUplinkInjectionAudioTrack build, but on the shell's
             // context: without one the record names the system's package
@@ -452,7 +464,14 @@ object CallBridge {
                 record.release()
                 throw e
             }
-            pipe = Pipe(record, track).also { it.start() }
+            val p = Pipe(record, track)
+            try {
+                p.start()
+            } catch (e: Throwable) {
+                p.stop()
+                throw e
+            }
+            pipe = p
             Log.i(TAG, "the call's audio is on the Mac")
         } catch (e: Throwable) {
             val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
@@ -464,18 +483,24 @@ object CallBridge {
             Log.w(TAG, "moving the call's audio to the Mac", cause)
             error = "the phone can't hand over the call's audio: ${cause.message ?: cause}"
             wantMac = false
-            audio.mode = AudioManager.MODE_NORMAL
+            if (redirected) {
+                redirected = false
+                audio.mode = AudioManager.MODE_NORMAL
+            }
         }
         sendState()
     }
 
     private fun stopAudio() {
-        val p = pipe ?: return
+        val p = pipe
         pipe = null
-        p.stop()
-        // Hands the mode back to Telecom's request (MODE_IN_CALL).
-        audio.mode = AudioManager.MODE_NORMAL
-        Log.i(TAG, "the call's audio is on the phone")
+        p?.stop()
+        if (redirected) {
+            redirected = false
+            // Hands the mode back to Telecom's request (MODE_IN_CALL).
+            audio.mode = AudioManager.MODE_NORMAL
+        }
+        if (p != null) Log.i(TAG, "the call's audio is on the phone")
     }
 
     /** Telecom set the mode over ours: ask again while the call is on the Mac. */

@@ -67,6 +67,7 @@ final class PhoneCalls: ObservableObject {
     private let keyFile: String?
     private let queue = DispatchQueue(label: "prism.calls")
     private var listener: NWListener?
+    private var listenerRetryTask: Task<Void, Never>?
     private var bluetooth: CallBluetooth?
     /// Whether the hotspot's request or release advertises (Hotspot.swift):
     /// the call's advertisement steps aside meanwhile (CallBluetooth).
@@ -111,6 +112,14 @@ final class PhoneCalls: ObservableObject {
         bluetooth.onChannel = { [weak self] transport in self?.accept(transport) }
         bluetooth.start()
         self.bluetooth = bluetooth
+        startListener()
+    }
+
+    private func startListener() {
+        listenerRetryTask?.cancel()
+        listenerRetryTask = nil
+        listener?.cancel()
+        listener = nil
         do {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
@@ -122,27 +131,45 @@ final class PhoneCalls: ObservableObject {
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in self?.accept(TCPTransport(connection)) }
             }
-            listener.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor in self?.listenerChanged(state) }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                Task { @MainActor in
+                    guard let self, let listener, self.listener === listener else { return }
+                    self.listenerChanged(state)
+                }
             }
             listener.start(queue: queue)
             self.listener = listener
         } catch {
             problem = "Can't listen on port \(Self.port): \(error.localizedDescription)"
             log("calls: \(problem!)")
+            scheduleListenerRetry()
         }
     }
 
     private func listenerChanged(_ state: NWListener.State) {
         switch state {
         case .ready:
+            listenerRetryTask?.cancel()
+            listenerRetryTask = nil
             problem = nil
             log("calls: listening on port \(Self.port)")
         case .failed(let error):
             problem = "Not listening for the phone: \(error.localizedDescription)"
             log("calls: \(problem!)")
+            listener?.cancel()
+            listener = nil
+            scheduleListenerRetry()
         default:
             break
+        }
+    }
+
+    private func scheduleListenerRetry() {
+        listenerRetryTask?.cancel()
+        listenerRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, let self, self.listener == nil else { return }
+            self.startListener()
         }
     }
 
