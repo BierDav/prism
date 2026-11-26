@@ -42,9 +42,18 @@ struct AlertsView: View {
         .onAppear {
             navigation?.dismissSubstate = {
                 guard expanded != nil else { return false }
-                withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { expanded = nil }
+                toggleAlert(nil)
                 return true
             }
+        }
+    }
+
+    private func toggleAlert(_ id: Int64?) {
+        let next = expanded == id ? nil : id
+        if let navigation {
+            navigation.performInlineResize { expanded = next }
+        } else {
+            withAnimation(.snappy(duration: 0.24, extraBounce: 0)) { expanded = next }
         }
     }
 
@@ -86,11 +95,7 @@ struct AlertsView: View {
                     ForEach(group.alerts) { alert in
                         AlertRow(
                             store: store, alert: alert, expanded: expanded == alert.id,
-                            toggle: {
-                                withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
-                                    expanded = expanded == alert.id ? nil : alert.id
-                                }
-                            })
+                            toggle: { toggleAlert(alert.id) })
                     }
                 }
                 if !store.tasks.isEmpty {

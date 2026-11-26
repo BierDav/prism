@@ -22,7 +22,7 @@ struct MachinesView: View {
             .onAppear {
                 navigation?.dismissSubstate = {
                     guard expanded != nil else { return false }
-                    withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { expanded = nil }
+                    toggleHost(nil)
                     return true
                 }
             }
@@ -102,15 +102,22 @@ struct MachinesView: View {
                     .padding(.bottom, 3)
                     ForEach(list) { host in
                         HostRow(host: host, now: now, expanded: expanded == host.name) {
-                            withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
-                                expanded = expanded == host.name ? nil : host.name
-                            }
+                            toggleHost(host.name)
                         }
                     }
                 }
             }
             .padding(.bottom, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func toggleHost(_ name: String?) {
+        let next = expanded == name ? nil : name
+        if let navigation {
+            navigation.performInlineResize { expanded = next }
+        } else {
+            withAnimation(.snappy(duration: 0.24, extraBounce: 0)) { expanded = next }
         }
     }
 
@@ -177,7 +184,7 @@ private struct HostRow: View {
                     .transition(.verticalReveal)
                 } else {
                     compactMeters
-                        .transition(.opacity)
+                        .transition(.verticalReveal)
                 }
             }
         }

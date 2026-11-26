@@ -248,9 +248,10 @@ struct PopoutView: View {
                     HotspotBanner(hotspot: hotspot, wifi: hotspot.wifi, showWifiProblem: tab != .wifi)
                 }
                 PopoutTabBar(selection: tabBinding, approver: approver, store: store, hotspot: hotspot, wifi: hotspot.wifi)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 12)
                     .padding(.bottom, 10)
                 Divider()
+                    .opacity(0.6)
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                 if abs(height - chromeHeight) > 0.5 { chromeHeight = height }
@@ -271,15 +272,22 @@ struct PopoutView: View {
         .fixedSize(horizontal: false, vertical: true)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
             let target = min(max(120, height), maxWindowHeight)
-            if animatedHeight == nil {
-                animatedHeight = target
+            if animatedHeight == nil || navigation.inlineResizeCount > 0 {
+                var transaction = Transaction()
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    animatedHeight = target
+                }
             } else if abs(target - (animatedHeight ?? 0)) > 0.5 {
                 withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
                     animatedHeight = target
                 }
             }
         }
-        .modifier(AnimatedPopoutHeight(height: animatedHeight))
+        .modifier(AnimatedPopoutHeight(
+            height: navigation.inlineResizeCount > 0 ? nil : animatedHeight,
+            maxHeight: maxWindowHeight
+        ))
         .background {
             PopoutWindowBridge(
                 onScreenHeight: { height in
@@ -385,16 +393,15 @@ struct PopoutView: View {
     }
 }
 
-/// Uniform 5-destination navigation bar: every section uses the same
-/// icon-over-label layout with equal flexible widths so counts and labels can
-/// never push the popout wider than its 400pt frame.
+/// Uniform 5-destination Liquid Glass navigation bar: every section uses the
+/// same icon-over-label layout inside a single floating Liquid Glass capsule
+/// with a concentric sliding selection pill.
 private struct PopoutTabBar: View {
     @Binding var selection: PopoutView.Tab
     @ObservedObject var approver: Approver
     @ObservedObject var store: PrismStore
     @ObservedObject var hotspot: Hotspot
     @ObservedObject var wifi: WiFiSwitch
-    @Environment(\.colorScheme) private var colorScheme
     @Namespace private var activePill
 
     var body: some View {
@@ -407,7 +414,7 @@ private struct PopoutTabBar: View {
                     accessibilityLabel: accessibilityLabel(for: item),
                     activePill: activePill
                 ) {
-                    withAnimation(.snappy(duration: 0.2)) {
+                    withAnimation(.snappy(duration: 0.24, extraBounce: 0)) {
                         selection = item
                     }
                 }
@@ -415,12 +422,10 @@ private struct PopoutTabBar: View {
         }
         .padding(3)
         .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), lineWidth: 0.5)
-                }
+            GlassEffectContainer {
+                Color.clear
+                    .glassEffect(.regular.interactive(), in: Capsule())
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -504,26 +509,29 @@ private struct PopoutTabItem: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 6)
             .padding(.bottom, 5)
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 4)
             .background {
                 if selected {
-                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                        .fill(colorScheme == .dark ? Color.white.opacity(0.14) : Color(nsColor: .controlBackgroundColor))
+                    Capsule()
+                        .fill(colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.08))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                            Capsule()
+                                .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.14 : 0.10))
+                        }
+                        .overlay {
+                            Capsule()
                                 .strokeBorder(
-                                    colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06),
+                                    colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.65),
                                     lineWidth: 0.5
                                 )
                         }
-                        .shadow(color: colorScheme == .dark ? .clear : Color.black.opacity(0.07), radius: 1.5, y: 0.5)
                         .matchedGeometryEffect(id: "activeTab", in: activePill)
                 } else if hovering {
-                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                        .fill(Color.primary.opacity(0.05))
+                    Capsule()
+                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05))
                 }
             }
-            .contentShape(RoundedRectangle(cornerRadius: 7.5, style: .continuous))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -534,12 +542,12 @@ private struct PopoutTabItem: View {
 
     private var iconStyle: AnyShapeStyle {
         if selected { return AnyShapeStyle(.tint) }
-        return AnyShapeStyle(hovering ? Color.primary.opacity(0.85) : Color.secondary)
+        return AnyShapeStyle(hovering ? Color.primary.opacity(0.9) : Color.secondary)
     }
 
     private var labelStyle: AnyShapeStyle {
         if selected { return AnyShapeStyle(.primary) }
-        return AnyShapeStyle(hovering ? Color.primary.opacity(0.85) : Color.secondary)
+        return AnyShapeStyle(hovering ? Color.primary.opacity(0.9) : Color.secondary)
     }
 
     @ViewBuilder
@@ -552,7 +560,7 @@ private struct PopoutTabItem: View {
                 .padding(.horizontal, 3.5)
                 .frame(minWidth: 14, minHeight: 14)
                 .background(Capsule().fill(tint))
-                .offset(x: 6, y: -3)
+                .offset(x: 5, y: -2)
                 .accessibilityHidden(true)
         case .dot(let tint):
             Circle()

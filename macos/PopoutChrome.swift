@@ -11,9 +11,25 @@ import SwiftUI
 final class PopoutNavigation: ObservableObject {
     private var backStack: [PopoutView.Tab] = []
     private var forwardStack: [PopoutView.Tab] = []
+    /// Non-zero while an in-tab disclosure (alert/machine expand or collapse)
+    /// is actively driving height via `RevealLayout`, so the window frame tracks
+    /// it directly on the exact same frame instead of starting a second animation.
+    @Published private(set) var inlineResizeCount = 0
     /// Registered by the active tab when an in-tab editor, inline field, or
     /// expanded row should be dismissed before popping tab history.
     var dismissSubstate: (() -> Bool)?
+
+    func performInlineResize(_ updates: () -> Void) {
+        inlineResizeCount += 1
+        withAnimation(.snappy(duration: 0.24, extraBounce: 0), completionCriteria: .removed) {
+            updates()
+        } completion: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.inlineResizeCount = max(0, self.inlineResizeCount - 1)
+            }
+        }
+    }
 
     func select(_ next: PopoutView.Tab, current: PopoutView.Tab, apply: (PopoutView.Tab) -> Void) {
         guard next != current else { return }
@@ -242,8 +258,11 @@ struct PopoutWindowBridge: NSViewRepresentable {
 
 /// Animates the popout's intrinsic height smoothly on every frame so AppKit's
 /// MenuBarExtra window grows and shrinks smoothly anchored to its top edge.
+/// When `height` is `nil` (during an in-tab `RevealLayout` expand/collapse),
+/// the window follows the disclosure layout directly on the exact same frame.
 struct AnimatedPopoutHeight: ViewModifier, Animatable {
     var height: CGFloat?
+    var maxHeight: CGFloat
 
     var animatableData: CGFloat {
         get { height ?? 0 }
@@ -253,6 +272,7 @@ struct AnimatedPopoutHeight: ViewModifier, Animatable {
     func body(content: Content) -> some View {
         content
             .frame(width: 400, height: height, alignment: .top)
+            .frame(maxHeight: maxHeight, alignment: .top)
             .clipped()
     }
 }
