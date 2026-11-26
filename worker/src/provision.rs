@@ -30,10 +30,112 @@ fn print(text: String) -> Result<(), Failure> {
 }
 
 /// Opens the worker's database at `data_dir`: from `PRISM_WORKER_INVITATION`
-/// on the first start if configured, otherwise opening or creating a database
+/// on the first start if configured; otherwise, on a fresh non-zero StatefulSet
+/// pod (`PRISM_WORKER_NODE` != `*-0`) with `PRISM_WORKER_PEER_DOMAIN` and
+/// `PRISM_EVENT_KEY`, automatically requests an online invitation from pod 0
+/// and registers its own contact back; otherwise opens or creates a database
 /// in `data_dir`.
 pub async fn open(data_dir: String, network: Network) -> Result<PrismClient, Failure> {
+    if auth::secret("PRISM_WORKER_INVITATION").is_none() && is_empty_dir(&data_dir) {
+        if let Some((bootstrap_url, node_name, token)) = auto_join_config() {
+            return auto_join(data_dir, network, &bootstrap_url, &node_name, &token).await;
+        }
+    }
     open_from(data_dir, network, auth::secret).await
+}
+
+fn is_empty_dir(path: &str) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+fn auto_join_config() -> Option<(String, String, String)> {
+    let node = std::env::var("PRISM_WORKER_NODE").ok()?;
+    let peer_domain = std::env::var("PRISM_WORKER_PEER_DOMAIN").ok()?;
+    let (prefix, ordinal) = node.rsplit_once('-')?;
+    if ordinal == "0" || peer_domain.is_empty() {
+        return None;
+    }
+    let key = auth::secret("PRISM_EVENT_KEY")?;
+    let token = auth::admin_token(key.as_bytes())?;
+    let bootstrap_url = format!("http://{prefix}-0.{peer_domain}:8080");
+    Some((bootstrap_url, node, token))
+}
+
+async fn auto_join(
+    data_dir: String,
+    network: Network,
+    bootstrap_url: &str,
+    node_name: &str,
+    token: &str,
+) -> Result<PrismClient, Failure> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let invite_url = format!("{bootstrap_url}/v1/rocky/invite");
+    let mut last_err = String::new();
+    let mut joined: Option<(String, String)> = None;
+    for attempt in 1..=30 {
+        match http
+            .post(&invite_url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "name": node_name }))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await?;
+                let invitation = body["invitation"]
+                    .as_str()
+                    .ok_or("missing invitation in /v1/rocky/invite response")?
+                    .to_string();
+                let contact = body["contact"]
+                    .as_str()
+                    .ok_or("missing contact in /v1/rocky/invite response")?
+                    .to_string();
+                joined = Some((invitation, contact));
+                break;
+            }
+            Ok(resp) => {
+                last_err = format!("HTTP {}", resp.status());
+            }
+            Err(err) => {
+                last_err = err.to_string();
+            }
+        }
+        eprintln!(
+            "prism-worker: waiting for {invite_url} (attempt {attempt}/30): {last_err}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let (invitation, bootstrap_contact) = joined.ok_or_else(|| {
+        format!("could not obtain Rocky invitation from {invite_url}: {last_err}")
+    })?;
+    let (client, added) = PrismClient::open_invited_with_peers(
+        data_dir,
+        invitation,
+        Some(network),
+        vec![bootstrap_contact],
+    )
+    .await?;
+    let my_contact = client.contact().await?;
+    let peers_url = format!("{bootstrap_url}/v1/rocky/peers");
+    if let Err(err) = http
+        .post(&peers_url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "peers": [my_contact] }))
+        .send()
+        .await
+    {
+        eprintln!("prism-worker: could not register contact with {peers_url}: {err}");
+    }
+    eprintln!(
+        "prism-worker: auto-joined {bootstrap_url} as node {}, {added} peer(s)",
+        client.node().await?
+    );
+    Ok(client)
 }
 
 async fn open_from(

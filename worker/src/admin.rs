@@ -117,6 +117,110 @@ pub async fn post_pair(State(state): State<AppState>, headers: HeaderMap, body: 
     }
 }
 
+/// `GET /v1/rocky/contact`: returns this worker's Rocky node ID and contact string.
+pub async fn get_rocky_contact(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let node = match state.client.node().await {
+        Ok(node) => node,
+        Err(err) => return unavailable("rocky node", err),
+    };
+    let contact = match state.client.contact().await {
+        Ok(contact) => contact,
+        Err(err) => return unavailable("rocky contact", err),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({ "node": node, "contact": contact })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct InviteBody {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `POST /v1/rocky/invite`: creates an online Rocky invitation and returns it
+/// along with this worker's contact string.
+pub async fn post_rocky_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    if body.len() > MAX_ADMIN_BODY {
+        return error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The request body is too large.",
+            "invalid",
+        );
+    }
+    let req: InviteBody = if body.is_empty() {
+        InviteBody::default()
+    } else {
+        let Ok(parsed) = serde_json::from_slice(&body) else {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "The request body is not valid JSON.",
+                "invalid",
+            );
+        };
+        parsed
+    };
+    let invitation = match state.client.invite(req.name.as_deref()).await {
+        Ok(inv) => inv,
+        Err(err) => return unavailable("rocky invite", err),
+    };
+    let contact = match state.client.contact().await {
+        Ok(contact) => contact,
+        Err(err) => return unavailable("rocky contact", err),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({ "invitation": invitation, "contact": contact })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct PeersBody {
+    peers: Vec<String>,
+}
+
+/// `POST /v1/rocky/peers`: adds Rocky peer contact strings to this worker.
+pub async fn post_rocky_peers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    if body.len() > MAX_ADMIN_BODY {
+        return error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The request body is too large.",
+            "invalid",
+        );
+    }
+    let Ok(req) = serde_json::from_slice::<PeersBody>(&body) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The request body is not valid JSON.",
+            "invalid",
+        );
+    };
+    match state.client.add_peers(req.peers).await {
+        Ok(added) => (StatusCode::OK, Json(json!({ "added": added }))).into_response(),
+        Err(err) => unavailable("rocky add_peers", err),
+    }
+}
+
 /// `GET /v1/machines`: how the worker reaches each machine.
 pub async fn get_machines(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {

@@ -175,6 +175,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/t3/pair", post(crate::admin::post_pair))
         .route("/v1/machines", get(crate::admin::get_machines))
+        .route("/v1/rocky/contact", get(crate::admin::get_rocky_contact))
+        .route("/v1/rocky/invite", post(crate::admin::post_rocky_invite))
+        .route("/v1/rocky/peers", post(crate::admin::post_rocky_peers))
         .route(
             "/v1/placement/account-limits/{account}",
             put(crate::admin::put_account_limit).delete(crate::admin::delete_account_limit),

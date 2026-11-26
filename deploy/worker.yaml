@@ -185,8 +185,8 @@ spec:
             # The AI gateway's client key, for magic picks (text_generation).
             - name: PRISM_TEXT_GENERATION_KEY_FILE
               value: /secrets/text-generation/api-key
-            # selfhosted-platform's manifests/secrets/prism-worker.yaml: every
-            # worker's in-cluster contact.
+            # selfhosted-platform's manifests/secrets/prism-worker.yaml: optional
+            # extra peer contacts (workers auto-join prism-worker-0 on first boot).
             - name: PRISM_WORKER_PEERS_FILE
               value: /secrets/rocky/PEERS
           ports:
