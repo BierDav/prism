@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/prism.svg" width="128" alt="Prism logo"></p>
+<p align="center"><img src="docs/prism-logo.svg" width="128" alt="Prism logo"></p>
 
 # Prism
 

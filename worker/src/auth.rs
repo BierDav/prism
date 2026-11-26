@@ -5,9 +5,6 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// What a machine token's HMAC covers before the machine's name.
 const MACHINE_PREFIX: &[u8] = b"prism-machine:";
-/// The prefix of tokens minted before the rename. They are accepted, with a
-/// warning, only until fleet has re-minted every host's token.
-const RETIRED_MACHINE_PREFIX: &[u8] = b"klaxon-machine:";
 
 pub fn is_valid_machine_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -62,23 +59,11 @@ pub fn verify_machine_token(key: &[u8], token: &str) -> Option<String> {
         return None;
     }
     let sig_bytes = hex::decode(sig_hex).ok()?;
-    let signed_with = |prefix: &[u8]| {
-        HmacSha256::new_from_slice(key).ok().is_some_and(|mut mac| {
-            mac.update(prefix);
-            mac.update(machine.as_bytes());
-            mac.verify_slice(&sig_bytes).is_ok()
-        })
-    };
-    if signed_with(MACHINE_PREFIX) {
-        return Some(machine.to_string());
-    }
-    if signed_with(RETIRED_MACHINE_PREFIX) {
-        eprintln!(
-            "prism-worker: {machine} reported with a token of the retired prefix; re-mint it (prism token {machine})"
-        );
-        return Some(machine.to_string());
-    }
-    None
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(MACHINE_PREFIX);
+    mac.update(machine.as_bytes());
+    mac.verify_slice(&sig_bytes).ok()?;
+    Some(machine.to_string())
 }
 
 /// The admin token's prefix. It has no dot, so it is never a machine token.
@@ -131,9 +116,6 @@ mod tests {
     /// The same vector is in `cli/src/token.rs`: both sides must agree.
     const MACHINE_TOKEN: &str =
         "david-mb.09541051eb3665a385687eb787f165713a2adf8c88e9e75ff6e795e8b8faa4fc";
-    /// The same machine's token under the retired prefix.
-    const RETIRED_TOKEN: &str =
-        "david-mb.d6ed43973d8463ff02792f533d7462036fd62c2e8978a1eb5f6d1201ffff49f1";
 
     fn env(vars: &[(&str, String)]) -> impl Fn(&str) -> Option<String> + use<> {
         let vars: BTreeMap<String, String> = vars
@@ -159,10 +141,6 @@ mod tests {
         assert_eq!(key, KEY);
         assert_eq!(
             verify_machine_token(key.as_bytes(), MACHINE_TOKEN).as_deref(),
-            Some("david-mb")
-        );
-        assert_eq!(
-            verify_machine_token(key.as_bytes(), RETIRED_TOKEN).as_deref(),
             Some("david-mb")
         );
         assert_eq!(
