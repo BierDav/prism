@@ -174,6 +174,12 @@ pub async fn post_rocky_invite(
     };
     let invitation = match state.client.invite(req.name.as_deref()).await {
         Ok(inv) => inv,
+        Err(err) if err.to_string().contains("only an admin does this") => {
+            if let Some(proxied) = proxy_invite_to_bootstrap(&state, &req).await {
+                return proxied;
+            }
+            return unavailable("rocky invite", err);
+        }
         Err(err) => return unavailable("rocky invite", err),
     };
     let contact = match state.client.contact().await {
@@ -185,6 +191,36 @@ pub async fn post_rocky_invite(
         Json(json!({ "invitation": invitation, "contact": contact })),
     )
         .into_response()
+}
+
+async fn proxy_invite_to_bootstrap(state: &AppState, req: &InviteBody) -> Option<Response> {
+    let node = std::env::var("PRISM_WORKER_NODE").ok()?;
+    let peer_domain = std::env::var("PRISM_WORKER_PEER_DOMAIN").ok()?;
+    let (prefix, ordinal) = node.rsplit_once('-')?;
+    if ordinal == "0" || peer_domain.is_empty() {
+        return None;
+    }
+    let key = state.event_key.as_deref()?;
+    let token = crate::auth::admin_token(key)?;
+    let url = format!("http://{prefix}-0.{peer_domain}:8080/v1/rocky/invite");
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let resp = match http
+        .post(&url)
+        .bearer_auth(token)
+        .json(&json!({ "name": req.name }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return Some(unavailable("rocky invite proxy", err)),
+    };
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    let body = resp.bytes().await.unwrap_or_default();
+    Some((status, [(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 #[derive(Deserialize)]

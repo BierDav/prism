@@ -17,6 +17,7 @@ use std::sync::Arc;
 const CONTACT_PREFIX: &str = "rocky://peer/";
 const IDENTITY_KEY_FILE: &str = "prism-identity.key";
 const ROOT_KEY_FILE: &str = "prism-root.key";
+const INVITATION_HASH_FILE: &str = "prism-invitation.sha256";
 
 /// A device name: a DNS label, as the workers' pod names and fleet's hosts are.
 pub fn is_valid_device_name(name: &str) -> bool {
@@ -65,6 +66,36 @@ pub(crate) fn load_identity(directory: &Path) -> Result<Option<Arc<IdentityKey>>
 /// Persists `key`'s 24-word phrase inside `directory` (for the database creator).
 pub(crate) fn save_root(directory: &Path, key: &RootKey) -> Result<(), PrismError> {
     write_secret_file(&directory.join(ROOT_KEY_FILE), &key.phrase())
+}
+
+/// Persists the SHA-256 hex digest of the invitation used to join `directory`,
+/// so providing a new invitation cleanly replaces an old replica.
+pub(crate) fn save_invitation_hash(directory: &Path, hash: &str) -> Result<(), PrismError> {
+    write_secret_file(&directory.join(INVITATION_HASH_FILE), hash)
+}
+
+/// Loads the persisted invitation digest from `directory`, if present.
+pub(crate) fn load_invitation_hash(directory: &Path) -> Result<Option<String>, PrismError> {
+    Ok(read_secret_file(&directory.join(INVITATION_HASH_FILE))?.map(|s| s.trim().to_string()))
+}
+
+/// Removes all entries inside `directory` without deleting `directory` itself.
+pub(crate) fn clear_dir(directory: &Path) -> Result<(), PrismError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(storage_err(err)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(storage_err)?;
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(storage_err)?;
+        } else {
+            std::fs::remove_file(&path).map_err(storage_err)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_secret_file(path: &Path, content: &str) -> Result<(), PrismError> {

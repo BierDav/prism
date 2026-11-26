@@ -1,4 +1,7 @@
-use crate::enroll::{contact_node, load_identity, save_identity, save_root};
+use crate::enroll::{
+    clear_dir, contact_node, load_identity, load_invitation_hash, save_identity,
+    save_invitation_hash, save_root,
+};
 use crate::rank::{
     PLACEMENT_BURN_WINDOW_SECS, PROFILE_ENTRY_INSTANCE, compute_burn_rate,
     expand_profile_references, guess_driver, is_profile_entry, live_used, model_key,
@@ -131,6 +134,24 @@ impl PrismClient {
     ) -> Result<Self, PrismError> {
         let dir_path = Path::new(directory);
         let schema = prism_schema()?;
+        let mut is_empty = dir_is_empty(directory);
+        // If re-enrolling with a new invitation (or upgrading from an older
+        // Rocky storage format that has no invitation hash marker), validate
+        // the new invitation first and then clear the stale replica directory.
+        let invitation_hash = match first {
+            First::Join(invitation) => {
+                let hash = crate::sha256_hex(invitation);
+                if !is_empty && load_invitation_hash(dir_path)?.as_deref() != Some(hash.as_str()) {
+                    let _: InvitationCode = invitation.parse().map_err(|e| {
+                        PrismError::InvalidInput(format!("invalid invitation code: {e}"))
+                    })?;
+                    clear_dir(dir_path)?;
+                    is_empty = true;
+                }
+                Some(hash)
+            }
+            First::Create => None,
+        };
         let mut config = Configuration::new(directory, &schema).map_err(storage_err)?;
         if let Some(net) = network {
             config = config.network(net);
@@ -138,7 +159,6 @@ impl PrismClient {
         if let Some(identity) = load_identity(dir_path)? {
             config = config.identity(identity);
         }
-        let is_empty = dir_is_empty(directory);
         let db = match (is_empty, first) {
             (false, First::Join(invitation)) => match config.open().await {
                 Ok(db) => db,
@@ -149,6 +169,9 @@ impl PrismClient {
                     let opened = config.join(&code).await.map_err(storage_err)?;
                     if let Some(identity) = &opened.identity {
                         save_identity(dir_path, identity)?;
+                    }
+                    if let Some(hash) = &invitation_hash {
+                        save_invitation_hash(dir_path, hash)?;
                     }
                     opened.database
                 }
@@ -168,6 +191,9 @@ impl PrismClient {
                 let opened = config.join(&code).await.map_err(storage_err)?;
                 if let Some(identity) = &opened.identity {
                     save_identity(dir_path, identity)?;
+                }
+                if let Some(hash) = &invitation_hash {
+                    save_invitation_hash(dir_path, hash)?;
                 }
                 opened.database
             }
