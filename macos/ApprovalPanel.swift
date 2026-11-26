@@ -121,6 +121,7 @@ private struct RequestView: View {
                             Label(visible(option.label), systemImage: approval.decision == option.decision ? "largecircle.fill.circle" : "circle")
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(approval.decision == option.decision ? .isSelected : [])
                         .disabled(request.phase == .signing)
                         if approval.decision == option.decision && !option.warning.isEmpty {
                             Text(visibleLines(option.warning)).font(.callout).foregroundStyle(.orange)
@@ -445,15 +446,48 @@ struct PillShape: ViewModifier {
     var visible = true
     /// The menu's smaller size.
     var compact = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     func body(content: Content) -> some View {
+        let activeHover = visible && isEnabled && hovering
         content
             .font(compact ? .callout.weight(.medium) : .body.weight(.medium))
             .padding(.horizontal, width == nil && visible ? (compact ? 10 : 16) : 0)
             .frame(width: width, height: compact ? 24 : 30)
             .background(Capsule().fill(.quaternary.opacity(visible ? 1 : 0)))
-            .overlay(Capsule().strokeBorder(.separator.opacity(visible ? 1 : 0), lineWidth: 1))
+            .background(Capsule().fill(Color.primary.opacity(activeHover ? 0.07 : 0)))
+            .overlay(
+                Capsule().strokeBorder(
+                    activeHover ? AnyShapeStyle(Color.primary.opacity(0.22)) : AnyShapeStyle(.separator.opacity(visible ? 1 : 0)),
+                    lineWidth: 1
+                )
+            )
             .contentShape(Capsule())
+            .onHover { hovering = $0 }
+    }
+}
+
+/// Compact 20pt capsule chrome with subtle pointer hover feedback for chips and small menu pills.
+struct CapsuleChipShape: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        let activeHover = isEnabled && hovering
+        content
+            .padding(.horizontal, 8)
+            .frame(height: 20)
+            .background(Capsule().fill(.quaternary))
+            .background(Capsule().fill(Color.primary.opacity(activeHover ? 0.07 : 0)))
+            .overlay(
+                Capsule().strokeBorder(
+                    activeHover ? AnyShapeStyle(Color.primary.opacity(0.22)) : AnyShapeStyle(.separator),
+                    lineWidth: 1
+                )
+            )
+            .contentShape(Capsule())
+            .onHover { hovering = $0 }
     }
 }
 

@@ -18,6 +18,7 @@ struct WiFiView: View {
     @State private var known: [String] = []
     @State private var passwordFor: String?
     @State private var password = ""
+    @State private var passwordError: String?
     @State private var savedPasswords: Set<String> = []
 
     private var hotspotConfigured: Bool { hotspot.keyFile != nil }
@@ -27,26 +28,29 @@ struct WiFiView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            currentRow
-            if let problem = wifi.problem {
-                Label(problem, systemImage: "location.slash")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                currentRow
+                if let problem = wifi.problem {
+                    Label(problem, systemImage: "location.slash")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !hotspotConfigured {
+                    Text("The phone's hotspot isn't set up for this Mac (no hotspot key), so Prism doesn't switch networks; the lists are kept for when it is.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            if !hotspotConfigured {
-                Text("The phone's hotspot isn't set up for this Mac (no hotspot key), so Prism doesn't switch networks; the lists are kept for when it is.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             Divider()
             reliableSection
             Divider()
             hotspotSection
         }
-        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             wifi.refreshCurrent()
@@ -105,7 +109,7 @@ struct WiFiView: View {
     // MARK: - Reliable networks
 
     private var reliableSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 SectionLabel("Reliable networks")
                     .help("The Mac leaves a hotspot for one of these when it is in range at -70 dBm or better.")
@@ -123,16 +127,26 @@ struct WiFiView: View {
                     add: { networks.addReliable($0) }
                 )
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
             if networks.list.isEmpty {
                 Text("None yet. Add the networks that have working internet.")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(networks.list) { network in
-                            reliableRow(network)
+                            ReliableRow(
+                                network: network,
+                                detail: detail(network),
+                                rssi: wifi.nearby[network.ssid],
+                                makeHotspot: { networks.addHotspot(network.ssid) },
+                                remove: { networks.removeReliable(network.ssid) }
+                            )
                         }
                     }
                 }
@@ -158,40 +172,16 @@ struct WiFiView: View {
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Cancel adding network")
                 }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
             }
             Toggle("Add networks with working internet automatically", isOn: $networks.learns)
                 .font(.caption)
                 .toggleStyle(.checkbox)
                 .help("A network on which Prism saw working internet joins this list, unless you removed it before.")
-        }
-    }
-
-    private func reliableRow(_ network: WiFiNetworks.Reliable) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wifi")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(network.ssid).font(.callout).lineLimit(1).truncationMode(.middle)
-                Text(detail(network)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            if let rssi = wifi.nearby[network.ssid] {
-                Text("\(rssi) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            Button("Remove \(network.ssid)", systemImage: "minus.circle") { networks.removeReliable(network.ssid) }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Remove \(network.ssid)")
-                .help("Remove; Prism won't add it again on its own")
-        }
-        .padding(.vertical, 4)
-        .contextMenu {
-            Button("This is the phone's hotspot") { networks.addHotspot(network.ssid) }
-            Divider()
-            Button("Remove", role: .destructive) { networks.removeReliable(network.ssid) }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 12)
         }
     }
 
@@ -216,7 +206,7 @@ struct WiFiView: View {
     // MARK: - The phone's hotspot
 
     private var hotspotSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 SectionLabel("The phone's hotspot")
                     .help("Prism joins one of these itself after asking the phone, and never treats them as reliable networks.")
@@ -234,15 +224,53 @@ struct WiFiView: View {
                     add: { networks.addHotspot($0) }
                 )
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
             if networks.hotspots.isEmpty {
                 Text("Not known yet. Add its name, or join it once: Prism recognises an Android hotspot.")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
             }
             ForEach(networks.hotspots, id: \.self) { ssid in
-                hotspotRow(ssid)
+                HotspotRow(
+                    ssid: ssid,
+                    hasSavedPassword: savedPasswords.contains(ssid),
+                    rssi: wifi.nearby[ssid],
+                    isEditingPassword: passwordFor == ssid,
+                    password: $password,
+                    passwordError: passwordFor == ssid ? passwordError : nil,
+                    togglePassword: {
+                        password = ""
+                        passwordError = nil
+                        passwordFor = passwordFor == ssid ? nil : ssid
+                    },
+                    savePassword: { savePassword(ssid) },
+                    forgetPassword: {
+                        HotspotPassword.set(nil, for: ssid)
+                        savedPasswords.remove(ssid)
+                        password = ""
+                        passwordError = nil
+                        passwordFor = nil
+                    },
+                    cancelPassword: {
+                        password = ""
+                        passwordError = nil
+                        passwordFor = nil
+                    },
+                    remove: {
+                        networks.removeHotspot(ssid)
+                        savedPasswords.remove(ssid)
+                        if passwordFor == ssid {
+                            password = ""
+                            passwordError = nil
+                            passwordFor = nil
+                        }
+                    }
+                )
             }
             if addingHotspot {
                 HStack(spacing: 6) {
@@ -262,71 +290,26 @@ struct WiFiView: View {
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Cancel adding hotspot")
                 }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
             }
         }
-    }
-
-    private func hotspotRow(_ ssid: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: "personalhotspot")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(ssid).font(.callout).lineLimit(1).truncationMode(.middle)
-                    Text(savedPasswords.contains(ssid) ? "Password saved in Prism" : "Joined with the password macOS knows")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 4)
-                if let rssi = wifi.nearby[ssid] {
-                    Text("\(rssi) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                Button("Password for \(ssid)", systemImage: "key") {
-                    password = ""
-                    passwordFor = passwordFor == ssid ? nil : ssid
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Password for \(ssid)")
-                .help("Save the hotspot's password in Prism, for when macOS can't join it on its own")
-                Button("Remove \(ssid)", systemImage: "minus.circle") {
-                    networks.removeHotspot(ssid)
-                    savedPasswords.remove(ssid)
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Remove \(ssid)")
-                .help("Remove")
-            }
-            if passwordFor == ssid {
-                HStack(spacing: 6) {
-                    SecureField("Password", text: $password)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { savePassword(ssid) }
-                    Button("Save") { savePassword(ssid) }
-                        .disabled(password.isEmpty)
-                    if savedPasswords.contains(ssid) {
-                        Button("Forget") {
-                            HotspotPassword.set(nil, for: ssid)
-                            savedPasswords.remove(ssid)
-                            passwordFor = nil
-                        }
-                    }
-                }
-                .padding(.leading, 24)
-            }
+        .padding(.bottom, 12)
+        .onChange(of: password) { _, value in
+            if !value.isEmpty { passwordError = nil }
         }
-        .padding(.vertical, 2)
     }
 
     private func savePassword(_ ssid: String) {
         guard !password.isEmpty else { return }
-        if HotspotPassword.set(password, for: ssid) { savedPasswords.insert(ssid) }
-        password = ""
-        passwordFor = nil
+        if HotspotPassword.set(password, for: ssid) {
+            savedPasswords.insert(ssid)
+            password = ""
+            passwordError = nil
+            passwordFor = nil
+        } else {
+            passwordError = "Could not save password in Keychain."
+        }
     }
 
     private func addTypedHotspot() {
@@ -379,11 +362,7 @@ struct WiFiView: View {
                     .font(.system(size: 7, weight: .bold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 20)
-            .background(Capsule().fill(.quaternary))
-            .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
-            .contentShape(Capsule())
+            .modifier(CapsuleChipShape())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -391,5 +370,125 @@ struct WiFiView: View {
         .fixedSize()
         .accessibilityLabel(accessibilityLabel)
         .help("Add a current, nearby, known, or typed network")
+    }
+}
+
+private struct ReliableRow: View {
+    let network: WiFiNetworks.Reliable
+    let detail: String
+    let rssi: Int?
+    let makeHotspot: () -> Void
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(network.ssid).font(.callout).lineLimit(1).truncationMode(.middle)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if let rssi {
+                Text("\(rssi) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Button("Remove \(network.ssid)", systemImage: "minus.circle", action: remove)
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Remove \(network.ssid)")
+                .help("Remove; Prism won't add it again on its own")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(hovering ? Color.primary.opacity(0.05) : .clear)
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("This is the phone's hotspot", action: makeHotspot)
+            Divider()
+            Button("Remove", role: .destructive, action: remove)
+        }
+    }
+}
+
+private struct HotspotRow: View {
+    let ssid: String
+    let hasSavedPassword: Bool
+    let rssi: Int?
+    let isEditingPassword: Bool
+    @Binding var password: String
+    let passwordError: String?
+    let togglePassword: () -> Void
+    let savePassword: () -> Void
+    let forgetPassword: () -> Void
+    let cancelPassword: () -> Void
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "personalhotspot")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(ssid).font(.callout).lineLimit(1).truncationMode(.middle)
+                    Text(hasSavedPassword ? "Password saved in Prism" : "Joined with the password macOS knows")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                if let rssi {
+                    Text("\(rssi) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Button("Password for \(ssid)", systemImage: "key", action: togglePassword)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Password for \(ssid)")
+                    .help("Save the hotspot's password in Prism, for when macOS can't join it on its own")
+                Button("Remove \(ssid)", systemImage: "minus.circle", action: remove)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(ssid)")
+                    .help("Remove")
+            }
+            if isEditingPassword {
+                HStack(spacing: 6) {
+                    SecureField("Password", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(savePassword)
+                    Button("Save", action: savePassword)
+                        .disabled(password.isEmpty)
+                    if hasSavedPassword {
+                        Button("Forget", action: forgetPassword)
+                    }
+                    Button(action: cancelPassword) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Cancel password entry")
+                    .help("Cancel")
+                }
+                .padding(.leading, 24)
+                if let passwordError {
+                    Label(passwordError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 24)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(hovering ? Color.primary.opacity(0.05) : .clear)
+        .onHover { hovering = $0 }
     }
 }

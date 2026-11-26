@@ -157,6 +157,7 @@ struct PopoutView: View {
     @ObservedObject var store: PrismStore
     @ObservedObject var hotspot: Hotspot
     @AppStorage("popoutTab") private var tab = Tab.alerts
+    @State private var refreshTrigger = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -230,13 +231,10 @@ struct PopoutView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            ServerStatus(store: store)
+            ServerStatus(store: store, refreshTrigger: refreshTrigger, onRefresh: performRefresh)
             Menu {
-                Button("Refresh") {
-                    store.refresh()
-                    store.checkServerHealth()
-                }
-                .disabled(!store.connected && store.connection != .connecting && !isFailed)
+                Button("Refresh", action: performRefresh)
+                    .disabled(!store.connected && store.connection != .connecting && !isFailed)
                 Button("Copy Public Key") {
                     if let key = approver.key?.publicKeyLine {
                         NSPasteboard.general.clearContents()
@@ -257,6 +255,12 @@ struct PopoutView: View {
             .accessibilityLabel("More options")
             .help("More options")
         }
+    }
+
+    private func performRefresh() {
+        refreshTrigger += 1
+        store.refresh()
+        store.checkServerHealth()
     }
 
     private var isFailed: Bool {
@@ -370,6 +374,9 @@ private struct HotspotBanner: View {
 /// The Prism server's connection as a dot, with a refresh button.
 private struct ServerStatus: View {
     @ObservedObject var store: PrismStore
+    let refreshTrigger: Int
+    let onRefresh: () -> Void
+    @State private var spinTurns: Double = 0
 
     var body: some View {
         HStack(spacing: 6) {
@@ -379,18 +386,19 @@ private struct ServerStatus: View {
                 .accessibilityElement()
                 .accessibilityLabel(text)
                 .help(text)
-            Button {
-                store.refresh()
-                store.checkServerHealth()
-            } label: {
+            Button(action: onRefresh) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12, weight: .medium))
+                    .rotationEffect(.degrees(spinTurns * 360))
             }
             .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: .command)
             .disabled(!store.connected && store.connection != .connecting && !isFailed)
             .accessibilityLabel("Refresh")
             .help("Refresh (⌘R)")
+            .onChange(of: refreshTrigger) { _, _ in
+                withAnimation(.easeInOut(duration: 0.45)) { spinTurns += 1 }
+            }
         }
     }
 

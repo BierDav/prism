@@ -75,9 +75,9 @@ struct ProfilesView: View {
                 detail: "fleet sets this Mac's Rocky provisioning in its Prism configuration."
             )
         case .connecting:
-            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Loading profiles…", detail: nil)
+            EmptyState(title: "Loading profiles…", detail: nil, loading: true)
         case .connected where store.profilesError == nil:
-            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Loading profiles…", detail: nil)
+            EmptyState(title: "Loading profiles…", detail: nil, loading: true)
         case .failed(let text):
             VStack(spacing: 10) {
                 EmptyState(symbol: "exclamationmark.icloud", title: "Profiles unavailable", detail: text, tint: .orange)
@@ -109,13 +109,19 @@ struct ProfilesView: View {
         }
     }
 
-    private func sectionHeader(_ title: String, count: Int) -> some View {
+    private func sectionHeader(_ title: String, count: Int, saving: Bool = false) -> some View {
         HStack(spacing: 6) {
             SectionLabel(title)
             if count > 0 {
                 Text("\(count)")
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 4)
+            if saving {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityLabel("Saving")
             }
         }
         .padding(.horizontal, 14)
@@ -126,7 +132,7 @@ struct ProfilesView: View {
     private func profileList(_ placement: Placement) -> some View {
         let profiles = placement.profiles
         return VStack(alignment: .leading, spacing: 0) {
-            sectionHeader("Profiles", count: profiles.count)
+            sectionHeader("Profiles", count: profiles.count, saving: store.savingProfiles)
             if profiles.isEmpty {
                 Text("No profiles yet.")
                     .font(.callout)
@@ -237,7 +243,7 @@ struct ProfilesView: View {
                         }
                     }
                 } label: {
-                    Label("Add Model", systemImage: "plus")
+                    Label(profiles.isEmpty ? "Add Model" : "Add Entry", systemImage: "plus")
                         .modifier(PillShape(width: nil, compact: true))
                 }
                 .menuStyle(.button)
@@ -262,7 +268,13 @@ struct ProfilesView: View {
                             }
                     }
                     Spacer()
+                    if store.savingProfiles {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel("Saving")
+                    }
                     Button("Cancel") { draft = nil }
+                        .keyboardShortcut(.cancelAction)
                     Button("Save") { save() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(draft?.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
@@ -458,7 +470,13 @@ struct ProfilesView: View {
                 }
                 HStack {
                     Spacer()
+                    if store.savingProfiles {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel("Saving")
+                    }
                     Button("Cancel") { limitDraft = nil }
+                        .keyboardShortcut(.cancelAction)
                     Button("Save") {
                         let until = draft.hasEnd
                             ? PlacementAccountLimit.companion.formatRfc3339(epoch: Int64(draft.end.timeIntervalSince1970)) : ""
@@ -562,16 +580,14 @@ private struct ProfileRow: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityHidden(true)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityHint("Edit profile \(title)")
             .help("Edit \(title)")
+            Divider()
+                .frame(height: 14)
             HStack(spacing: 4) {
                 Button("Move \(title) up", systemImage: "chevron.up", action: moveUp)
                     .labelStyle(.iconOnly)
@@ -589,6 +605,12 @@ private struct ProfileRow: View {
         .padding(.vertical, 7)
         .background(hovering ? Color.primary.opacity(0.05) : .clear)
         .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Edit \(title)", action: open)
+            Divider()
+            Button("Move Up", action: moveUp).disabled(!canMoveUp)
+            Button("Move Down", action: moveDown).disabled(!canMoveDown)
+        }
     }
 }
 

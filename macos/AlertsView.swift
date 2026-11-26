@@ -55,9 +55,9 @@ struct AlertsView: View {
             EmptyState(symbol: "antenna.radiowaves.left.and.right.slash", title: "Not connected to Prism",
                        detail: "fleet sets this Mac's Rocky provisioning and the workers in its Prism configuration (rocky).")
         case .failed(let text) where store.alerts.isEmpty:
-            EmptyState(symbol: "exclamationmark.icloud", title: "Prism's replica did not open", detail: text)
+            EmptyState(symbol: "exclamationmark.icloud", title: "Prism's replica did not open", detail: text, tint: .orange)
         case .connecting where store.alerts.isEmpty:
-            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Connecting…", detail: nil)
+            EmptyState(title: "Connecting…", detail: nil, loading: true)
         default:
             if store.alerts.isEmpty && store.tasks.isEmpty {
                 EmptyState(symbol: "checkmark.seal.fill", title: "All clear", detail: "No open alerts or machine events.", tint: .green)
@@ -107,16 +107,23 @@ struct AlertsView: View {
 }
 
 struct EmptyState: View {
-    let symbol: String
+    var symbol: String = ""
     let title: String
     let detail: String?
     var tint: Color = .secondary
+    var loading = false
 
     var body: some View {
         VStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.system(size: 24, weight: .medium))
-                .foregroundStyle(tint)
+            if loading {
+                ProgressView()
+                    .controlSize(.regular)
+                    .frame(height: 28)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(tint)
+            }
             Text(title).font(.callout.weight(.medium))
             if let detail {
                 Text(detail)
@@ -377,11 +384,7 @@ private struct ChoiceChip: View {
                 .lineLimit(1)
             Chevron()
         }
-        .padding(.horizontal, 8)
-        .frame(height: 20)
-        .background(Capsule().fill(.quaternary))
-        .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
-        .contentShape(Capsule())
+        .modifier(CapsuleChipShape())
     }
 }
 
@@ -399,6 +402,7 @@ struct DoField: View {
     let placeholder: String
     let enabled: Bool
     let send: () -> Void
+    @FocusState private var focused: Bool
 
     private var ready: Bool { enabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -410,6 +414,7 @@ struct DoField: View {
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.callout)
+                .focused($focused)
                 .onSubmit { if ready { send() } }
                 .disabled(!enabled)
             Button(action: send) {
@@ -426,7 +431,13 @@ struct DoField: View {
         .padding(.trailing, 4)
         .frame(height: 28)
         .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.7)))
-        .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
+        .overlay(
+            Capsule().strokeBorder(
+                focused ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.separator),
+                lineWidth: focused ? 1.5 : 1
+            )
+        )
+        .animation(.easeInOut(duration: 0.12), value: focused)
     }
 }
 
@@ -481,11 +492,7 @@ private struct AgentRow: View {
                     Text("Open in T3")
                 }
                 .font(.caption.weight(.medium))
-                .padding(.horizontal, 8)
-                .frame(height: 20)
-                .background(Capsule().fill(.quaternary))
-                .overlay(Capsule().strokeBorder(.separator, lineWidth: 1))
-                .contentShape(Capsule())
+                .modifier(CapsuleChipShape())
             }
             .buttonStyle(.plain)
             .disabled(agent.url == nil || T3Icon.app == nil)

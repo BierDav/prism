@@ -44,7 +44,7 @@ struct MachinesView: View {
         case .failed(let text) where store.hostMetrics == nil:
             EmptyState(symbol: "exclamationmark.icloud", title: "Prism's replica did not open", detail: text, tint: .orange)
         case .connecting where store.hostMetrics == nil:
-            EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Waiting for Prism's replica…", detail: nil)
+            EmptyState(title: "Waiting for Prism's replica…", detail: nil, loading: true)
         default:
             if let hosts = store.hostMetrics {
                 if hosts.isEmpty {
@@ -55,7 +55,7 @@ struct MachinesView: View {
             } else if let error = store.metricsError {
                 EmptyState(symbol: "exclamationmark.icloud", title: "No metrics", detail: error, tint: .orange)
             } else {
-                EmptyState(symbol: "arrow.triangle.2.circlepath", title: "Loading…", detail: nil)
+                EmptyState(title: "Loading…", detail: nil, loading: true)
             }
         }
     }
@@ -131,34 +131,44 @@ private struct HostRow: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: toggle) {
-            VStack(alignment: .leading, spacing: 6) {
-                header
-                if host.online {
-                    if expanded {
-                        Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
-                        Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
-                        Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
-                        facts
-                        if host.cpuHistory.contains(where: { $0 != nil }) {
-                            Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
-                        }
-                        details
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else {
-                        compactMeters
+        if host.online {
+            Button(action: toggle) {
+                rowContent
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(expanded ? "Collapse host metrics" : "Expand host metrics and filesystems")
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(expanded ? Color.primary.opacity(0.05) : hovering ? Color.primary.opacity(0.04) : .clear)
+            .onHover { hovering = $0 }
+        } else {
+            rowContent
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+        }
+    }
+
+    private var rowContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            header
+            if host.online {
+                if expanded {
+                    Meter(label: "CPU", share: host.cpuShare, detail: cpuDetail)
+                    Meter(label: "Memory", share: host.memory?.fraction, detail: host.memory.map(HostText.usage) ?? "")
+                    Meter(label: "Disk", share: host.disk?.usage.fraction, detail: host.disk.map { HostText.usage($0.usage) } ?? "")
+                    facts
+                    if host.cpuHistory.contains(where: { $0 != nil }) {
+                        Sparkline(title: "CPU, last 2 hours", points: host.cpuHistory, color: .accentColor)
                     }
+                    details
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                } else {
+                    compactMeters
                 }
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-        .accessibilityHint(expanded ? "Collapse host metrics" : "Expand host metrics and filesystems")
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(expanded ? Color.primary.opacity(0.05) : hovering ? Color.primary.opacity(0.04) : .clear)
-        .onHover { hovering = $0 }
     }
 
     private var header: some View {
