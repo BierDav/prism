@@ -762,49 +762,63 @@ impl PrismClient {
 
         if !moves_to_drop.is_empty() || !moves_to_continue.is_empty() || !moves_to_insert.is_empty()
         {
-            let machine_w = machine.clone();
-            self.db
-                .write(async move |tx| {
-                    let closed = moves_to_drop
-                        .into_iter()
-                        .map(|id| (id, "dropped"))
-                        .chain(moves_to_continue.into_iter().map(|id| (id, "continued")));
-                    for (id, state) in closed {
-                        let aid = tx.next_id("move_acks").await?;
-                        tx.execute(
-                            "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
-                            params![aid, id, machine_w.clone(), state, now_unix],
-                        )
-                        .await?;
-                    }
-                    for m in moves_to_insert {
-                        let from_json = serde_json::to_string(&m.from).map_err(storage_err)?;
-                        let to_json = serde_json::to_string(&m.to).map_err(storage_err)?;
-                        tx.execute(
-                            "DELETE FROM instructions WHERE instruction_id = ?",
-                            params![m.id.clone()],
-                        )
-                        .await?;
-                        let iid = tx.next_id("instructions").await?;
-                        tx.execute(
-                            "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, ?, ?, 'move', ?, ?, ?, ?, ?, NULL)",
-                            params![
-                                iid,
-                                m.id,
-                                m.machine,
-                                m.thread_id,
-                                from_json,
-                                to_json,
-                                m.reason,
-                                m.state,
-                                m.at,
-                            ],
-                        )
-                        .await?;
-                    }
-                    Ok::<_, PrismError>(())
-                })
-                .await?;
+            // Rocky limits a single write transaction to 256 SQL statements;
+            // chunk acks and move inserts so large hosts never hit the quota.
+            let closed: Vec<(String, &'static str)> = moves_to_drop
+                .into_iter()
+                .map(|id| (id, "dropped"))
+                .chain(moves_to_continue.into_iter().map(|id| (id, "continued")))
+                .collect();
+            for chunk in closed.chunks(100) {
+                let chunk = chunk.to_vec();
+                let machine_w = machine.clone();
+                self.db
+                    .write(async move |tx| {
+                        for (id, state) in chunk {
+                            let aid = tx.next_id("move_acks").await?;
+                            tx.execute(
+                                "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
+                                params![aid, id, machine_w.clone(), state, now_unix],
+                            )
+                            .await?;
+                        }
+                        Ok::<_, PrismError>(())
+                    })
+                    .await?;
+            }
+            for chunk in moves_to_insert.chunks(64) {
+                let chunk = chunk.to_vec();
+                self.db
+                    .write(async move |tx| {
+                        for m in chunk {
+                            let from_json = serde_json::to_string(&m.from).map_err(storage_err)?;
+                            let to_json = serde_json::to_string(&m.to).map_err(storage_err)?;
+                            tx.execute(
+                                "DELETE FROM instructions WHERE instruction_id = ?",
+                                params![m.id.clone()],
+                            )
+                            .await?;
+                            let iid = tx.next_id("instructions").await?;
+                            tx.execute(
+                                "INSERT INTO instructions (id, instruction_id, host, thread_id, kind, from_selection_json, selection_json, reason, state, created_at, done_at) VALUES (?, ?, ?, ?, 'move', ?, ?, ?, ?, ?, NULL)",
+                                params![
+                                    iid,
+                                    m.id,
+                                    m.machine,
+                                    m.thread_id,
+                                    from_json,
+                                    to_json,
+                                    m.reason,
+                                    m.state,
+                                    m.at,
+                                ],
+                            )
+                            .await?;
+                        }
+                        Ok::<_, PrismError>(())
+                    })
+                    .await?;
+            }
         }
 
         Ok(PlacementSyncResponse {
