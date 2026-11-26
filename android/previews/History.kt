@@ -72,6 +72,6 @@ private fun HistoryChatPreview() = Themed {
     HistoryChat(
         transcript = t, running = false, loading = false, error = null, configured = true, canSend = true,
         text = "Remind me at 7 to take the umbrella", onText = {}, onSend = {}, onAction = null,
-        onNew = {}, onDelete = {}, onBack = {}, now = { NOW_S * 1000 },
+        onNew = {}, onBack = {}, now = { NOW_S * 1000 },
     )
 }

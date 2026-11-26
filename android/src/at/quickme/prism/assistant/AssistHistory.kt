@@ -5,13 +5,41 @@
 // through the same harness (AssistantSession). New chat starts another;
 // Delete removes one everywhere. AssistHistory.open opens the list; the
 // overlay shows its own conversation full screen with HistoryChat, in its
-// window, and opens the list from there.
+// window, in Gemini's app look: a hamburger opens the chats in a drawer
+// (ChatsDrawer), a handle at the top drags it down into the overlay's card,
+// and Back (predictive) shrinks it into the card.
 
 package at.quickme.prism.assistant
 
 import at.quickme.prism.assistant.a2ui.SurfaceHost
 import at.quickme.prism.assistant.a2ui.rememberSurfaceHost
 import at.quickme.prism.assistant.core.UiAction
+import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -30,9 +58,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
@@ -43,7 +69,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.MoreVert
@@ -51,14 +76,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -145,27 +167,9 @@ private fun HistoryScreen(onClose: () -> Unit) {
     var text by remember { mutableStateOf("") }
 
     LaunchedEffect(reload) {
-        if (Sample.on(context)) {
-            items = emptyList()
-            return@LaunchedEffect
-        }
-        ConversationStore.flush(context)
-        val (kept, deleted) = ConversationStore.pending(context)
-        val stored = try {
-            PrismApi.call(context) { assistantConversations() }.also { error = null }
-        } catch (e: PrismError) {
-            error = e.message
-            emptyList()
-        }
-        val byId = LinkedHashMap<String, HistoryItem>()
-        stored.forEach { byId[it.id] = HistoryItem(it) }
-        for (s in kept) {
-            val known = byId[s.id]?.conversation
-            if (known == null || known.updatedAt <= s.updatedAt || s.problem.isNotEmpty()) {
-                byId[s.id] = HistoryItem(s.summary.copy(device = known?.device ?: device), waiting = true, problem = s.problem)
-            }
-        }
-        items = byId.values.filter { it.conversation.id !in deleted }.sortedByDescending { it.conversation.updatedAt }
+        val (loaded, problem) = loadHistory(context, device)
+        items = loaded
+        error = problem
     }
     // Synced or written here: the list follows; so it does when the outbox
     // sent a chat, or the replica refused one.
@@ -256,12 +260,108 @@ private fun HistoryScreen(onClose: () -> Unit) {
             onAction = { entry, action -> shown?.act(entry, action) },
             host = shown?.surfaces,
             onNew = { openConversation(null) },
-            onDelete = if (shown == null || shown.transcript.isEmpty) null else ({
-                delete(shown.conversationId)
-                leave()
-            }),
             onBack = ::leave,
         )
+    }
+}
+
+/**
+ * Every conversation, newest first: those in Rocky and those still waiting on
+ * the phone (marked so), without those deleted here; and why Rocky's list
+ * couldn't be read, if it couldn't.
+ */
+internal suspend fun loadHistory(context: Context, device: String): Pair<List<HistoryItem>, String?> {
+    if (Sample.on(context)) return emptyList<HistoryItem>() to null
+    ConversationStore.flush(context)
+    val (kept, deleted) = ConversationStore.pending(context)
+    var error: String? = null
+    val stored = try {
+        PrismApi.call(context) { assistantConversations() }
+    } catch (e: PrismError) {
+        error = e.message
+        emptyList()
+    }
+    val byId = LinkedHashMap<String, HistoryItem>()
+    stored.forEach { byId[it.id] = HistoryItem(it) }
+    for (s in kept) {
+        val known = byId[s.id]?.conversation
+        if (known == null || known.updatedAt <= s.updatedAt || s.problem.isNotEmpty()) {
+            byId[s.id] = HistoryItem(s.summary.copy(device = known?.device ?: device), waiting = true, problem = s.problem)
+        }
+    }
+    return byId.values.filter { it.conversation.id !in deleted }.sortedByDescending { it.conversation.updatedAt } to error
+}
+
+/**
+ * The chats in the full-screen chat's drawer, as Gemini's app has them: New
+ * chat at the top, then every conversation by day, newest first, [current]
+ * marked. Loaded when shown, and again when the conversations change.
+ */
+@Composable
+internal fun ChatsDrawer(current: String, onOpen: (String) -> Unit, onNew: () -> Unit, newEnabled: Boolean = true) {
+    val context = LocalContext.current
+    val device = remember { Settings.deviceName(context) }
+    var items by remember { mutableStateOf<List<HistoryItem>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(reload) {
+        val (loaded, problem) = loadHistory(context, device)
+        items = loaded
+        error = problem
+    }
+    LaunchedEffect(Unit) { PrismApi.changes(listOf("assistant_conversations")).collect { reload++ } }
+    LaunchedEffect(Unit) { ConversationStore.changes.drop(1).collect { reload++ } }
+    val now = System.currentTimeMillis() / 1000
+    ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 24.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            item(key = "title") {
+                Text(
+                    "Chats", style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 12.dp),
+                )
+            }
+            item(key = "new") {
+                NavigationDrawerItem(
+                    label = { Text("New chat") },
+                    icon = { Icon(Icons.Rounded.Add, null) },
+                    selected = false,
+                    onClick = { if (newEnabled) onNew() },
+                )
+            }
+            val list = items
+            when {
+                list == null -> item(key = "loading") {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { LoadingIndicator() }
+                }
+                list.isEmpty() -> item(key = "empty") {
+                    Text(
+                        error ?: "No chats yet.", style = MaterialTheme.typography.bodyMedium,
+                        color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+                else -> {
+                    if (error != null) item(key = "error") {
+                        Text(error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
+                    }
+                    for ((day, group) in list.groupBy { dayLabel(it.conversation.updatedAt, now) }) {
+                        item(key = "day:$day") { SectionHeader(day, Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)) }
+                        items(group, key = { it.conversation.id }) { item ->
+                            NavigationDrawerItem(
+                                label = {
+                                    Text(item.conversation.title.ifEmpty { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                },
+                                selected = item.conversation.id == current,
+                                onClick = { onOpen(item.conversation.id) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -379,9 +479,12 @@ private fun ConversationRow(item: HistoryItem, device: String, now: Long, onOpen
 
 /**
  * One conversation, full screen: its transcript and a composer that continues
- * it. The Chats list opens it, and so does the overlay (AssistActivity), whose
- * card grows into it: there Back returns to the card, [onChats] opens the list,
- * and [composer] is the overlay's own card.
+ * it, in Gemini's app look (a flat field, no glow). The Chats list opens it,
+ * and so does the overlay (AssistActivity), whose card grows into it: there
+ * a hamburger opens the chats ([chats], a drawer), and the handle at the top
+ * (dragged down) or Back ([onCollapse], predictive) take it back into the
+ * card; [composer] is the overlay's own card. Opened from the list, Back
+ * ([onBack]) returns to the list.
  */
 @Composable
 internal fun HistoryChat(
@@ -398,13 +501,15 @@ internal fun HistoryChat(
     /** What the owner did on a surface (entry, A2UI action): AssistantSession.act; null where the cards only show. */
     onAction: (suspend (String, UiAction) -> String?)?,
     onNew: () -> Unit,
-    /** Null for a chat with nothing in it yet. */
-    onDelete: (() -> Unit)?,
     onBack: () -> Unit,
     /** The clock timers count from; fixed in previews. */
     now: (() -> Long)? = null,
-    /** The Chats list, from a chat that isn't in it (the overlay's). */
-    onChats: (() -> Unit)? = null,
+    /** The drawer's chats ([close] closes the drawer); with them a hamburger in place of Back. */
+    chats: (@Composable (close: () -> Unit) -> Unit)? = null,
+    /** Back to the overlay's card: the handle at the top and (predictive) Back; null opened from the list. */
+    onCollapse: (() -> Unit)? = null,
+    /** Whether Back collapses the chat now (not while the overlay's + menu is open, which Back closes first). */
+    collapseOnBack: Boolean = true,
     /** The agent the overlay follows, shown live in the card of hand-off [handoff]. */
     agent: FollowedAgent? = null,
     handoff: String? = null,
@@ -416,102 +521,198 @@ internal fun HistoryChat(
 ) {
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
-    var confirm by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val entries = transcript.entries
     val surfaces = rememberSurfaceHost(entries, onAction, host)
     LaunchedEffect(entries.size, (entries.lastOrNull() as? Entry.Answer)?.text?.length, running) {
         if (entries.isNotEmpty()) list.animateScrollToItem((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
     }
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    // How far the chat has gone back towards the card: by predictive Back
+    // (0..1) or the handle dragged down (px).
+    val back = remember { Animatable(0f) }
+    var pulled by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val view = androidx.compose.ui.platform.LocalView.current
+    if (onCollapse != null) {
+        // The drawer handles Back itself (predictively) while it is open.
+        PredictiveBackHandler(enabled = collapseOnBack && drawer.isClosed && drawer.targetValue == DrawerValue.Closed) { progress ->
+            try {
+                progress.collect { back.snapTo(CollapseEasing.transform(it.progress)) }
+                onCollapse()
+            } catch (e: CancellationException) {
+                scope.launch { back.animateTo(0f, spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMedium)) }
+                throw e
+            }
+        }
+    }
     // The overlay's card lies over the chat at its bottom (as in the overlay),
     // and the list keeps clear of it.
     var cardHeight by remember { mutableIntStateOf(0) }
-    val cardSpace = with(androidx.compose.ui.platform.LocalDensity.current) { cardHeight.toDp() }
-    Box(modifier) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Text(
-                            at.quickme.prism.assistant.core.Conversations.title(transcript) ?: "New chat",
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, if (onChats != null) "Back" else "Chats") }
-                    },
-                    actions = {
-                        if (onChats != null) IconButton(onClick = onChats) { Icon(PrismIcons.Chat, "Chats") }
-                        IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
-                        if (onDelete != null) IconButton(onClick = { confirm = true }, enabled = !running) { Icon(Icons.Rounded.Delete, "Delete chat") }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
-                )
-            },
-            bottomBar = {
-                if (composer == null) Surface(color = colors.surface) {
-                    Column(Modifier.navigationBarsPadding().imePadding().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)) {
-                        if (!configured) {
-                            Text("The assistant isn't set up on this phone (assistant_api_key).", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
-                                value = text,
-                                onValueChange = onText,
-                                placeholder = { Text("Ask Prism") },
-                                enabled = configured && canSend,
-                                maxLines = 5,
-                                shape = RoundedCornerShape(28.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    unfocusedContainerColor = colors.surfaceContainerHigh,
-                                    focusedContainerColor = colors.surfaceContainerHigh,
-                                    unfocusedBorderColor = colors.surfaceContainerHigh,
+    val cardSpace = with(density) { cardHeight.toDp() }
+    val reach = with(density) { CollapseReach.toPx() }
+    val drag = rememberDraggableState { dy ->
+        val threshold = with(density) { CollapseDrag.toPx() }
+        val before = pulled
+        val next = (before + dy).coerceAtLeast(0f)
+        pulled = next
+        if (before < threshold && next >= threshold) {
+            view.performHapticFeedback(
+                if (android.os.Build.VERSION.SDK_INT >= 34) android.view.HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+                else android.view.HapticFeedbackConstants.CONTEXT_CLICK,
+            )
+        }
+    }
+    val content: @Composable () -> Unit = {
+        Box(Modifier.fillMaxSize()) {
+            Scaffold(
+                containerColor = colors.surface,
+                topBar = {
+                    Column(
+                        Modifier.background(colors.surface)
+                            .then(
+                                if (onCollapse == null) Modifier else Modifier.draggable(
+                                    drag, Orientation.Vertical,
+                                    onDragStopped = { velocity ->
+                                        val (threshold, fling) = with(density) { CollapseDrag.toPx() to CollapseFlingDpPerS.dp.toPx() }
+                                        if (pulled >= threshold || (velocity >= fling && pulled > 0f)) {
+                                            onCollapse()
+                                        } else {
+                                            androidx.compose.animation.core.animate(
+                                                pulled, 0f, animationSpec = spring(Spring.DampingRatioLowBouncy, Spring.StiffnessMediumLow),
+                                            ) { v, _ -> pulled = v }
+                                        }
+                                    },
                                 ),
-                                modifier = Modifier.weight(1f),
-                            )
-                            FilledIconButton(
-                                onClick = onSend,
-                                enabled = configured && canSend && !running && text.isNotBlank(),
-                                modifier = Modifier.padding(start = 8.dp).size(52.dp),
-                            ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                            ),
+                    ) {
+                        if (onCollapse != null) {
+                            // The overlay card's handle, now at the top: drag down for the card.
+                            Box(
+                                Modifier.fillMaxWidth().statusBarsPadding().height(16.dp)
+                                    .semantics { contentDescription = "Drag handle" },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.size(32.dp, 4.dp).background(colors.outlineVariant, RoundedCornerShape(2.dp)))
+                            }
                         }
+                        TopAppBar(
+                            title = {
+                                Text(
+                                    at.quickme.prism.assistant.core.Conversations.title(transcript) ?: "New chat",
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            navigationIcon = {
+                                if (chats != null) {
+                                    IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Rounded.Menu, "Chats") }
+                                } else {
+                                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Chats") }
+                                }
+                            },
+                            actions = {
+                                IconButton(onClick = onNew, enabled = !running) { Icon(Icons.Rounded.Add, "New chat") }
+                            },
+                            windowInsets = if (onCollapse != null) WindowInsets(0) else TopAppBarDefaults.windowInsets,
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                        )
+                    }
+                },
+            ) { padding ->
+                when {
+                    loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
+                    error != null -> EmptyState(PrismIcons.Chat, "This chat did not open", error, Modifier.padding(padding))
+                    entries.isEmpty() && !running -> EmptyState(
+                        PrismIcons.Sparkle, "New chat",
+                        if (configured) "Ask Prism anything; it can act on this phone and hand work to T3."
+                        else "The assistant isn't set up on this phone (assistant_api_key).",
+                        Modifier.padding(padding).padding(bottom = cardSpace),
+                    )
+                    else -> LazyColumn(
+                        state = list,
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + cardSpace + 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize().fadeUnderBar(list, padding.calculateTopPadding()),
+                    ) {
+                        items(entries, key = { it.id }) { e -> TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now) }
+                        if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
                     }
                 }
-            },
-        ) { padding ->
-            when {
-                loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { LoadingIndicator() }
-                error != null -> EmptyState(PrismIcons.Chat, "This chat did not open", error, Modifier.padding(padding))
-                entries.isEmpty() && !running -> EmptyState(PrismIcons.Sparkle, "New chat", "Ask Prism anything; it can act on this phone and hand work to T3.", Modifier.padding(padding))
-                else -> LazyColumn(
-                    state = list,
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding() + 8.dp, bottom = padding.calculateBottomPadding() + cardSpace + 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    items(entries, key = { it.id }) { e -> TranscriptEntry(e, surfaces, agent?.takeIf { e.id == handoff }, now) }
-                    if (thinking(transcript, running)) item(key = "thinking") { Thinking() }
-                }
+            }
+            Box(
+                // Gemini's app keeps its field 16 dp from the sides and 12 dp above the bottom.
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+                    .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp)
+                    .onSizeChanged { cardHeight = it.height },
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                if (composer != null) composer() else at.quickme.prism.AssistComposer(
+                    text = text,
+                    onText = onText,
+                    canSend = configured && canSend && !running,
+                    sending = running,
+                    onSend = onSend,
+                    animate = true,
+                    flat = true,
+                    selectors = {},
+                    modifier = Modifier.fillMaxWidth().widthIn(max = 696.dp),
+                )
             }
         }
-        if (composer != null) Box(
-            // The card as Gemini's chat input: 12 dp from the sides and the bottom.
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
-                .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp)
-                .onSizeChanged { cardHeight = it.height },
-            contentAlignment = Alignment.BottomCenter,
-        ) { composer() }
     }
-    if (confirm && onDelete != null) {
-        AlertDialog(
-            onDismissRequest = { confirm = false },
-            title = { Text("Delete this chat?") },
-            text = { Text("It is deleted on every device.") },
-            confirmButton = { TextButton(onClick = { confirm = false; onDelete() }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+    Box(
+        modifier.graphicsLayer {
+            // Going back to the card: smaller towards the bottom, where the
+            // card is, and down with the finger, the corners rounding.
+            val p = maxOf(back.value, (pulled / reach).coerceIn(0f, 1f))
+            val s = 1f - 0.1f * p
+            scaleX = s
+            scaleY = s
+            transformOrigin = TransformOrigin(0.5f, 1f)
+            translationY = pulled * 0.5f
+            shape = RoundedCornerShape(CollapseRadius * p)
+            clip = p > 0f
+        },
+    ) {
+        if (chats == null) content() else ModalNavigationDrawer(
+            drawerState = drawer,
+            drawerContent = { chats { scope.launch { drawer.close() } } },
+            content = content,
         )
     }
 }
+
+/**
+ * The chat fades out under the top bar ([top] its bottom) over [length], as
+ * Gemini's app's does, once it has scrolled under it.
+ */
+private fun Modifier.fadeUnderBar(list: androidx.compose.foundation.lazy.LazyListState, top: androidx.compose.ui.unit.Dp, length: androidx.compose.ui.unit.Dp = 40.dp): Modifier =
+    graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }.drawWithContent {
+        drawContent()
+        if (!list.canScrollBackward) return@drawWithContent
+        val t = top.toPx()
+        val l = length.toPx()
+        drawRect(
+            Brush.verticalGradient(0f to Color.Black, 1f to Color.Transparent, startY = t, endY = t + l),
+            topLeft = Offset(0f, t), size = Size(size.width, l), blendMode = BlendMode.DstOut,
+        )
+    }
+
+/** The handle dragged this far down takes the chat back into the card. */
+private val CollapseDrag = 96.dp
+
+/** Or flung down this fast (dp/s). */
+private const val CollapseFlingDpPerS = 1200f
+
+/** How far the drag goes for the whole shrink. */
+private val CollapseReach = 320.dp
+
+/** The corners the chat rounds to on its way back. */
+private val CollapseRadius = 32.dp
+
+/** Material's predictive back: the gesture's progress, decelerated. */
+private val CollapseEasing = androidx.compose.animation.core.CubicBezierEasing(0.1f, 0.1f, 0f, 1f)
 
 /** "Today", "Yesterday", "Previous 7 days", or the month. */
 internal fun dayLabel(unix: Long, now: Long, zone: ZoneId = ZoneId.systemDefault()): String {

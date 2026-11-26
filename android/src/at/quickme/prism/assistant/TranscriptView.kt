@@ -1,6 +1,6 @@
 // The assistant's conversation above the composer, in Gemini's look: its
 // answer panel (GeminiPlate.kt's chip, black or white) with Gemini's controls
-// above it (New chat, full screen), the owner's words at the right in
+// above it (the last chat, New chat), the owner's words at the right in
 // Gemini's user bubble, the answers as simple
 // Markdown, a line per tool while it runs, and a card per tool result as
 // Gemini's action cards render them (the Google app's robin action cards:
@@ -154,9 +154,9 @@ class FollowedAgent(
 /**
  * The conversation above the overlay's card, as Gemini's floaty answer page
  * (the Google app's floaty2_response_page_v4): no header, but Gemini's
- * controls above the panel at its end, a chip ("New chat", where Gemini has
- * its action chip) and a round button that opens the conversation full screen
- * ([onOpen], Gemini's "open in app"); the panel itself in Gemini's chip look
+ * controls above the panel at its end ([AssistControls]: the last chat and
+ * New chat, in the look of Gemini's chips); then [banner] (Gemini's
+ * snackbar, 12 dp above the panel); the panel itself in Gemini's chip look
  * with 28 dp corners, 24 dp above the first line and 16 dp at its sides, its
  * edges fading over 48 dp where it scrolls, as tall as the screen allows and
  * growing as the answer does. [transcript] grows while [running]; [agent] is
@@ -174,8 +174,11 @@ fun AssistantTranscript(
     modifier: Modifier = Modifier,
     /** The time timers count from; the clock in the app, fixed in previews. */
     now: (() -> Long)? = null,
-    /** The conversation full screen; no button without it. */
-    onOpen: (() -> Unit)? = null,
+    /** The title of the chat before this one, offered as a chip; null: none. */
+    lastChat: String? = null,
+    onLastChat: () -> Unit = {},
+    /** Between the controls and the panel: Gemini's snackbar. */
+    banner: @Composable () -> Unit = {},
     /** The conversation's renderer (AssistantSession.surfaces), shared with its other screens; one of its own without. */
     host: SurfaceHost? = null,
 ) {
@@ -196,16 +199,8 @@ fun AssistantTranscript(
         }
     }
     Column(modifier) {
-        // Gemini's controls: at the end, 4 dp above the panel, each button's
-        // 4 dp inset outside the panel's edge.
-        Row(
-            Modifier.fillMaxWidth().padding(bottom = 4.dp).offset(x = 4.dp),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = !running, modifier = Modifier.padding(end = 4.dp))
-            if (onOpen != null) ControlButton(PrismIcons.OpenInNew, "Open full screen", onOpen)
-        }
+        AssistControls(lastChat = lastChat, onLastChat = onLastChat, onNew = onNew, newEnabled = !running)
+        banner()
         Box(
             Modifier
                 .fillMaxWidth()
@@ -232,6 +227,9 @@ fun AssistantTranscript(
     }
 }
 
+/** Between the controls' chips, and from them to what follows. */
+private val ChipGap = 8.dp
+
 /** Gemini's panel corners (floaty_response_background). */
 private val PanelRadius = 28.dp
 
@@ -257,33 +255,60 @@ private fun Modifier.fadingEdges(list: androidx.compose.foundation.lazy.LazyList
     }
 
 /**
- * Gemini's action chip above its panel: a pill in the surface colour, 36 dp
- * tall in a 48 dp touch target, the icon 18 dp, 12 dp before it and 16 dp
- * after the label.
+ * Gemini's controls above its panel (and above the card while nothing is
+ * asked yet), at the end, 4 dp above what follows, each chip's 4 dp inset
+ * outside the panel's edge: the chat before this one ([lastChat], its title)
+ * and, to its right, New chat ([onNew]; none without it).
  */
 @Composable
-private fun ControlChip(icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean, modifier: Modifier = Modifier) {
-    val colors = MaterialTheme.colorScheme
-    Box(modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-        Surface(
-            onClick = onClick, enabled = enabled, shape = CircleShape, color = colors.surface,
-            contentColor = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
-        ) {
-            Row(Modifier.height(36.dp).padding(start = 12.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, Modifier.size(18.dp))
-                Text(label, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
-            }
-        }
+fun AssistControls(lastChat: String?, onLastChat: () -> Unit, onNew: (() -> Unit)?, newEnabled: Boolean = true, modifier: Modifier = Modifier) {
+    if (lastChat == null && onNew == null) return
+    Row(
+        // Its chips sit [ChipGap] apart, and as far above what follows: the
+        // 48 dp touch target leaves 4 dp under each 40 dp chip, the panel's
+        // soft dark edge takes about as much again, the rest is here.
+        modifier.fillMaxWidth().padding(bottom = ChipGap).offset(x = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(ChipGap, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (lastChat != null) ControlChip(
+            PrismIcons.Chat, lastChat.ifEmpty { "Last chat" }, onLastChat, enabled = true,
+            description = "Back to the last chat: ${lastChat.ifEmpty { "untitled" }}",
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (onNew != null) ControlChip(Icons.Rounded.Add, "New chat", onNew, enabled = newEnabled, modifier = Modifier.padding(end = 4.dp))
     }
 }
 
-/** Gemini's "open in app" above its panel: a 40 dp disc in the surface colour, in a 48 dp touch target. */
+/**
+ * Gemini's suggestion chip ("What can Gemini do", above its card): a pill in
+ * black (white in the light) with the primary colour glowing along its inner
+ * edge (GeminiPlate.kt's chip shader), 40 dp tall in a 48 dp touch target,
+ * the icon 18 dp, 12 dp before it and 16 dp after the label.
+ */
 @Composable
-private fun ControlButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun ControlChip(
+    icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean,
+    modifier: Modifier = Modifier, description: String? = null,
+) {
     val colors = MaterialTheme.colorScheme
-    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-        Surface(onClick = onClick, shape = CircleShape, color = colors.surface, contentColor = colors.onSurfaceVariant, modifier = Modifier.size(40.dp)) {
-            Box(contentAlignment = Alignment.Center) { Icon(icon, label, Modifier.size(24.dp)) }
+    val dark = colors.background.luminance() < 0.5f
+    Box(modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+        Surface(
+            onClick = onClick, enabled = enabled, shape = CircleShape, color = Color.Transparent,
+            contentColor = colors.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
+            modifier = Modifier
+                // Fully round: the shader takes the smaller of this and half the height.
+                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, 1000.dp)
+                .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier),
+        ) {
+            Row(Modifier.height(40.dp).padding(start = 12.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, Modifier.size(18.dp))
+                Text(
+                    label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
         }
     }
 }

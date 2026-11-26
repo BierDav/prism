@@ -252,9 +252,11 @@ private fun OverlaySample(t: Transcript) = Themed {
                 AssistComposer(
                     text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
                     onCard = { card = it },
+                    // Empty, the card sits back in Gemini's 40 dp margins under the 16 dp panel.
+                    cardInset = 24.dp,
                     selectors = {
                         AssistantTranscript(
-                            t, false, null, onNew = {}, onAction = null, onOpen = {}, now = { NOW + 75_000 },
+                            t, false, null, onNew = {}, onAction = null, lastChat = "Weather in Vienna", now = { NOW + 75_000 },
                             modifier = Modifier.fillMaxWidth().onGloballyPositioned { panel = it.boundsInRoot() },
                         )
                     },
@@ -268,8 +270,8 @@ private fun OverlaySample(t: Transcript) = Themed {
 
 /**
  * The card dragged up into the full screen: the overlay's conversation in
- * the chat view (HistoryChat), with Back to the card, Chats, New chat and
- * Delete above, and the overlay's own card at the bottom.
+ * the chat view (HistoryChat), with the drawer's hamburger, the handle and
+ * New chat above, and the overlay's own card, flat, at the bottom.
  */
 @ScreenPreviews
 @Composable
@@ -286,12 +288,12 @@ private fun AssistantFullChatPreview() = Themed {
     at.quickme.prism.GeminiColors {
         HistoryChat(
             transcript = t, running = false, loading = false, error = null, configured = true, canSend = true,
-            text = "", onText = {}, onSend = {}, onAction = null, onNew = {}, onDelete = {}, onBack = {},
-            now = { NOW + 75_000 }, onChats = {},
+            text = "", onText = {}, onSend = {}, onAction = null, onNew = {}, onBack = {},
+            now = { NOW + 75_000 }, chats = {}, onCollapse = {},
             composer = {
                 AssistComposer(
                     text = "", onText = {}, canSend = true, sending = false, onSend = {}, animate = false, onMic = {},
-                    selectors = {}, modifier = Modifier.fillMaxWidth(),
+                    flat = true, selectors = {}, modifier = Modifier.fillMaxWidth(),
                 )
             },
         )

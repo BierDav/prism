@@ -15,8 +15,13 @@
 //
 // Dragged up, the card grows with the finger; past a threshold it grows on
 // into the conversation full screen (assistant/AssistHistory.kt's HistoryChat,
-// in this window, a shared-bounds transition), whose Back shrinks it into the
-// card again and whose Chats opens the list.
+// in this window, a shared-bounds transition), whose Back (predictive) or
+// handle dragged down shrinks it into the card again and whose hamburger opens
+// the chats in a drawer.
+//
+// Opened within a minute of the last time, the overlay goes on with that
+// conversation; later it begins a new one and offers the last as a chip
+// beside New chat.
 //
 // Predictive Back and an upward swipe on the overlay dismiss it; the
 // navigation bar stays, and the live app remains underneath. The composer
@@ -93,6 +98,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imeAnimationSource
+import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
@@ -172,6 +179,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -461,8 +469,19 @@ private fun Assist(
     // and hands computer work to a T3 agent, which the overlay then follows.
     // Without its key, requests start a T3 agent directly, as before.
     // Shared with the history screen when it holds the same conversation.
-    val session = remember { AssistantSession.forOverlay(context, capture) }
-    DisposableEffect(session) { onDispose { session.detach() } }
+    // Another chat (the last one's chip, the drawer) swaps it.
+    var session by remember { mutableStateOf(AssistantSession.forOverlay(context, capture)) }
+    DisposableEffect(session) {
+        val shown = session
+        onDispose { shown.detach() }
+    }
+    // Closed, the resume window counts from now.
+    DisposableEffect(Unit) {
+        onDispose {
+            session.touch()
+            agentId?.let { memory.conversation(it) }
+        }
+    }
     // The transcript entry of the hand-off whose agent the overlay follows.
     var handoffEntry by remember { mutableStateOf(session.transcript.latestHandoff()?.first) }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -476,6 +495,9 @@ private fun Assist(
     // The card dragged up (or the panel's open button): the conversation full
     // screen, in this window, the card growing into it (a shared transition).
     var full by remember { mutableStateOf(false) }
+    // Whether the card that appears next takes the focus (and the keyboard).
+    var focusCard by remember { mutableStateOf(false) }
+    val imeShown = androidx.compose.runtime.rememberUpdatedState(WindowInsets.isImeVisible)
 
     fun attach(items: List<Attached>) {
         val room = AttachmentRules.MAX_ATTACHMENTS - attached.size
@@ -513,6 +535,12 @@ private fun Assist(
     fun showFull(on: Boolean) {
         cameraOpen = false
         menuOpen = false
+        // Full screen, nothing listens: the chat has no bars to show it.
+        if (on) voice.cancel()
+        // The other layout's field takes the focus as it appears: the keyboard
+        // stays up when it was, and comes up for a new chat dragged full screen.
+        val fresh = session.transcript.isEmpty && agentId == null && starting == null
+        focusCard = imeShown.value || (on && fresh)
         full = on
     }
 
@@ -702,24 +730,58 @@ private fun Assist(
         memory.forgetConversation()
     }
 
-    /** The full-screen chat's Delete: the conversation goes everywhere, a new one begins. */
-    fun deleteChat() {
-        if (session.running) return
-        ConversationStore.delete(context, session.conversationId)
+    /** Shows [s]'s conversation (another chat): the agent followed is the one its last hand-off started, if any. */
+    fun showSession(s: AssistantSession) {
+        s.attach(context, capture)
         previous = null
-        handoffEntry = null
+        handoffEntry = s.transcript.latestHandoff()?.first
         agentId = null
         starting = null
         activity = null
         activityError = null
         pending.clear()
+        sendError = null
         memory.forgetConversation()
+        session = s
+        s.transcript.latestHandoff()?.second?.takeIf { it.agentId.isNotEmpty() }?.let { card ->
+            agentTitle = card.title.ifEmpty { card.request }
+            agentId = card.agentId
+            activity = AgentActivity(at.quickme.prism.shared.Agent(id = card.agentId, title = card.title))
+        }
     }
 
-    /** The full-screen chat's Chats: the list (AssistHistory), once unlocked; the overlay then goes. */
-    fun openChats() {
-        scope.launch { if (unlock()) AssistHistory.open(context) }
+    var opening by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    /** Opens stored conversation [id] here (the last chat's chip, the drawer), once unlocked. */
+    fun openChat(id: String) {
+        if (id == session.conversationId) return
+        opening?.cancel()
+        opening = scope.launch {
+            try {
+                if (!unlock()) {
+                    sendError = "Unlock the phone to open a chat."
+                    return@launch
+                }
+                val s = AssistantSession.live(id)
+                    ?: ConversationStore.load(context, id).let { loaded ->
+                        // Opened meanwhile elsewhere? Then that session.
+                        AssistantSession.live(id) ?: AssistantSession(context, capture, resume = false).also { it.open(loaded) }
+                    }
+                showSession(s)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                sendError = e.message ?: "The chat did not open."
+            } finally {
+                opening = null
+            }
+        }
     }
+
+    // The chat before this one, for its chip: not while it is the one shown.
+    val last = remember(session, session.transcript.isEmpty, session.conversationId) {
+        at.quickme.prism.assistant.AssistantMemory(context).last()
+    }?.takeIf { it.first != session.conversationId && session.configured }
 
     LaunchedEffect(text) { memory.saveDraft(text) }
 
@@ -914,8 +976,7 @@ private fun Assist(
             throw e
         }
     }
-    // Full screen, Back takes the chat back into the card.
-    BackHandler(enabled = full) { showFull(false) }
+    // Full screen, Back takes the chat back into the card (HistoryChat, predictively).
     // With the + menu open, Back closes the menu first.
     BackHandler(enabled = menuOpen) { menuOpen = false }
 
@@ -993,25 +1054,46 @@ private fun Assist(
         // page, 16 dp from the sides) or the keyboard is up, and sits back in
         // its margins otherwise.
         val answering = following || chatting
+        val ime = WindowInsets.isImeVisible
+        val side = sideMargin(LocalConfiguration.current.screenWidthDp)
+        val marginSpec: FiniteAnimationSpec<androidx.compose.ui.unit.Dp> =
+            if (reducedMotion) snap() else tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
         val margin by androidx.compose.animation.core.animateDpAsState(
             when {
                 answering -> AnswerMargin
-                WindowInsets.isImeVisible || menuOpen -> WideMargin
-                else -> sideMargin(LocalConfiguration.current.screenWidthDp)
+                ime || menuOpen -> WideMargin
+                else -> side
             },
-            if (reducedMotion) snap() else tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)),
+            marginSpec,
             label = "margin",
         )
-        /** The card, in the overlay and at the bottom of the full-screen chat. */
+        // With an answer the panel spans the screen, and the card too while
+        // it has something in it; empty, it sits back in Gemini's margins.
+        val empty = text.isEmpty() && attached.isEmpty() && !ime && !menuOpen
+        val cardInset by androidx.compose.animation.core.animateDpAsState(
+            if (answering && empty) (side - AnswerMargin).coerceAtLeast(0.dp) else 0.dp,
+            marginSpec,
+            label = "cardInset",
+        )
+        // What went wrong, as Gemini's snackbar: above the answer panel while
+        // one shows, else above the card.
+        val error = sendError ?: voice.error
+        fun dismissError() {
+            sendError = null
+            voice.clearError()
+        }
+        /** The card, in the overlay (Gemini's plate) and at the bottom of the full-screen chat (Gemini's app's field, [flat]). */
         @Composable
-        fun InputCard(cardModifier: Modifier, expand: (() -> Unit)?, selectors: @Composable () -> Unit, modifier: Modifier) = AssistComposer(
+        fun InputCard(cardModifier: Modifier, expand: (() -> Unit)?, selectors: @Composable () -> Unit, modifier: Modifier, flat: Boolean, showError: Boolean) = AssistComposer(
             text = text,
             onText = { text = it; sendError = null },
             canSend = (if (session.configured) !session.running else starting == null) && reading == 0,
             sending = sending || session.running,
             onSend = { send() },
             animate = !reducedMotion,
-            error = sendError ?: voice.error,
+            flat = flat,
+            error = if (showError) error else null,
+            onDismissError = ::dismissError,
             placeholder = if (following && !session.configured) "Reply to the agent" else "Ask Prism",
             voice = voice,
             onMic = ::listen,
@@ -1025,6 +1107,8 @@ private fun Assist(
             onCard = { plate = it },
             onExpand = expand,
             cardModifier = cardModifier,
+            cardInset = if (flat) 0.dp else cardInset,
+            focusOnStart = focusCard,
             selectors = selectors,
             modifier = modifier,
         )
@@ -1048,12 +1132,19 @@ private fun Assist(
                     agent = followed,
                     onNew = ::newRequest,
                     onAction = act,
-                    onOpen = { showFull(true) },
+                    lastChat = last?.second,
+                    onLastChat = { last?.let { openChat(it.first) } },
+                    banner = { ErrorSnackbar(error, ::dismissError, Modifier.padding(bottom = 12.dp)) },
                     host = session.surfaces,
                     modifier = Modifier.fillMaxWidth().chipEnter(0).onGloballyPositioned { panel = it.boundsInRoot() },
                 )
             } else if (!following) {
                 if (!session.configured) NotSetUp(Modifier.chipEnter(0))
+                // Gemini's chip above its card: here, the last chat.
+                else if (last != null) at.quickme.prism.assistant.AssistControls(
+                    lastChat = last.second, onLastChat = { openChat(last.first) }, onNew = null,
+                    modifier = Modifier.chipEnter(0),
+                )
             } else AgentConversation(
                 title = agentTitle.ifEmpty { activity?.agent?.title?.takeIf { it.isNotEmpty() } ?: "Agent" },
                 activity = activity,
@@ -1091,6 +1182,8 @@ private fun Assist(
                         cardModifier = chat,
                         expand = { showFull(true) },
                         selectors = selectors,
+                        flat = false,
+                        showError = !chatting,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).union(WindowInsets.statusBars))
@@ -1130,13 +1223,21 @@ private fun Assist(
                     onSend = { send() },
                     onAction = act,
                     onNew = ::newRequest,
-                    onDelete = if (session.transcript.isEmpty || session.running) null else ::deleteChat,
                     onBack = { showFull(false) },
-                    onChats = ::openChats,
+                    chats = { close ->
+                        at.quickme.prism.assistant.ChatsDrawer(
+                            current = session.conversationId,
+                            onOpen = { id -> close(); openChat(id) },
+                            onNew = { close(); newRequest() },
+                            newEnabled = !session.running,
+                        )
+                    },
+                    onCollapse = { showFull(false) },
+                    collapseOnBack = !menuOpen,
                     agent = followed,
                     handoff = handoffEntry,
                     composer = {
-                        InputCard(Modifier, null, {}, Modifier.fillMaxWidth().widthIn(max = 696.dp))
+                        InputCard(Modifier, null, {}, Modifier.fillMaxWidth().widthIn(max = 696.dp), flat = true, showError = true)
                     },
                     modifier = chat,
                     host = session.surfaces,
@@ -1269,8 +1370,8 @@ internal class AssistMemory(context: Context) {
         private const val DRAFT = "draft"
         private const val CONVERSATION = "conversation"
         private const val CONVERSATION_AT = "conversation_at"
-        /** Opened again within this, the overlay shows the same agent. */
-        private const val RESUME_MS = 10 * 60 * 1000L
+        /** Opened again within this, the overlay shows the same agent (and the assistant's conversation, AssistantMemory). */
+        private const val RESUME_MS = 60 * 1000L
     }
 }
 
@@ -1297,8 +1398,11 @@ internal fun AssistComposer(
     sending: Boolean,
     onSend: () -> Unit,
     animate: Boolean,
+    /** Gemini's app's field (the full-screen chat): flat, no glow, no handle; else Gemini's overlay plate. */
+    flat: Boolean = false,
+    /** Shown above the card as Gemini's snackbar until [onDismissError]. */
     error: String? = null,
-    onReload: (() -> Unit)? = null,
+    onDismissError: () -> Unit = {},
     placeholder: String = "Ask Prism",
     voice: VoiceInput? = null,
     onMic: (() -> Unit)? = null,
@@ -1317,11 +1421,21 @@ internal fun AssistComposer(
     cardModifier: Modifier = Modifier,
     /** How far the card is dragged up to begin with; for previews. */
     initialPull: androidx.compose.ui.unit.Dp = 0.dp,
+    /** The card narrower than what is above it by this at each side. */
+    cardInset: androidx.compose.ui.unit.Dp = 0.dp,
+    /** Its field takes the focus and the keyboard as it appears. */
+    focusOnStart: Boolean = false,
     selectors: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        if (focusOnStart) {
+            focus.requestFocus()
+            keyboard?.show()
+        }
+    }
     Column(modifier.semantics { paneTitle = "Prism" }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Measured after the card, so the card always fits (the keyboard up)
         // and the transcript scrolls in what is left.
@@ -1336,12 +1450,7 @@ internal fun AssistComposer(
         ) {
             attach?.let { AttachMenu(it, Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
         }
-        error?.let { message ->
-            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.medium).padding(12.dp)) {
-                Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                onReload?.let { TextButton(onClick = it) { Text("Reload choices") } }
-            }
-        }
+        ErrorSnackbar(error, onDismissError, Modifier.padding(bottom = 8.dp))
         Composer(
             text = text,
             onText = onText,
@@ -1355,6 +1464,7 @@ internal fun AssistComposer(
             },
             focus = focus,
             animate = animate,
+            flat = flat,
             placeholder = placeholder,
             voice = voice,
             onMic = onMic,
@@ -1367,7 +1477,7 @@ internal fun AssistComposer(
             onExpand = onExpand,
             cardModifier = cardModifier,
             initialPull = initialPull,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = cardInset),
         )
     }
 }
@@ -1408,6 +1518,7 @@ private fun Composer(
     onFocus: () -> Unit,
     focus: FocusRequester,
     animate: Boolean,
+    flat: Boolean,
     placeholder: String,
     voice: VoiceInput?,
     onMic: (() -> Unit)?,
@@ -1428,13 +1539,26 @@ private fun Composer(
     val waiting = voice?.active == true && !voice.speaking
     val colors = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
-    val typing = focused && WindowInsets.isImeVisible
-    val twoRows = !listening && (typing || text.isNotEmpty() || attachments.isNotEmpty())
-    val rows by animateFloatAsState(
-        if (twoRows) 1f else 0f,
+    // Two rows for what is in the card (text, attachments): animated on its
+    // own. And for the keyboard: frame by frame with its own animation, both
+    // as it rises and as it goes, so the text moves up as the keyboard does.
+    val filled by animateFloatAsState(
+        if (!listening && (text.isNotEmpty() || attachments.isNotEmpty())) 1f else 0f,
         if (animate) tween(350, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else snap(),
         label = "rows",
     )
+    val density0 = LocalDensity.current
+    val imeNow = WindowInsets.ime.getBottom(density0)
+    val imeFull = maxOf(WindowInsets.imeAnimationSource.getBottom(density0), WindowInsets.imeAnimationTarget.getBottom(density0))
+    // The keyboard rose for this field: followed down to the end, even once
+    // the field has let go of the focus.
+    // (Not state: the insets recompose this every frame they move.)
+    val ours = remember { BooleanArray(1) }
+    if (focused && imeNow > 0) ours[0] = true else if (imeNow == 0) ours[0] = false
+    val keyboard = if (!(focused || ours[0]) || listening) 0f
+    else if (!animate) (if (imeNow > 0) 1f else 0f)
+    else if (imeFull > 0) (imeNow.toFloat() / imeFull).coerceIn(0f, 1f) else 0f
+    val rows = maxOf(filled, keyboard)
     val dark = overlayDark()
     val plateColors = remember(colors, dark) { PlateColors(colors, dark) }
     // The card's own clock: it settles as it appears, and shimmers while sending.
@@ -1450,8 +1574,16 @@ private fun Composer(
         }
     }
     val processing by animateFloatAsState(if (sending) 1f else 0f, tween(300), label = "processing")
-    val textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 20.sp, lineHeight = 28.sp)
-    val age = { (now - opened).toFloat() }
+    val textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = if (flat) 17.sp else 20.sp, lineHeight = if (flat) 24.sp else 28.sp)
+    // Gemini's app's field appears as it is: nothing to settle.
+    val age = if (flat) ({ Float.MAX_VALUE }) else ({ (now - opened).toFloat() })
+    // Its corners: a pill at one row, 28 dp once taller (Gemini's ccix: 95 dp).
+    var flatHeight by remember { mutableIntStateOf(0) }
+    val flatRadius by androidx.compose.animation.core.animateDpAsState(
+        if (with(LocalDensity.current) { flatHeight.toDp() } < 95.dp) 32.dp else 28.dp,
+        if (animate) tween(100, easing = LinearEasing) else snap(),
+        label = "corners",
+    )
     // Dragged up, the card grows with the finger and, past a threshold (or
     // on a fling up), goes on into the full-screen chat; below it, it springs
     // back.
@@ -1497,10 +1629,16 @@ private fun Composer(
                     ) { value, _ -> pull = value }
                 },
             )
-            .geminiPlate(plateColors, CardRadius, ageMs = age, processing = { processing })
+            .then(
+                if (flat) Modifier
+                    .onSizeChanged { flatHeight = it.height }
+                    .background(colors.surfaceContainerHigh, androidx.compose.foundation.shape.RoundedCornerShape(flatRadius))
+                else Modifier.geminiPlate(plateColors, CardRadius, ageMs = age, processing = { processing }),
+            )
             // Gemini's handle: inside the card, 6 dp below its top edge, over
-            // the plate and under what is in it.
+            // the plate and under what is in it. Full screen it is at the top.
             .drawBehind {
+                if (flat) return@drawBehind
                 val w = 32.dp.toPx()
                 val h = 2.dp.toPx()
                 drawRoundRect(
@@ -1574,24 +1712,21 @@ private fun Composer(
                     decorationBox = { inner ->
                         Box(contentAlignment = Alignment.CenterStart) {
                             if (text.isEmpty()) {
-                                Text(placeholder, style = textStyle, color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(placeholder, style = textStyle, color = if (flat) colors.onSurfaceVariant else colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             inner()
                         }
                     },
                 )
-                // Gemini's two slots at the card's end: the mic's (the stop
-                // while the bars show), and its combined button's, which is
-                // Live there and send here, shown when there is something to
-                // send. The slots stay while empty, so the mic stays where
-                // Gemini's is.
+                // At the card's end: the mic (the stop while the bars show)
+                // at the very end, as Prism has no Live for that place; send
+                // once there is something to send, the mic giving way to it
+                // while there is text (Gemini hides its mic then too).
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (onMic != null) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                        when {
-                            sending -> {}
-                            listening -> ListeningStop(onClick = onMic, animate = animate)
-                            else -> MicButton(onClick = onMic, pulsing = waiting, animate = animate)
-                        }
+                    val mic = onMic?.takeIf { !sending && (listening || waiting || text.isBlank()) }
+                    if (mic != null) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        if (listening) ListeningStop(onClick = mic, animate = animate)
+                        else MicButton(onClick = mic, pulsing = waiting, animate = animate)
                     }
                     SendSlot(
                         visible = (text.isNotBlank() || attachments.isNotEmpty() || sending) && !listening,
@@ -1608,15 +1743,16 @@ private fun Composer(
             // Gemini's buttons: their centres 40 dp in from the card's sides
             // (the +, its send or Live) and 88 dp (its mic), 16 dp from the
             // bottom in two rows (measured on the owner's Pixel; the Google
-            // app's floaty input, fsplit2).
-            val pad = 16.dp.roundToPx()
+            // app's floaty input, fsplit2). Prism's mic takes the end place.
+            // Gemini's app's field is lower: 8 dp round its buttons, 64 dp at one row.
+            val pad = (if (flat) 8.dp else 16.dp).roundToPx()
             val textPad = 8.dp.roundToPx()
             val gap = 4.dp.roundToPx()
             // In two rows the text keeps clear of the card's rounded corners.
-            val textInset = 24.dp.roundToPx()
+            val textInset = (if (flat) 20.dp else 24.dp).roundToPx()
             // Gemini's card is 80 dp tall at one row (measured on the owner's
             // Pixel): 48 dp buttons with 16 dp round them, room for the handle.
-            val minHeight = 80.dp.roundToPx()
+            val minHeight = (if (flat) 64.dp else 80.dp).roundToPx()
             val plus = plusM.measure(Constraints())
             val trailing = trailingM.measure(Constraints(maxWidth = width))
             // What is attached goes above everything else, across the card.
@@ -1657,11 +1793,12 @@ private fun Composer(
 @Composable
 private fun SendSlot(visible: Boolean, sending: Boolean, canSend: Boolean, onSend: () -> Unit, animate: Boolean) {
     val colors = MaterialTheme.colorScheme
-    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { AnimatedVisibility(
+    // Takes no room while hidden, so the mic is at the card's end.
+    AnimatedVisibility(
         visible = visible,
-        enter = if (animate) scaleIn(initialScale = 0.6f) + fadeIn() else EnterTransition.None,
-        exit = if (animate) scaleOut(targetScale = 0.6f) + fadeOut() else ExitTransition.None,
-    ) {
+        enter = if (animate) androidx.compose.animation.expandHorizontally(expandFrom = Alignment.Start) + scaleIn(initialScale = 0.6f) + fadeIn() else EnterTransition.None,
+        exit = if (animate) androidx.compose.animation.shrinkHorizontally(shrinkTowards = Alignment.Start) + scaleOut(targetScale = 0.6f) + fadeOut() else ExitTransition.None,
+    ) { Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
         when {
             sending -> Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(
@@ -1682,3 +1819,60 @@ private fun SendSlot(visible: Boolean, sending: Boolean, canSend: Boolean, onSen
         }
     } }
 }
+
+/**
+ * What went wrong, as Gemini's floaty shows it: its snackbar (the Google
+ * app's compose snackbar host, above the answer card or the input plate, 12 dp
+ * from it), here in its chips' look with the message and a close; it goes on
+ * its own after 4 s, 10 s for a long one (Gemini's short and long durations,
+ * bsno), longer where accessibility asks for it.
+ */
+@Composable
+internal fun ErrorSnackbar(error: String?, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    // The message stays while it leaves.
+    var shown by remember { mutableStateOf(error.orEmpty()) }
+    if (error != null) shown = error
+    val context = LocalContext.current
+    LaunchedEffect(error) {
+        val message = error ?: return@LaunchedEffect
+        val base = if (message.length > SNACKBAR_LONG_CHARS) SNACKBAR_LONG_MS else SNACKBAR_MS
+        val a11y = context.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+        val ms = a11y?.getRecommendedTimeoutMillis(
+            base,
+            android.view.accessibility.AccessibilityManager.FLAG_CONTENT_TEXT or
+                android.view.accessibility.AccessibilityManager.FLAG_CONTENT_CONTROLS,
+        ) ?: base
+        delay(ms.toLong())
+        onDismiss()
+    }
+    AnimatedVisibility(
+        visible = error != null,
+        enter = androidx.compose.animation.expandVertically(tween(250, easing = Decelerate), expandFrom = Alignment.Bottom) + fadeIn(tween(200)),
+        exit = androidx.compose.animation.shrinkVertically(tween(200, easing = Accelerate), shrinkTowards = Alignment.Bottom) + fadeOut(tween(150)),
+        modifier = modifier,
+    ) {
+        val colors = MaterialTheme.colorScheme
+        val dark = overlayDark()
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .geminiChip(if (dark) Color.Black else Color.White, colors.primary, dark, 24.dp)
+                .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite }
+                .heightIn(min = 56.dp)
+                .padding(start = 20.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                shown, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface,
+                modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Rounded.Close, "Dismiss", Modifier.size(24.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+private const val SNACKBAR_MS = 4000
+private const val SNACKBAR_LONG_MS = 10_000
+private const val SNACKBAR_LONG_CHARS = 80

@@ -2,7 +2,8 @@
 // harness's history behind it, and what the owner does on the cards. It
 // lives as long as the overlay; the conversation (transcript and history,
 // tool results included) is kept on the phone for the overlay's resume
-// window, so reopening within ten minutes continues it. Every conversation
+// window, so reopening within a minute continues it; later the overlay begins
+// a new one and offers the last as a chip. Every conversation
 // is also stored in Rocky (ConversationStore), where the history screen
 // (AssistHistory.kt) lists it, opens it and continues it; "New chat" starts
 // another and keeps this one. One session holds a conversation at a time in
@@ -429,6 +430,15 @@ class AssistantSession(
     }
 
     /**
+     * The overlay showing this conversation closes: the resume window counts
+     * from now, so reopening within it continues this conversation (also one
+     * opened from the list, which nothing has saved yet).
+     */
+    fun touch() {
+        if (!transcript.isEmpty) memory.save(transcript, history, conversationId, createdAt)
+    }
+
+    /**
      * Stores the conversation in Rocky: after a moment's quiet while a turn
      * runs (it changes with every step), at once when [now].
      */
@@ -537,8 +547,16 @@ internal class AssistantMemory(context: Context) {
 
     fun createdAt(): Long = if (!fresh()) 0L else prefs.getLong(CREATED, 0L)
 
+    /** The conversation the overlay showed last (its ID and title), whenever that was; kept past the resume window and a new chat. */
+    fun last(): Pair<String, String>? {
+        val id = prefs.getString(LAST_ID, null)?.takeIf { it.isNotEmpty() } ?: return null
+        return id to prefs.getString(LAST_TITLE, null).orEmpty()
+    }
+
     fun save(transcript: Transcript, history: List<Message>, id: String, createdAt: Long) {
-        prefs.edit()
+        val edit = prefs.edit()
+        if (!transcript.isEmpty) edit.putString(LAST_ID, id).putString(LAST_TITLE, Conversations.title(transcript).orEmpty())
+        edit
             .putString(TRANSCRIPT, json.encodeToString(Transcript.serializer(), transcript))
             .putString(HISTORY, Harness.encode(history))
             .putString(ID, id)
@@ -549,6 +567,7 @@ internal class AssistantMemory(context: Context) {
 
     /** Forgets conversation [id] if it is the one kept (it was deleted). */
     fun forget(id: String) {
+        if (prefs.getString(LAST_ID, null) == id) prefs.edit().remove(LAST_ID).remove(LAST_TITLE).apply()
         if (prefs.getString(ID, null) == id) forget()
     }
 
@@ -562,7 +581,9 @@ internal class AssistantMemory(context: Context) {
         const val AT = "harness_at"
         const val ID = "harness_conversation"
         const val CREATED = "harness_created"
-        /** As the overlay's own (AssistMemory): ten minutes. */
-        const val RESUME_MS = 10 * 60 * 1000L
+        const val LAST_ID = "harness_last"
+        const val LAST_TITLE = "harness_last_title"
+        /** As the overlay's own (AssistMemory): a minute. */
+        const val RESUME_MS = 60 * 1000L
     }
 }

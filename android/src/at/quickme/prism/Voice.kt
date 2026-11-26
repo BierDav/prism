@@ -55,6 +55,11 @@ internal class VoiceInput(private val context: Context) {
     var error by mutableStateOf<String?>(null)
         private set
 
+    /** The error was shown and dismissed (Gemini's snackbar timed out or was closed). */
+    fun clearError() {
+        error = null
+    }
+
     /**
      * Whether speech has begun in this utterance. Until it does, Gemini only
      * pulses its mic; once it does, the voice's bars take the text's place.
@@ -89,6 +94,11 @@ internal class VoiceInput(private val context: Context) {
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // No language named: the recognizer detects it (Android 14+), also
+            // when it changes mid-utterance, so German works as well as the
+            // phone's own language without picking one.
+            .putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
+            .putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
         state = State.Starting
         try {
             r.startListening(intent)
