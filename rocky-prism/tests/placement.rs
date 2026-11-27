@@ -603,6 +603,26 @@ fn test_session_switch_point_skips_a_close_reset() {
             Tz::UTC,
         );
         assert_eq!(dec.state, want, "session reset in {reset_minutes} min");
+        let decision = rank_placement_profile(
+            "default",
+            "Default",
+            std::slice::from_ref(&entry),
+            &PlacementPolicy::default(),
+            &[(
+                model_key(&entry.selection.instance_id, &entry.selection.model),
+                host_model,
+            )]
+            .into(),
+            &BTreeMap::new(),
+            now,
+            Tz::UTC,
+        );
+        assert_eq!(
+            decision.next, None,
+            "even near reset the entry cannot take new work"
+        );
+        let exhausted = sel("codex", "codex-2/gpt-6.2-sol");
+        assert!(placement_move_target(&decision, &exhausted).is_none());
     }
 }
 
@@ -645,8 +665,8 @@ fn test_pace_interrupts_before_a_limit_runs_out() {
         running: 2,
         burn_per_thread_per_hour: Some(30.0),
     };
-    // 15% left lasts 15 minutes: keep going.
-    let dec = paced_state((85.0, 180), (20.0, 72 * 60), 10.0, load.clone());
+    // 20% left lasts 20 minutes: keep going.
+    let dec = paced_state((80.0, 180), (20.0, 72 * 60), 10.0, load.clone());
     assert_ne!(dec.state, "over_threshold", "{}", dec.reason);
     // 8% left lasts 8 minutes, under the lead time: interrupt and compact.
     let dec = paced_state((92.0, 180), (20.0, 72 * 60), 10.0, load.clone());

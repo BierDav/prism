@@ -112,6 +112,10 @@ pub fn is_placement_runnable(state: &str) -> bool {
     matches!(state, "ok" | "promoted" | "full")
 }
 
+fn accepts_new_work(entry: &PlacementEntryDecision) -> bool {
+    is_placement_runnable(&entry.state) && entry.accepts_new_work != Some(false)
+}
+
 pub fn guess_driver(instance_id: &str) -> String {
     match instance_id {
         "claudeAgent" | "codex" | "opencode" | "cursor" => instance_id.to_string(),
@@ -232,7 +236,7 @@ fn format_percent(v: f64) -> String {
 
 /// How long before a limit runs out, at the current pace, a running thread is
 /// interrupted and compacted so it can move before the limit is hit.
-pub const PLACEMENT_PREEMPT_LEAD_SECS: i64 = 10 * 60;
+pub const PLACEMENT_PREEMPT_LEAD_SECS: i64 = 15 * 60;
 
 fn resets_within_wait(window: &PlacementWindow, now: DateTime<Utc>) -> bool {
     parse_placement_time(&window.resets_at)
@@ -409,6 +413,7 @@ fn decide_unlimited(
         running_threads: load.running,
         predicted_session_percent: None,
         weekly_slack_sessions: None,
+        accepts_new_work: None,
         compact_before_limit: None,
     };
     if !entry.enabled {
@@ -484,6 +489,15 @@ fn decide_unlimited(
             return base;
         }
         base.compact_before_limit = Some(reason);
+    }
+    // A near reset or a weekly drain can keep the running work in place.
+    // Neither should send another run to a window that is already near empty.
+    if session
+        .as_ref()
+        .is_some_and(|s| s.used_percent >= policy.switch_at_percent)
+        || base.compact_before_limit.is_some()
+    {
+        base.accepts_new_work = Some(false);
     }
 
     let mut predicted_session_percent = None;
@@ -587,7 +601,7 @@ pub fn rank_placement_profile(
     let mut next = None;
     let mut ranked = Vec::with_capacity(decided.len());
     for (_, decision) in decided {
-        if next.is_none() && is_placement_runnable(&decision.state) {
+        if next.is_none() && accepts_new_work(&decision) {
             next = Some(decision.selection.clone());
         }
         ranked.push(decision);
@@ -620,7 +634,10 @@ pub fn placement_waits_for_reset(
     for e in &decision.ranked {
         if same_placement_entry(&e.selection, current) {
             own = Some(e);
-        } else if e.state == "promoted" && e.weekly_slack_sessions.is_some_and(|s| s <= limit) {
+        } else if e.state == "promoted"
+            && accepts_new_work(e)
+            && e.weekly_slack_sessions.is_some_and(|s| s <= limit)
+        {
             return false;
         }
     }
@@ -661,7 +678,10 @@ pub fn placement_drain_target(
         return None;
     }
     let to = decision.ranked.iter().find(|d| {
-        d.state == "promoted" && urgent(d) && !same_placement_entry(&d.selection, current)
+        d.state == "promoted"
+            && accepts_new_work(d)
+            && urgent(d)
+            && !same_placement_entry(&d.selection, current)
     })?;
     let slack = to.weekly_slack_sessions.unwrap_or_default();
     Some(PlacementMoveTarget {
@@ -675,8 +695,7 @@ pub fn placement_drain_target(
 
 /// A move onto the thread's own entry, which T3 carries out as interrupt,
 /// `/compact` on this account, and continue here: for a running thread on an
-/// entry that runs into its limit on purpose and is close to it
-/// (`compact_before_limit`). None when the entry is not close or not runnable.
+/// entry that runs into its limit on purpose or has no destination yet.
 pub fn placement_compact_target(
     decision: &PlacementProfileDecision,
     current: &PlacementSelection,
@@ -684,15 +703,23 @@ pub fn placement_compact_target(
     let own = decision
         .ranked
         .iter()
-        .find(|d| same_placement_entry(&d.selection, current))
-        .filter(|d| is_placement_runnable(&d.state))?;
-    let why = own.compact_before_limit.as_ref()?;
-    Some(PlacementMoveTarget {
-        to: own.selection.clone(),
-        reason: format!(
+        .find(|d| same_placement_entry(&d.selection, current))?;
+    let reason = if let Some(why) = &own.compact_before_limit {
+        format!(
             "Compacting before the limit, to hand over a short context when it is reached: {why} {} still has weekly allowance to spend, so the thread stays on it until then.",
             current.model
-        ),
+        )
+    } else if own.state == "over_threshold" && decision.next.is_none() {
+        format!(
+            "Compacting before the limit while no other account can take this thread: {}",
+            own.reason
+        )
+    } else {
+        return None;
+    };
+    Some(PlacementMoveTarget {
+        to: own.selection.clone(),
+        reason,
     })
 }
 
@@ -732,7 +759,7 @@ pub fn placement_move_target(
     let to = decision
         .ranked
         .iter()
-        .find(|d| is_placement_runnable(&d.state) && !same_placement_entry(&d.selection, current))
+        .find(|d| accepts_new_work(d) && !same_placement_entry(&d.selection, current))
         .map(|d| d.selection.clone())?;
     let reason = match own {
         None => format!(
