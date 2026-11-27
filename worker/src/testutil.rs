@@ -290,6 +290,11 @@ async fn mcp(State(f): State<FakeT3>, headers: HeaderMap, Json(req): Json<Value>
             json!({"interrupted": true})
         }
         "t3_thread_launch" => {
+            let project = args["projectId"].as_str().is_some_and(|id| !id.is_empty());
+            let scratch = args["scratch"].as_bool().unwrap_or(false);
+            if project == scratch {
+                return tool_error("Outside a thread, pass either projectId or scratch.");
+            }
             f.launches.lock().expect("launches").push(args.clone());
             let key = args["clientRequestId"].as_str().unwrap_or("").to_string();
             let mut threads = f.threads.lock().expect("threads");

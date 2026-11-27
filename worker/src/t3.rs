@@ -6,6 +6,7 @@
 //! launch a former leader started but never recorded returns the same thread.
 
 use crate::config::{CLUSTER_TARGET, Config, MachineConfig};
+use crate::magic::{DEFAULT_PROJECT, host_project};
 use rocky_prism::{AlertRow, sha256_hex, truncate, with_id};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -362,21 +363,21 @@ impl T3Hub {
                 ..Target::default()
             }
         } else {
-            let (name, m) = self
-                .cfg
-                .machine_by_name(target_name)
+            let configured = self.cfg.machine_by_name(target_name);
+            let (name, m) = configured
+                .clone()
                 .unwrap_or_else(|| (target_name.to_string(), MachineConfig::default()));
-            Target {
-                name: name.clone(),
-                machine: m.clone(),
-                client: if self.has_client(&name) {
-                    name.clone()
-                } else {
-                    self.cfg.cluster_machine.clone()
-                },
-                host: name,
-                workspace: m.workspace,
-                ..Target::default()
+            if self.has_client(&name) {
+                Target {
+                    name: name.clone(),
+                    machine: m.clone(),
+                    client: name.clone(),
+                    host: name,
+                    workspace: m.workspace,
+                    ..Target::default()
+                }
+            } else {
+                self.t3_target(&name, &m, configured.is_some()).await?
             }
         };
         let mut args = json!({
@@ -395,12 +396,29 @@ impl T3Hub {
             Some(m) => args["modelSelection"] = m,
             None => {}
         }
-        if !project_id.is_empty() && !project_id.starts_with("repo:") {
-            if let Some((_, id)) = project_id.split_once('/') {
-                args["projectId"] = json!(id);
-            }
-        } else if project_id.is_empty() && target.workspace.is_empty() {
+        if project_id.is_empty() || (project_id == DEFAULT_PROJECT && target.workspace.is_empty()) {
             args["scratch"] = json!(true);
+        } else if let Some((host, id)) = host_project(project_id) {
+            let host = if host.is_empty() {
+                self.cfg.cluster_machine.as_str()
+            } else {
+                host
+            };
+            if host != target.host {
+                return Err(T3Error::user(format!(
+                    "That project is on {host}, not {}. Choose its machine or another project.",
+                    target.host
+                )));
+            }
+            args["projectId"] = json!(id);
+        } else if project_id == DEFAULT_PROJECT || project_id.starts_with("repo:") {
+            let project = self.launch_project(&target, project_id).await?;
+            args["projectId"] = project["id"].clone();
+            args["workspaceStrategy"] = workspace_strategy(&project);
+        } else {
+            return Err(T3Error::user(
+                "That project ID isn't valid. Choose a project again.",
+            ));
         }
         let val = self
             .call(
@@ -410,9 +428,52 @@ impl T3Hub {
                 args,
             )
             .await?;
-        let launch: Launch =
-            serde_json::from_value(val).map_err(|e| T3Error::Other(e.to_string()))?;
+        let launch = checked_launch(val)?;
         Ok((launch, target))
+    }
+
+    async fn launch_project(&self, target: &Target, project_id: &str) -> Result<Value, T3Error> {
+        let mut cursor = None;
+        loop {
+            let mut args = json!({"limit": 100});
+            if let Some(cursor) = cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let list = self
+                .call(
+                    &target.client,
+                    &target.environment_id,
+                    "t3_project_list",
+                    args,
+                )
+                .await?;
+            if let Some(project) = list["projects"].as_array().into_iter().flatten().find(|p| {
+                p["id"].as_str().is_some_and(|id| !id.is_empty())
+                    && if let Some(repo) = project_id.strip_prefix("repo:") {
+                        p.pointer("/repositoryIdentity/canonicalKey")
+                            .and_then(Value::as_str)
+                            == Some(repo)
+                    } else {
+                        p["workspaceRoot"].as_str() == Some(target.workspace.as_str())
+                    }
+            }) {
+                return Ok(project.clone());
+            }
+            let next = list["nextCursor"].as_u64();
+            if next.is_none() || next <= cursor {
+                break;
+            }
+            cursor = next;
+        }
+        let project = if project_id == DEFAULT_PROJECT {
+            target.workspace.as_str()
+        } else {
+            project_id
+        };
+        Err(T3Error::user(format!(
+            "The project {project} is missing in T3 on {}. Choose another project or machine.",
+            target.host
+        )))
     }
 
     fn is_cluster_client(&self, machine: &str) -> bool {
@@ -436,6 +497,11 @@ impl T3Hub {
 
     fn has_client(&self, machine: &str) -> bool {
         self.endpoint(machine).is_some()
+            || self
+                .clients
+                .lock()
+                .expect("clients lock")
+                .contains_key(machine)
     }
 
     fn client(&self, machine: &str) -> Result<Arc<McpClient>, T3Error> {
@@ -468,19 +534,7 @@ impl T3Hub {
     }
 
     async fn links(&self, machine: &str) -> Result<Vec<EnvironmentLink>, T3Error> {
-        let out = self
-            .call(
-                machine,
-                "",
-                "t3_environment_links",
-                Value::Object(Map::new()),
-            )
-            .await?;
-        Ok(out
-            .get("links")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default())
+        self.environment_links(machine).await
     }
 
     fn cluster_target(&self) -> Target {
@@ -858,16 +912,15 @@ impl T3Hub {
                 Value::Object(args),
             )
             .await?;
-        let launch: Launch = serde_json::from_value(raw).map_err(|_| {
-            T3Error::Other("T3 launched an agent but returned no thread link".into())
-        })?;
-        if launch.thread_id.is_empty() || launch.link.is_empty() {
-            return Err(T3Error::Other(
-                "T3 launched an agent but returned no thread link".into(),
-            ));
-        }
-        Ok(launch)
+        checked_launch(raw)
     }
+}
+
+fn checked_launch(raw: Value) -> Result<Launch, T3Error> {
+    serde_json::from_value::<Launch>(raw)
+        .ok()
+        .filter(|launch| !launch.thread_id.is_empty() && !launch.link.is_empty())
+        .ok_or_else(|| T3Error::Other("T3 launched an agent but returned no thread link".into()))
 }
 
 /// Every agent gets a new worktree from the remote's default branch; a
