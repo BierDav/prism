@@ -252,6 +252,13 @@ pub struct PlacementEntryDecision {
         skip_serializing_if = "Option::is_none"
     )]
     pub weekly_slack_sessions: Option<f64>,
+    /// Live threads can keep their cache near a reset without admitting more work.
+    #[serde(
+        rename = "acceptsNewWork",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub accepts_new_work: Option<bool>,
     /// Why a running thread on this entry is compacted in place: the entry
     /// runs into its limit on purpose (its weekly allowance still has to be
     /// spent), and the limit is close. The thread compacts on this account and

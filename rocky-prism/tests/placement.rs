@@ -603,6 +603,26 @@ fn test_session_switch_point_skips_a_close_reset() {
             Tz::UTC,
         );
         assert_eq!(dec.state, want, "session reset in {reset_minutes} min");
+        let decision = rank_placement_profile(
+            "default",
+            "Default",
+            std::slice::from_ref(&entry),
+            &PlacementPolicy::default(),
+            &[(
+                model_key(&entry.selection.instance_id, &entry.selection.model),
+                host_model,
+            )]
+            .into(),
+            &BTreeMap::new(),
+            now,
+            Tz::UTC,
+        );
+        assert_eq!(
+            decision.next, None,
+            "even near reset the entry cannot take new work"
+        );
+        let exhausted = sel("codex", "codex-2/gpt-6.2-sol");
+        assert!(placement_move_target(&decision, &exhausted).is_none());
     }
 }
 
@@ -645,8 +665,8 @@ fn test_pace_interrupts_before_a_limit_runs_out() {
         running: 2,
         burn_per_thread_per_hour: Some(30.0),
     };
-    // 15% left lasts 15 minutes: keep going.
-    let dec = paced_state((85.0, 180), (20.0, 72 * 60), 10.0, load.clone());
+    // 20% left lasts 20 minutes: keep going.
+    let dec = paced_state((80.0, 180), (20.0, 72 * 60), 10.0, load.clone());
     assert_ne!(dec.state, "over_threshold", "{}", dec.reason);
     // 8% left lasts 8 minutes, under the lead time: interrupt and compact.
     let dec = paced_state((92.0, 180), (20.0, 72 * 60), 10.0, load.clone());
@@ -670,6 +690,31 @@ fn test_pace_interrupts_before_a_limit_runs_out() {
     // Without a known pace only the session switch point applies.
     let dec = paced_state((92.0, 180), (99.2, 72 * 60), 10.0, PlacementLoad::default());
     assert_ne!(dec.state, "over_threshold", "{}", dec.reason);
+}
+
+#[test]
+fn test_burn_rate_detects_a_quota_spike_after_a_quiet_stretch() {
+    let samples: Vec<_> = [(0, 18.0), (20, 24.0), (27, 49.0), (34, 68.0)]
+        .into_iter()
+        .map(|(minute, used)| PlacementSample {
+            account: "codex-2".into(),
+            at: minute * 60,
+            used,
+            running: 2,
+        })
+        .collect();
+    let burn = compute_burn_rate(&samples, 34 * 60).expect("burst rate");
+    assert!((burn - (44.0 * 60.0) / (14.0 * 2.0)).abs() < 0.01);
+    let dec = paced_state(
+        (68.0, 150),
+        (18.0, 72 * 60),
+        10.0,
+        PlacementLoad {
+            running: 2,
+            burn_per_thread_per_hour: Some(burn),
+        },
+    );
+    assert_eq!(dec.state, "over_threshold");
 }
 
 #[test]
@@ -1919,4 +1964,108 @@ fn test_placement_waits_for_reset() {
         &policy,
         earlier
     ));
+}
+
+/// A host with hundreds of idle profile threads on an account past its switch
+/// point is asked to move them all at once, and acknowledges them all in its
+/// next request (T3 keeps every acknowledgement until a sync succeeds). That
+/// sync, and every later one, must still go through: one transaction holding
+/// every acknowledgement outgrew Rocky's statement quota and write timeout,
+/// and the host never synced again (2026-11-27, david-mb, 255 moves).
+#[tokio::test]
+async fn test_placement_sync_takes_hundreds_of_acknowledgements() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+        .await
+        .expect("open_or_create");
+    default_profile(&client).await;
+    let now = utc_dt(2026, 11, 27, 12, 10, 0).timestamp();
+    let resets_at = (utc_dt(2026, 11, 27, 12, 10, 0) + Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let model = |name: &str, used: f64| PlacementSyncModel {
+        instance_id: "claudeAgent".into(),
+        model: name.into(),
+        label: name.into(),
+        driver: String::new(),
+        hidden: false,
+        provider: String::new(),
+        reasoning: None,
+        blocked: None,
+        session: Some(PlacementWindow {
+            used_percent: used,
+            resets_at: resets_at.clone(),
+        }),
+        weekly: None,
+    };
+    let threads: Vec<PlacementSyncThread> = (0..300)
+        .map(|i| PlacementSyncThread {
+            thread_id: format!("thr-{i:03}"),
+            title: format!("Idle {i}"),
+            profile: "default".into(),
+            selection: sel("claudeAgent", "claude-david/claude-opus-5-5"),
+            running: false,
+        })
+        .collect();
+    let mut req = PlacementSyncRequest {
+        v: 1,
+        environment_id: "env-mb".into(),
+        models: vec![
+            model("claude-david/claude-opus-5-5", 99.0),
+            model("claude-1/claude-opus-5-5", 10.0),
+        ],
+        threads,
+        moves: Vec::new(),
+    };
+    let first = client
+        .sync_placement("david-mb".into(), req.clone(), now)
+        .await
+        .expect("first sync");
+    assert!(
+        first.moves.len() > 256 / 2,
+        "the host is asked to move most threads: {}",
+        first.moves.len()
+    );
+
+    // The host carried out every move but could not report back for a while,
+    // so its next request acknowledges all of them, some twice.
+    req.moves = first
+        .moves
+        .iter()
+        .chain(first.moves.iter().take(20))
+        .map(|m| PlacementMoveAck {
+            id: m.id.clone(),
+            state: "failed".into(),
+            detail: "the thread is idle".into(),
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    let second = client
+        .sync_placement("david-mb".into(), req.clone(), now + 30)
+        .await
+        .expect("a sync acknowledging every move goes through");
+    assert!(
+        second.moves.is_empty(),
+        "acknowledged moves are not asked again"
+    );
+    eprintln!(
+        "acknowledging {} moves took {:?}",
+        req.moves.len(),
+        started.elapsed()
+    );
+
+    let rows = client
+        .machine_placement_moves("david-mb".into(), 0)
+        .await
+        .expect("moves");
+    assert_eq!(rows.len(), first.moves.len());
+    assert!(rows.iter().all(|m| m.state == "failed"));
+
+    // The host sends the same acknowledgements again (its sync answer got
+    // lost): nothing new to store, and the sync still answers.
+    client
+        .sync_placement("david-mb".into(), req, now + 60)
+        .await
+        .expect("a repeated acknowledgement goes through");
+
+    client.close().await.expect("close");
 }

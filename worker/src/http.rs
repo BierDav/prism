@@ -347,7 +347,7 @@ pub(crate) async fn run_placement_sync(
     body_len: usize,
 ) -> Option<PlacementSyncResponse> {
     let now = (state.now_fn)();
-    let (threads, models) = (req.threads.len(), req.models.len());
+    let (threads, models, acks) = (req.threads.len(), req.models.len(), req.moves.len());
     let usage = match &state.usage {
         Some(source) => source.current().await,
         None => Arc::default(),
@@ -368,7 +368,7 @@ pub(crate) async fn run_placement_sync(
                 log.record_failure(machine, now, &err.to_string());
             }
             eprintln!(
-                "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {body_len} bytes): {err}",
+                "prism-worker: placement sync failed for {machine} ({threads} threads, {models} models, {acks} move acks, {body_len} bytes): {err}",
             );
             None
         }

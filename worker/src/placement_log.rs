@@ -161,11 +161,14 @@ fn sync_rows(
     for p in &resp.profiles {
         let next = model(p.next.as_ref());
         let signature = std::iter::once(next.clone())
-            .chain(
-                p.ranked
-                    .iter()
-                    .map(|d| format!("{}={}", d.selection.model, d.state)),
-            )
+            .chain(p.ranked.iter().map(|d| {
+                format!(
+                    "{}={}:{}",
+                    d.selection.model,
+                    d.state,
+                    d.accepts_new_work != Some(false)
+                )
+            }))
             .collect::<Vec<_>>()
             .join(",");
         let key = (machine.to_string(), p.id.clone());
@@ -230,6 +233,7 @@ mod tests {
             running_threads: 1,
             predicted_session_percent: None,
             weekly_slack_sessions: None,
+            accepts_new_work: None,
             compact_before_limit: None,
         }
     }
