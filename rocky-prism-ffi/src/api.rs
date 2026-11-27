@@ -851,7 +851,9 @@ impl Api {
             ));
         }
         let target = str_field(body, "target");
-        let project = str_field(body, "projectId");
+        let project = body["projectId"]
+            .as_str()
+            .unwrap_or(prism_worker::magic::DEFAULT_PROJECT);
         let model = match body.get("model") {
             Some(m) if m.is_object() => m.to_string(),
             _ => String::new(),
@@ -865,7 +867,7 @@ impl Api {
                 &target,
                 &request,
                 &model,
-                &project,
+                project,
                 &self.device,
                 now_unix(),
             )

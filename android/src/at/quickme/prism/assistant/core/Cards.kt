@@ -158,6 +158,8 @@ data class HandoffCard(
     val followUp: Boolean = false,
     /** Why the start failed; empty while it starts or once it runs. */
     val failed: String = "",
+    /** The placement profile the agent starts on, when not the default one (AgentProfile). */
+    val profile: String = "",
 ) : Card
 
 /** T3 agents listed. */

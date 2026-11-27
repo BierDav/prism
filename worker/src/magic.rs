@@ -12,6 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 pub const AUTO_CHOICE: &str = "auto";
+/// The caller omitted the project; an explicit empty ID means scratch.
+pub const DEFAULT_PROJECT: &str = "default";
+
+/// A catalog ID for a T3 project on one specific machine.
+pub fn host_project(id: &str) -> Option<(&str, &str)> {
+    let (host, project) = id.strip_prefix("host:")?.split_once('/')?;
+    (!project.is_empty()).then_some((host, project))
+}
 
 #[derive(Clone, Debug)]
 pub struct HostLoad {
@@ -74,13 +82,18 @@ pub async fn pick_machine(
     let live_metrics: BTreeMap<String, HostMetrics> = if cfg.metrics_url.is_empty() {
         BTreeMap::new()
     } else {
-        match fetch_host_metrics(cfg, secrets, now).await {
-            Ok(view) => view
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            fetch_host_metrics(cfg, secrets, now),
+        )
+        .await
+        {
+            Ok(Ok(view)) => view
                 .hosts
                 .into_iter()
                 .map(|h| (h.name.clone(), h))
                 .collect(),
-            Err(_) => BTreeMap::new(),
+            _ => BTreeMap::new(),
         }
     };
     let mut hosts = Vec::new();
@@ -152,6 +165,9 @@ pub async fn pick_project(
     catalog: &[ProjectRow],
     request: &str,
 ) -> Result<String, String> {
+    if catalog.iter().all(|p| p.project_id.is_empty()) {
+        return Ok(String::new());
+    }
     let tg = &cfg.text_generation;
     if tg.url.is_empty() || tg.model.is_empty() {
         return Err(
@@ -177,7 +193,7 @@ pub async fn pick_project(
     let user = format!("Projects (ID, name, machines):\n{list}\nTask:\n{request}");
 
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(45))
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
     let mut req = http

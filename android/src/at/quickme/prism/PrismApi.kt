@@ -153,13 +153,13 @@ object PrismApi {
     private var failure: String? = null
 
     /** The Prism API on this phone's replica, opened (again) when its settings changed. */
-    private suspend fun client(app: Context): PrismClient {
+    private suspend fun client(app: Context, waitSeconds: Int): PrismClient {
         if (Sample.on(app)) return Sample.client
         val replica = replica(app) ?: throw PrismError(
             401, "unauthorized",
             failure ?: "This phone has no Rocky provisioning yet (rocky_provisioning). Enroll it with prism-phone-enroll.",
         )
-        return replica.client(Settings.deviceName(app), prismUrl = Settings.prismUrl(app))
+        return replica.client(Settings.deviceName(app), waitSeconds = waitSeconds, prismUrl = Settings.prismUrl(app))
     }
 
     /**
@@ -234,10 +234,13 @@ object PrismApi {
      * Runs [block] against the replica, off the main thread. It throws
      * [PrismError], whose message is for the owner.
      */
-    suspend fun <T> call(c: Context, block: suspend PrismClient.() -> T): T {
+    suspend fun <T> call(c: Context, block: suspend PrismClient.() -> T): T = call(c, 20, block)
+
+    /** [waitSeconds] bounds the wait for the worker's outcome once an action is queued. */
+    internal suspend fun <T> call(c: Context, waitSeconds: Int, block: suspend PrismClient.() -> T): T {
         val app = c.applicationContext
         hold(CALL_HOLD_MS)
-        return withContext(Dispatchers.IO) { client(app).block() }
+        return withContext(Dispatchers.IO) { client(app, waitSeconds).block() }
     }
 
     /** Whether the API can answer: sample mode, or a provisioned replica. */

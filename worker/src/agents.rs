@@ -4,7 +4,7 @@
 //! catalog refresh.
 
 use crate::config::{CLUSTER_TARGET, Config};
-use crate::magic::{AUTO_CHOICE, pick_machine, pick_project};
+use crate::magic::{AUTO_CHOICE, host_project, pick_machine, pick_project};
 use crate::push::Pusher;
 use crate::t3::{Secrets, T3Hub};
 use rocky_prism::{
@@ -195,14 +195,7 @@ pub async fn process_agent_request(
     if target_name.is_empty() {
         target_name = CLUSTER_TARGET.to_string();
     }
-    if target_name == AUTO_CHOICE {
-        target_name = if cluster_only {
-            CLUSTER_TARGET.to_string()
-        } else {
-            pick_machine(client, cfg, secrets, now).await
-        };
-    }
-    if cluster_only && target_name != CLUSTER_TARGET {
+    if cluster_only && !matches!(target_name.as_str(), CLUSTER_TARGET | AUTO_CHOICE) {
         let err = format!(
             "{} works on the cluster only. Use fix or do for a machine.",
             req.task
@@ -215,7 +208,7 @@ pub async fn process_agent_request(
     }
     let mut project_id = req.project_id.clone();
     if project_id == AUTO_CHOICE {
-        let catalog = client.list_projects().await.unwrap_or_default();
+        let catalog = client.list_projects().await.map_err(|e| e.to_string())?;
         match pick_project(cfg, secrets, &catalog, &req.request_text).await {
             Ok(picked) => project_id = picked,
             Err(err) => {
@@ -226,6 +219,19 @@ pub async fn process_agent_request(
                 return Ok(());
             }
         }
+    }
+    if target_name == AUTO_CHOICE {
+        target_name = if cluster_only {
+            CLUSTER_TARGET.to_string()
+        } else if let Some((host, _)) = host_project(&project_id) {
+            if host.is_empty() {
+                CLUSTER_TARGET.into()
+            } else {
+                host.into()
+            }
+        } else {
+            pick_machine(client, cfg, secrets, now).await
+        };
     }
     let title = agent_title(&req.task, req.request_text.trim(), &target_name);
     let prompt = format!(
@@ -297,7 +303,18 @@ pub async fn process_agent_request(
                 terminal_run: String::new(),
                 terminal_seen: 0,
             };
-            let _ = client.save_agent(&agent).await;
+            client.save_agent(&agent).await.map_err(|e| e.to_string())?;
+            client
+                .finish_agent_request(
+                    &req.request_id,
+                    worker,
+                    now,
+                    &launch.thread_id,
+                    &launch.link,
+                    "",
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             let n = Notification {
                 kind: "agent.started".into(),
                 key: format!("agent.started:{}", launch.thread_id),
@@ -310,19 +327,12 @@ pub async fn process_agent_request(
                 ..Notification::default()
             };
             let _ = pusher.deliver(client, &[n], now).await;
-            client
-                .finish_agent_request(
-                    &req.request_id,
-                    worker,
-                    now,
-                    &launch.thread_id,
-                    &launch.link,
-                    "",
-                )
-                .await
-                .map_err(|e| e.to_string())?;
         }
         Err(err) => {
+            eprintln!(
+                "prism-worker: agent launch {} on {target_name} failed: {err}",
+                req.request_id
+            );
             client
                 .finish_agent_request(&req.request_id, worker, now, "", "", &err.for_owner())
                 .await
@@ -815,6 +825,116 @@ mod tests {
             request_text: text.into(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn assistant_starts_agents_in_the_requested_project_or_scratch() {
+        use crate::magic::DEFAULT_PROJECT;
+        use crate::testutil::{FakeT3, serve};
+        use rocky_prism::{RequestTable, T3SessionRow};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = PrismClient::open_or_create(dir.path().display().to_string(), None)
+            .await
+            .unwrap();
+        let cluster = FakeT3::default();
+        let mac = FakeT3::default();
+        let cfg = Arc::new(Config {
+            cluster_machine: "david-server".into(),
+            t3_url: format!("{}/mcp", serve(cluster.router()).await),
+            t3_workspace: "/srv/selfhosted-platform".into(),
+            ..Default::default()
+        });
+        let secrets: Secrets = Arc::new(|_| Some("t3-token".into()));
+        let hub = T3Hub::new(Arc::clone(&cfg), Arc::clone(&secrets));
+        hub.load_paired_sessions(&[T3SessionRow {
+            machine: "david-mb".into(),
+            origin: serve(mac.router()).await,
+            token: "t3-token".into(),
+            ..Default::default()
+        }]);
+        let pusher = Pusher::new("", "", Arc::clone(&secrets));
+        let now = 1_800_000_000;
+        let profile = r#"{"instanceId":"placement","model":"coding"}"#;
+        let request = |id: &'static str, target: &'static str, project: &'static str| {
+            let client = &client;
+            async move {
+                client
+                    .request_agent(
+                        id,
+                        "do",
+                        target,
+                        "Read the README",
+                        profile,
+                        project,
+                        "david-pixel",
+                        now,
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        // The Mac's launch first, on its own: each fake T3 numbers its
+        // threads from thread-1, so a cluster launch would reuse its ID.
+        request("host", AUTO_CHOICE, "host:david-mb/project-on-mac").await;
+        run_agent_requests(&client, &cfg, &hub, &pusher, &secrets, "w0", now, 300)
+            .await
+            .unwrap();
+        let named = client
+            .request_outcome(RequestTable::AgentRequests, "host")
+            .await
+            .unwrap()
+            .unwrap();
+        let agent = client.get_agent(&named.thread_id).await.unwrap().unwrap();
+        assert_eq!(agent.host, "david-mb");
+        for (id, target, project) in [
+            ("scratch", CLUSTER_TARGET, ""),
+            ("configured", CLUSTER_TARGET, DEFAULT_PROJECT),
+            (
+                "repo",
+                CLUSTER_TARGET,
+                "repo:gitea.quickme.at/x/selfhosted-platform",
+            ),
+            ("wrong-host", CLUSTER_TARGET, "host:david-mb/project-on-mac"),
+        ] {
+            request(id, target, project).await;
+        }
+        run_agent_requests(&client, &cfg, &hub, &pusher, &secrets, "w0", now, 300)
+            .await
+            .unwrap();
+        {
+            let mac_calls = mac.launches.lock().unwrap();
+            assert_eq!(mac_calls.len(), 1);
+            assert_eq!(mac_calls[0]["projectId"], "project-on-mac");
+            assert_eq!(mac_calls[0]["placementProfile"], "coding");
+            let cluster_calls = cluster.launches.lock().unwrap();
+            assert_eq!(cluster_calls.len(), 3);
+            assert_eq!(
+                cluster_calls
+                    .iter()
+                    .filter(|c| c["scratch"] == true)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                cluster_calls
+                    .iter()
+                    .filter(|c| c["projectId"] == "project-platform")
+                    .count(),
+                2
+            );
+        }
+        let refused = client
+            .request_outcome(RequestTable::AgentRequests, "wrong-host")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            refused.error.contains("project is on david-mb"),
+            "{}",
+            refused.error
+        );
     }
 
     #[tokio::test]

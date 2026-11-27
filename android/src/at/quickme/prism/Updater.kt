@@ -69,9 +69,37 @@ object Updater {
         }
     }
 
-    /** A check as soon as there is a network (a push, a tap, a boot). */
+    /** Asked for again while a check was queued or running: one more after it. */
+    @Volatile
+    private var again = false
+
+    /**
+     * A check as soon as there is a network (a push, a tap, a boot). Never
+     * over one already queued or running: scheduling the same job again stops
+     * a running one, and the relay pushes several changes in a row after a
+     * reconnect. Asked meanwhile, it checks once more after that one
+     * ([finished]), which then sees what changed.
+     */
     @JvmStatic
     fun checkSoon(c: Context) {
+        val js = c.getSystemService(JobScheduler::class.java)
+        if (js.getPendingJob(JOB_NOW) != null) {
+            again = true
+            return
+        }
+        again = false
+        js.schedule(
+            JobInfo.Builder(JOB_NOW, ComponentName(c, UpdateJob::class.java))
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .build(),
+        )
+    }
+
+    /** A check (UpdateJob) ended: the one more it was asked for meanwhile, if any. */
+    @JvmStatic
+    fun finished(c: Context) {
+        if (!again) return
+        again = false
         c.getSystemService(JobScheduler::class.java).schedule(
             JobInfo.Builder(JOB_NOW, ComponentName(c, UpdateJob::class.java))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)

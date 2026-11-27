@@ -19,6 +19,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
@@ -72,6 +73,11 @@ internal class VoiceInput(private val context: Context) {
     private var recognizer: SpeechRecognizer? = null
     private var onFinal: ((String) -> Unit)? = null
 
+    // For logcat's PrismLatency: when listening was asked for, and when
+    // speech ended (the recognizer heard silence, or the mic was tapped).
+    private var startedAt = 0L
+    private var endedAt = 0L
+
     fun permitted(): Boolean =
         context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
@@ -100,6 +106,8 @@ internal class VoiceInput(private val context: Context) {
             .putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
             .putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED)
         state = State.Starting
+        startedAt = SystemClock.elapsedRealtime()
+        endedAt = 0L
         try {
             r.startListening(intent)
         } catch (e: RuntimeException) {
@@ -113,6 +121,7 @@ internal class VoiceInput(private val context: Context) {
     fun stop() {
         if (state == State.Listening || state == State.Starting) {
             state = State.Thinking
+            if (endedAt == 0L) endedAt = SystemClock.elapsedRealtime()
             recognizer?.stopListening()
         }
     }
@@ -154,6 +163,7 @@ internal class VoiceInput(private val context: Context) {
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             state = State.Listening
+            Log.i(LATENCY, "recognizer ready after ${SystemClock.elapsedRealtime() - startedAt}ms")
         }
 
         override fun onBeginningOfSpeech() {
@@ -161,7 +171,7 @@ internal class VoiceInput(private val context: Context) {
         }
 
         override fun onRmsChanged(rmsdB: Float) {
-            val now = android.os.SystemClock.uptimeMillis()
+            val now = SystemClock.uptimeMillis()
             if (now - sampledAt < 50) return
             sampledAt = now
             // Recognizers report about -2 dB (silence) to 10 dB (loud speech).
@@ -172,6 +182,7 @@ internal class VoiceInput(private val context: Context) {
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onEndOfSpeech() {
+            if (endedAt == 0L) endedAt = SystemClock.elapsedRealtime()
             state = State.Thinking
             level = 0f
         }
@@ -196,6 +207,7 @@ internal class VoiceInput(private val context: Context) {
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                 ?: heard.trim()
             heard = text
+            if (endedAt > 0) Log.i(LATENCY, "text ${SystemClock.elapsedRealtime() - endedAt}ms after the end of speech")
             val deliver = onFinal
             release()
             if (text.isNotEmpty()) deliver?.invoke(text)
@@ -214,5 +226,6 @@ internal class VoiceInput(private val context: Context) {
 
     private companion object {
         const val TAG = "PrismVoice"
+        const val LATENCY = at.quickme.prism.assistant.AssistantSession.LATENCY
     }
 }

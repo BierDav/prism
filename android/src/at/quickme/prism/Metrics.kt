@@ -405,10 +405,7 @@ class MetricsJob : JobService() {
     private var worker: Thread? = null
 
     override fun onStartJob(params: JobParameters): Boolean {
-        worker = Thread({
-            val done = Metrics.push(this)
-            jobFinished(params, !done)
-        }, "metrics-push").also { it.start() }
+        worker = jobThread(params, "metrics-push", "PrismMetrics") { Metrics.push(this) }
         return true
     }
 

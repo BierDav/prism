@@ -106,9 +106,7 @@ async fn auto_join(
                 last_err = err.to_string();
             }
         }
-        eprintln!(
-            "prism-worker: waiting for {invite_url} (attempt {attempt}/30): {last_err}"
-        );
+        eprintln!("prism-worker: waiting for {invite_url} (attempt {attempt}/30): {last_err}");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     let (invitation, bootstrap_contact) = joined.ok_or_else(|| {
@@ -139,6 +137,23 @@ async fn auto_join(
     Ok(client)
 }
 
+/// Adds the configured peer contacts one by one, skipping (and logging) one
+/// this Rocky can't read, so a stale entry in `PRISM_WORKER_PEERS` never
+/// keeps a worker from starting. Rocky keeps the peers it already knows
+/// across restarts. On 2026-11-27, `PEERS` still held contacts from before the
+/// Rocky beta.4 upgrade (contact version 3), and every restarted worker
+/// crash-looped on "unsupported contact version".
+async fn add_configured_peers(client: &PrismClient, peers: Vec<String>) -> u32 {
+    let mut added = 0;
+    for (i, contact) in peers.into_iter().enumerate() {
+        match client.add_peers(vec![contact]).await {
+            Ok(n) => added += n,
+            Err(err) => eprintln!("prism-worker: skipping configured peer {i}: {err}"),
+        }
+    }
+    added
+}
+
 async fn open_from(
     data_dir: String,
     network: Network,
@@ -150,7 +165,7 @@ async fn open_from(
     let Some(invitation) = secret("PRISM_WORKER_INVITATION") else {
         let client = PrismClient::open_or_create(data_dir, Some(network)).await?;
         if !peers.is_empty() {
-            let added = client.add_peers(peers).await?;
+            let added = add_configured_peers(&client, peers).await;
             eprintln!(
                 "prism-worker: opened as node {}, {added} peer(s)",
                 client.node().await?
@@ -191,7 +206,10 @@ mod tests {
         let creator = open_from(creator_dir, loopback().await, env(BTreeMap::new()))
             .await
             .expect("creator");
-        let invitation = creator.invite(Some("prism-worker-1")).await.expect("invite");
+        let invitation = creator
+            .invite(Some("prism-worker-1"))
+            .await
+            .expect("invite");
         let contact = creator.contact().await.expect("contact");
 
         let joiner_dir = dir.path().join("joiner").display().to_string();
@@ -209,5 +227,33 @@ mod tests {
         assert_eq!(second.node().await.expect("node"), node);
         second.close().await.expect("close");
         creator.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn a_stale_peer_contact_does_not_stop_the_worker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let other = open_from(
+            dir.path().join("other").display().to_string(),
+            loopback().await,
+            env(BTreeMap::new()),
+        )
+        .await
+        .expect("other");
+        let contact = other.contact().await.expect("contact");
+        // A contact as minted before Rocky beta.4 (version 3).
+        let stale = format!(
+            "rocky://peer/{}",
+            data_encoding::BASE64URL_NOPAD.encode(br#"{"v":3,"node":"00","routes":[]}"#)
+        );
+        let vars = BTreeMap::from([("PRISM_WORKER_PEERS", format!("{stale}\n{contact}"))]);
+        let worker = open_from(
+            dir.path().join("worker").display().to_string(),
+            loopback().await,
+            env(vars),
+        )
+        .await
+        .expect("a stale contact is skipped");
+        worker.close().await.expect("close");
+        other.close().await.expect("close");
     }
 }

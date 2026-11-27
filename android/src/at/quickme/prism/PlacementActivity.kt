@@ -137,6 +137,7 @@ private fun PlacementHost(page: String, profileId: String, onBack: () -> Unit) {
     val error = state.error
     val saving = state.saving
     var assistant by remember { mutableStateOf(AssistantProfile.get(context)) }
+    var agents by remember { mutableStateOf(AgentProfile.get(context)) }
 
     if (page == "profile" && profileId.isNotEmpty()) {
         val profile = placement?.profiles?.firstOrNull { it.id == profileId }
@@ -174,6 +175,11 @@ private fun PlacementHost(page: String, profileId: String, onBack: () -> Unit) {
             onAssistant = { id ->
                 AssistantProfile.set(context, id)
                 assistant = id
+            },
+            agents = agents,
+            onAgents = { id ->
+                AgentProfile.set(context, id)
+                agents = id
             },
         )
     }
@@ -652,7 +658,7 @@ private fun PickRow(title: String, detail: String, icon: @Composable () -> Unit,
     }
 }
 
-/** Actions page: Alert fixes, Text generation, the assistant, and Recent moves. */
+/** Actions page: Alert fixes, Text generation, the assistant and its agents, and Recent moves. */
 @Composable
 internal fun PlacementActionsContent(
     placement: Placement?,
@@ -662,9 +668,12 @@ internal fun PlacementActionsContent(
     onReload: () -> Unit,
     onAlertFix: (String) -> Unit,
     onTextGeneration: (String?) -> Unit,
-    /** The assistant overlay's profile on this phone (AssistantProfile), null: the default model. */
+    /** The profile the assistant overlay runs on, on this phone (AssistantProfile); null: none picked yet. */
     assistant: String? = null,
     onAssistant: (String?) -> Unit = {},
+    /** The profile the T3 agents the assistant starts run on by default (AgentProfile); null: none picked yet. */
+    agents: String? = null,
+    onAgents: (String?) -> Unit = {},
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -749,12 +758,21 @@ internal fun PlacementActionsContent(
                     )
                     ProfileDropdown(
                         label = "Assistant",
-                        supporting = "Agents the assistant overlay starts on this phone; Prism picks the machine and project.",
+                        supporting = "The assistant overlay on this phone answers with this profile's best model.",
                         profiles = placement.profiles,
                         selectedId = assistant,
-                        noneLabel = "Default model",
+                        noneLabel = null,
                         enabled = placement.profiles.isNotEmpty(),
-                        onPick = onAssistant,
+                        onPick = { id -> if (id != null) onAssistant(id) },
+                    )
+                    ProfileDropdown(
+                        label = "Assistant's agents",
+                        supporting = "T3 agents the assistant starts, unless you name another profile; Prism picks the machine and project.",
+                        profiles = placement.profiles,
+                        selectedId = agents,
+                        noneLabel = null,
+                        enabled = placement.profiles.isNotEmpty(),
+                        onPick = { id -> if (id != null) onAgents(id) },
                     )
                 }
             }

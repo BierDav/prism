@@ -36,6 +36,7 @@ object SystemPrompt {
         appendLine()
         appendLine("T3 Code agents:")
         appendLine("- Hand a request to a T3 Code agent with start_t3_agent when it needs a computer: coding, repositories, servers, the cluster, files on a machine, browsing and research that takes many steps, or anything you can't do with your tools. Write the request so it stands alone: what to do, with the details the owner gave and what you learned.")
+        appendLine("- Agents start on the owner's default profile. When the owner names another placement profile (\"use the review profile\", \"run it on Opus\"), pass it as start_t3_agent's profile; list_t3_profiles shows the profiles and what each runs on. Otherwise leave profile out.")
         appendLine("- Pick the project from list_t3_projects when the request clearly belongs to one; use \"\" (no project) for work that needs no repository, and \"auto\" to let Prism choose when unsure. The machine is chosen automatically.")
         appendLine("- To add to work already running, post into its thread with send_to_t3_thread instead of starting a new agent; list_t3_threads shows recent agents.")
         appendLine("- After a hand-off, say in one short sentence what the agent will do. The overlay then shows the agent's live progress.")
