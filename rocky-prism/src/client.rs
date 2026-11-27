@@ -352,11 +352,14 @@ impl PrismClient {
             })
             .collect();
         let models_json = serde_json::to_string(&catalog).map_err(storage_err)?;
-        let acks: Vec<&crate::types::PlacementMoveAck> = req
-            .moves
-            .iter()
-            .filter(|a| !a.id.is_empty() && (a.state == "continued" || a.state == "failed"))
-            .collect();
+        // T3 keeps every acknowledgement until a sync goes through and then
+        // sends them all at once: after one move per idle thread that is
+        // hundreds. Each one is stored once (a resent one, or one repeated in
+        // the request, adds no row), in transactions of its own of at most
+        // MOVE_ACKS_PER_WRITE, so the report write stays small and no
+        // transaction outgrows Rocky's statement quota or write timeout.
+        let acks = self.new_move_acks(&machine, &req.moves).await?;
+        self.write_move_acks(&machine, &acks, now_unix).await?;
         // Every write here replicates to every worker, phone and Mac, and a
         // replica refuses reads and new rows while it applies synced changes
         // (`Incomplete`). So an unchanged report rewrites nothing, and only
@@ -386,11 +389,7 @@ impl PrismClient {
         });
         let changed_models = same_threads.filter(|s| s.models_json != models_json);
         let refresh = same_threads.filter(|s| now_unix - s.seen_at >= HOST_SEEN_REFRESH_SECS);
-        if !acks.is_empty()
-            || same_threads.is_none()
-            || changed_models.is_some()
-            || refresh.is_some()
-        {
+        if same_threads.is_none() || changed_models.is_some() || refresh.is_some() {
             let machine_w = machine.clone();
             let env_id_w = req.environment_id.clone();
             let write_full = same_threads.is_none();
@@ -398,17 +397,16 @@ impl PrismClient {
             let refresh_id = refresh.map(|s| s.id.clone());
             self.db
                 .write(async move |tx| {
-                    for ack in &acks {
-                        let aid = tx.next_id("move_acks").await?;
-                        tx.execute(
-                            "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
-                            params![aid, ack.id.clone(), machine_w.clone(), ack.state.clone(), now_unix],
+                    if write_full {
+                        write_report_tx(
+                            tx,
+                            &machine_w,
+                            &env_id_w,
+                            &models_json,
+                            &threads,
+                            now_unix,
                         )
                         .await?;
-                    }
-                    if write_full {
-                        write_report_tx(tx, &machine_w, &env_id_w, &models_json, &threads, now_unix)
-                            .await?;
                     } else if let Some(id) = changed_id {
                         // Usage and catalog changes don't invalidate the thread snapshot.
                         tx.execute(
@@ -790,28 +788,16 @@ impl PrismClient {
         {
             // Rocky limits a single write transaction to 256 SQL statements;
             // chunk acks and move inserts so large hosts never hit the quota.
-            let closed: Vec<(String, &'static str)> = moves_to_drop
+            let closed: Vec<(String, String)> = moves_to_drop
                 .into_iter()
-                .map(|id| (id, "dropped"))
-                .chain(moves_to_continue.into_iter().map(|id| (id, "continued")))
+                .map(|id| (id, "dropped".to_string()))
+                .chain(
+                    moves_to_continue
+                        .into_iter()
+                        .map(|id| (id, "continued".to_string())),
+                )
                 .collect();
-            for chunk in closed.chunks(100) {
-                let chunk = chunk.to_vec();
-                let machine_w = machine.clone();
-                self.db
-                    .write(async move |tx| {
-                        for (id, state) in chunk {
-                            let aid = tx.next_id("move_acks").await?;
-                            tx.execute(
-                                "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
-                                params![aid, id, machine_w.clone(), state, now_unix],
-                            )
-                            .await?;
-                        }
-                        Ok::<_, PrismError>(())
-                    })
-                    .await?;
-            }
+            self.write_move_acks(&machine, &closed, now_unix).await?;
             for chunk in moves_to_insert.chunks(64) {
                 let chunk = chunk.to_vec();
                 self.db
@@ -1983,6 +1969,65 @@ impl PrismClient {
         Ok(out)
     }
 
+    /// The acknowledgements in `moves` that change what is stored for
+    /// `machine`: one per move id (the last the request names), and none
+    /// whose move already has that state.
+    async fn new_move_acks(
+        &self,
+        machine: &str,
+        moves: &[crate::types::PlacementMoveAck],
+    ) -> Result<Vec<(String, String)>, PrismError> {
+        let mut by_id: BTreeMap<&str, &str> = BTreeMap::new();
+        for ack in moves {
+            if !ack.id.is_empty() && (ack.state == "continued" || ack.state == "failed") {
+                by_id.insert(&ack.id, &ack.state);
+            }
+        }
+        if by_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stored = self.move_ack_states().await?;
+        Ok(by_id
+            .into_iter()
+            .filter(|(id, state)| {
+                stored
+                    .get(&(machine.to_string(), (*id).to_string()))
+                    .map(String::as_str)
+                    != Some(*state)
+            })
+            .map(|(id, state)| (id.to_string(), state.to_string()))
+            .collect())
+    }
+
+    /// Stores `(move id, state)` acknowledgements for `machine`, at most
+    /// [`MOVE_ACKS_PER_WRITE`] per transaction. A write that fails leaves the
+    /// earlier ones stored; the retry skips them ([`Self::new_move_acks`]).
+    async fn write_move_acks(
+        &self,
+        machine: &str,
+        acks: &[(String, String)],
+        now_unix: i64,
+    ) -> Result<(), PrismError> {
+        for chunk in acks.chunks(MOVE_ACKS_PER_WRITE) {
+            let chunk = chunk.to_vec();
+            let machine = machine.to_string();
+            self.db
+                .write(async move |tx| {
+                    for (id, state) in chunk {
+                        let aid = tx.next_id("move_acks").await?;
+                        tx.execute(
+                            "INSERT INTO move_acks (id, instruction_id, host, state, at) VALUES (?, ?, ?, ?, ?)",
+                            params![aid, id, machine.clone(), state, now_unix],
+                        )
+                        .await?;
+                    }
+                    Ok::<_, PrismError>(())
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Returns the acknowledged state per (host, move id): the latest by time,
     /// ties broken by the larger Rocky id.
     async fn move_ack_states(&self) -> Result<BTreeMap<(String, String), String>, PrismError> {
@@ -2411,6 +2456,9 @@ struct HostReport {
 /// How often an unchanged host report refreshes its `seen_at`. Reports count
 /// as fresh for PLACEMENT_FRESH_REPORT_SECS (3 minutes).
 const HOST_SEEN_REFRESH_SECS: i64 = 60;
+/// Move acknowledgements stored per write transaction: two statements each,
+/// well inside Rocky's 256 statements and its 5-second write timeout.
+const MOVE_ACKS_PER_WRITE: usize = 64;
 
 /// One `threads` row as a placement sync stores it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
