@@ -236,6 +236,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
         "A cluster node is down or not ready",
     ),
     (
+        "NodeMissing",
+        "Cluster nodes",
+        "A cluster host is gone from Kubernetes",
+    ),
+    (
         "NodeMemoryLow",
         "Cluster nodes",
         "A node is running low on memory",
