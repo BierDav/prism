@@ -87,6 +87,24 @@ spec:
       port: 8080
       targetPort: http
 ---
+# Rocky must be able to replicate a schema update even when all workers
+# are unready for application requests.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prism-worker-replication
+  namespace: monitoring
+  labels:
+    app: prism-worker
+spec:
+  publishNotReadyAddresses: true
+  selector:
+    app: prism-worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -348,6 +366,13 @@ spec:
     - host: prism.quickme.at
       http:
         paths:
+          - path: /rocky
+            pathType: Prefix
+            backend:
+              service:
+                name: prism-worker-replication
+                port:
+                  number: 8080
           - path: /
             pathType: Prefix
             backend:

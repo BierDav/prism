@@ -1,6 +1,6 @@
 use prism_worker::http::{self, AppState, router};
 use prism_worker::rocky_route::{RockyRoute, valid_node};
-use prism_worker::{auth, config, leader, lease, provision, t3};
+use prism_worker::{auth, config, leader, lease, provision};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -82,24 +82,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         PathBuf::from(&data_dir),
     ));
     let cfg = Arc::new(config::Config::load_from_env()?);
-    let leader = start_leader(&client, Arc::clone(&cfg), &route.node)?;
     let state = AppState::new(Arc::clone(&client), event_key);
-    let app = router(
-        state
-            .with_node(route.node.clone())
-            .with_peer_http(peer_http)
-            .with_rocky(route)
-            .with_config(cfg)
-            .with_data_dir(data_dir.into())
-            .with_alerts_token(auth::secret("PRISM_ALERTS_TOKEN"))
-            .with_eligibility(leader.eligible.clone()),
-    );
+    let state = state
+        .with_node(route.node.clone())
+        .with_peer_http(peer_http)
+        .with_rocky(route)
+        .with_config(cfg)
+        .with_data_dir(data_dir.into())
+        .with_alerts_token(auth::secret("PRISM_ALERTS_TOKEN"));
+    let leader = start_leader(&state)?;
+    let usage_task = state.usage.as_ref().map(|source| {
+        let source = Arc::clone(source);
+        tokio::spawn(async move { source.observe().await })
+    });
+    let app = router(state.with_eligibility(leader.eligible.clone()));
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
 
+    if let Some(task) = usage_task {
+        task.abort();
+    }
     leader.shutdown().await;
     if let Ok(client) = Arc::try_unwrap(client) {
         let _ = client.close().await;
@@ -109,14 +114,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 fn start_leader(
-    client: &Arc<rocky_prism::PrismClient>,
-    cfg: Arc<config::Config>,
-    node: &str,
+    state: &AppState,
 ) -> Result<leader::Leader, Box<dyn std::error::Error + Send + Sync>> {
-    let secrets: t3::Secrets = Arc::new(auth::secret);
-    let work = leader::LeaderWork::new(Arc::clone(client), cfg, node.to_string(), secrets);
+    let mut work = leader::LeaderWork::new(
+        Arc::clone(&state.client),
+        Arc::clone(&state.cfg),
+        state.node.clone(),
+        Arc::clone(&state.secrets),
+    );
+    work.usage = state.usage.clone();
     Ok(leader::Leader::start(
         work,
-        lease::LeaseConfig::from_env(node),
+        lease::LeaseConfig::from_env(&state.node),
     )?)
 }

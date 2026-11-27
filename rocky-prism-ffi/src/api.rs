@@ -171,7 +171,9 @@ impl From<PrismError> for ApiError {
             PrismError::InvalidInput(m) => Self::invalid(m),
             PrismError::Conflict(m) => Self::conflict(m),
             PrismError::NotFound => Self::not_found(),
-            PrismError::Storage(m) => Self::unavailable(format!("The replica failed: {m}")),
+            PrismError::Storage(m) | PrismError::SchemaMismatch(m) => {
+                Self::unavailable(format!("The replica failed: {m}"))
+            }
             PrismError::Unavailable(m) => Self {
                 status: 503,
                 code: BUSY,

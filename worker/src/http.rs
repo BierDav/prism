@@ -51,9 +51,6 @@ pub struct AppState {
     /// Where `GET /v1/machines/metrics` reads host metrics from ClickHouse,
     /// when configured.
     pub metrics: Option<Arc<crate::metrics::HostMetricsSource>>,
-    /// How often a placement stream ranks its host's last report again
-    /// (`placement_stream.rs`).
-    pub placement_push_every: std::time::Duration,
 }
 
 pub type PeerHttp = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -75,7 +72,6 @@ impl AppState {
             placement_log: None,
             usage: None,
             metrics: None,
-            placement_push_every: crate::placement_stream::PUSH_CHECK_EVERY,
         }
     }
 
@@ -87,12 +83,6 @@ impl AppState {
     #[cfg(test)]
     pub fn with_secrets(mut self, secrets: crate::t3::Secrets) -> Self {
         self.secrets = secrets;
-        self
-    }
-
-    #[cfg(test)]
-    pub fn with_placement_push_every(mut self, every: std::time::Duration) -> Self {
-        self.placement_push_every = every;
         self
     }
 
@@ -330,7 +320,7 @@ async fn placement_sync(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid JSON").into_response(),
     };
 
-    match run_placement_sync(&state, &machine, req, body.len()).await {
+    match run_placement_sync(&state, &machine, req, Some(body.len())).await {
         Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
         None => (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
     }
@@ -344,19 +334,28 @@ pub(crate) async fn run_placement_sync(
     state: &AppState,
     machine: &str,
     req: PlacementSyncRequest,
-    body_len: usize,
+    body_len: Option<usize>,
 ) -> Option<PlacementSyncResponse> {
     let now = (state.now_fn)();
     let (threads, models, acks) = (req.threads.len(), req.models.len(), req.moves.len());
     let usage = match &state.usage {
-        Some(source) => source.current().await,
+        Some(source) if body_len.is_some() => source.current().await,
+        Some(source) => source.latest(),
         None => Arc::default(),
     };
-    match state
-        .client
-        .sync_placement_with_usage(machine.to_string(), req, now, &usage)
-        .await
-    {
+    let result = if body_len.is_some() {
+        state
+            .client
+            .sync_placement_with_usage(machine.to_string(), req, now, &usage)
+            .await
+    } else {
+        state
+            .client
+            .refresh_placement(machine.to_string(), req, now, &usage)
+            .await
+    };
+    let body_len = body_len.unwrap_or(0);
+    match result {
         Ok(resp) => {
             if let Some(log) = &state.placement_log {
                 log.record_sync(machine, now, &resp);

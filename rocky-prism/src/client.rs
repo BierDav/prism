@@ -89,6 +89,7 @@ pub struct PrismClient {
     /// that have no single-account ClickHouse row), kept in memory so a host
     /// that reports no usage inherits another host's recent reading.
     host_usage: std::sync::Mutex<BTreeMap<String, (i64, PlacementUsageReading)>>,
+    placement_usage_changed: tokio::sync::watch::Sender<()>,
     /// Serialises this process's writes of assistant conversations.
     pub(crate) assistant_lock: tokio::sync::Mutex<()>,
 }
@@ -208,6 +209,7 @@ impl PrismClient {
             events_lock: tokio::sync::Mutex::new(()),
             samples: std::sync::Mutex::default(),
             host_usage: std::sync::Mutex::default(),
+            placement_usage_changed: tokio::sync::watch::channel(()).0,
             assistant_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -330,6 +332,23 @@ impl PrismClient {
         .await
     }
 
+    pub fn placement_usage_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.placement_usage_changed.subscribe()
+    }
+
+    /// Re-ranks a connected host without writing its cached report back over a newer one.
+    pub async fn refresh_placement(
+        &self,
+        machine: String,
+        req: PlacementSyncRequest,
+        now_unix: i64,
+        usage: &UsageByAccount,
+    ) -> Result<PlacementSyncResponse, PrismError> {
+        let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
+        self.after_report(machine, req, now_unix, now_time, usage, false)
+            .await
+    }
+
     async fn sync_placement_once(
         &self,
         machine: String,
@@ -430,7 +449,7 @@ impl PrismClient {
                 })
                 .await?;
         }
-        self.after_report(machine, req, now_unix, now_time, usage)
+        self.after_report(machine, req, now_unix, now_time, usage, true)
             .await
     }
 }
@@ -502,6 +521,7 @@ impl PrismClient {
         now_unix: i64,
         now_time: DateTime<Utc>,
         usage: &UsageByAccount,
+        fresh_report: bool,
     ) -> Result<PlacementSyncResponse, PrismError> {
         // 2. Load fresh reports (< 3m) for fleet-wide running counts and optionId fallbacks.
         let fresh_since = now_unix - PLACEMENT_FRESH_REPORT_SECS;
@@ -530,22 +550,26 @@ impl PrismClient {
         // cache + the replicated usage snapshot.
         let shared_host_usage = {
             let mut cache = self.host_usage.lock().expect("host_usage");
-            for m in &req.models {
-                if m.session.is_some() || m.weekly.is_some() {
-                    let k = model_key(&m.instance_id, &m.model);
-                    cache.insert(
-                        k,
-                        (
-                            now_unix,
-                            PlacementUsageReading {
-                                session: m.session.clone(),
-                                weekly: m.weekly.clone(),
-                            },
-                        ),
-                    );
+            let mut changed = false;
+            if fresh_report {
+                for m in &req.models {
+                    if m.session.is_some() || m.weekly.is_some() {
+                        let key = model_key(&m.instance_id, &m.model);
+                        let reading = PlacementUsageReading {
+                            session: m.session.clone(),
+                            weekly: m.weekly.clone(),
+                        };
+                        changed |= cache.get(&key).is_none_or(|(_, old)| {
+                            old.session != reading.session || old.weekly != reading.weekly
+                        });
+                        cache.insert(key, (now_unix, reading));
+                    }
                 }
             }
             cache.retain(|_, (at, _)| now_unix - *at <= USAGE_FRESH_SECS);
+            if changed {
+                self.placement_usage_changed.send_replace(());
+            }
             cache.clone()
         };
         let snapshot_fallback = self
@@ -745,7 +769,9 @@ impl PrismClient {
 
         for t in &req.threads {
             if let Some(asked) = asked_by_thread.get(&t.thread_id) {
-                if same_placement_entry(&t.selection, &asked.to) {
+                if !same_placement_entry(&asked.from, &asked.to)
+                    && same_placement_entry(&t.selection, &asked.to)
+                {
                     if let Some(open) = open_by_thread.get(&t.thread_id) {
                         moves_to_continue.extend(open.iter().cloned());
                     }
@@ -2565,14 +2591,15 @@ fn same_threads(a: &[StoredThread], b: &[StoredThread]) -> bool {
 
 pub(crate) fn storage_err<E: std::fmt::Display + 'static>(err: E) -> PrismError {
     let any: &dyn std::any::Any = &err;
-    if any
-        .downcast_ref::<rocky_sdk::Error>()
-        .is_some_and(rocky_sdk::Error::retryable)
-    {
-        PrismError::Unavailable(err.to_string())
-    } else {
-        PrismError::Storage(err.to_string())
+    if let Some(error) = any.downcast_ref::<rocky_sdk::Error>() {
+        if matches!(error.kind(), rocky_sdk::ErrorKind::SchemaMismatch { .. }) {
+            return PrismError::SchemaMismatch(error.to_string());
+        }
+        if error.retryable() {
+            return PrismError::Unavailable(error.to_string());
+        }
     }
+    PrismError::Storage(err.to_string())
 }
 
 /// How long `retry_unavailable` keeps trying: Rocky refuses new rows while it

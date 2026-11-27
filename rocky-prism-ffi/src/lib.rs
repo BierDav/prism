@@ -72,7 +72,9 @@ impl From<PrismError> for ReplicaError {
             PrismError::InvalidInput(m) => Self::InvalidInput(m),
             PrismError::Conflict(m) => Self::Conflict(m),
             PrismError::NotFound => Self::NotFound,
-            PrismError::Storage(m) | PrismError::Unavailable(m) => Self::Storage(m),
+            PrismError::Storage(m) | PrismError::SchemaMismatch(m) | PrismError::Unavailable(m) => {
+                Self::Storage(m)
+            }
         }
     }
 }

@@ -206,18 +206,17 @@ timed out.
 
 The schema (`rocky-prism/src/schema.rs`) carries a version
 (`SCHEMA_VERSION`). Adding a table, or a column with a default, is additive:
-raise the version and add it, with no migration. Every Prism device is an
-issuer, so the first one that opens its replica with the new version
-publishes it (a `continue` seal) and writes to the new tables at once; every
-other replica follows it when it syncs, and one still running the older
-version keeps working with the tables it knows ("behind"), its writes
-replayed after the seal. Removing or retyping a column, or anything that
-rewrites rows, needs a migration and a confirmed rollout; avoid it.
+raise the version and add it, with no data migration. A Rocky issuer
+publishes the new version when it opens its replica with the new schema.
+Other replicas follow when they sync. A replica running the older
+application can keep serving the tables it knows if the change is
+additive. Removing or retyping a column needs a confirmed rollout.
 
-Version 2 added the assistant's tables. Deploy the worker image first, so a
-worker publishes the version (it reaches every replica), then the app and the
-Mac app. The other order works too: the phone publishes it and the workers
-follow.
+Upgrade a verified issuer first and confirm the new schema has reached the
+workers before deploying the new worker image. A worker running a newer
+application against an older schema cannot serve requests and is marked
+unready. If that happens during a rollout, pin the last compatible worker
+image until the issuer publishes and replicates the new schema.
 
 ## Workers scaling out
 

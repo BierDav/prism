@@ -45,6 +45,7 @@ pub struct UsageSource {
     password: Option<String>,
     http: reqwest::Client,
     last: tokio::sync::Mutex<Option<(Instant, Arc<UsageByAccount>)>>,
+    changes: tokio::sync::watch::Sender<Arc<UsageByAccount>>,
 }
 
 impl UsageSource {
@@ -65,7 +66,30 @@ impl UsageSource {
             password: secrets("PRISM_METRICS_PASSWORD").filter(|p| !p.is_empty()),
             http,
             last: tokio::sync::Mutex::new(None),
+            changes: tokio::sync::watch::channel(Arc::default()).0,
         }))
+    }
+
+    pub fn latest(&self) -> Arc<UsageByAccount> {
+        Arc::clone(&self.changes.borrow())
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<UsageByAccount>> {
+        self.changes.subscribe()
+    }
+
+    /// One refresh loop per worker, independent of the number of connected hosts.
+    pub async fn observe(&self) {
+        loop {
+            self.current().await;
+            tokio::time::sleep(REFRESH_EVERY).await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn refresh_for_test(&self) {
+        *self.last.lock().await = None;
+        self.current().await;
     }
 
     /// The latest readings, read again once [`REFRESH_EVERY`] passed. One
@@ -81,6 +105,13 @@ impl UsageSource {
         match self.read().await {
             Ok(usage) => {
                 let usage = Arc::new(usage);
+                self.changes.send_if_modified(|previous| {
+                    if **previous == *usage {
+                        return false;
+                    }
+                    *previous = Arc::clone(&usage);
+                    true
+                });
                 *last = Some((Instant::now(), Arc::clone(&usage)));
                 usage
             }

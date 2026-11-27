@@ -6,7 +6,7 @@
 //! - The host calls `placement.sync` with the body of
 //!   `POST /v1/placement/sync`; the result is that endpoint's answer.
 //! - Prism keeps the host's last report (without its move
-//!   acknowledgements) and ranks it again every [`PUSH_CHECK_EVERY`] while
+//!   acknowledgements) and ranks it when observed inputs change while
 //!   it is at most [`REPORT_FRESH_FOR`] old. When the answer differs from
 //!   the last one the host got (`checkedAt` aside), Prism sends it as the
 //!   notification `placement.update`: a changed profile, policy or action,
@@ -35,10 +35,6 @@ use tokio::sync::Notify;
 
 /// The WebSocket subprotocol this endpoint speaks.
 pub const SUBPROTOCOL: &str = "jsonrpc-2.0";
-/// How often a connection ranks its host's last report again for time-based
-/// or ClickHouse usage changes; Rocky table changes wake it immediately via
-/// [`PLACEMENT_OBSERVE_TABLES`].
-pub const PUSH_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// Rocky tables whose changes can alter a host's [`PlacementSyncResponse`].
 const PLACEMENT_OBSERVE_TABLES: &[&str] = &[
     "profiles",
@@ -115,7 +111,7 @@ async fn push_if_changed(state: &AppState, machine: &str, stream: &mut Stream) -
     if at.elapsed() > REPORT_FRESH_FOR {
         return None;
     }
-    let resp = run_placement_sync(state, machine, req.clone(), 0).await?;
+    let resp = run_placement_sync(state, machine, req.clone(), None).await?;
     stream
         .note_sent(&resp)
         .then(|| json!({"jsonrpc": "2.0", "method": METHOD_UPDATE, "params": resp}))
@@ -125,7 +121,9 @@ async fn serve(state: AppState, machine: String, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut stream = Stream::default();
     let changed = Arc::new(Notify::new());
-    let observer = {
+    let mut host_usage = state.client.placement_usage_changes();
+    let mut gateway_usage = state.usage.as_ref().map(|usage| usage.subscribe());
+    let mut observer = {
         let client = Arc::clone(&state.client);
         let notify = Arc::clone(&changed);
         let tables: Vec<String> = PLACEMENT_OBSERVE_TABLES
@@ -136,13 +134,12 @@ async fn serve(state: AppState, machine: String, socket: WebSocket) {
             let Ok(mut events) = client.observe(Some(tables)).await else {
                 return;
             };
+            notify.notify_one();
             while events.next().await.is_ok() {
                 notify.notify_one();
             }
         })
     };
-    let mut push = tokio::time::interval(state.placement_push_every);
-    push.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut heard = Instant::now();
@@ -165,10 +162,19 @@ async fn serve(state: AppState, machine: String, socket: WebSocket) {
                     Message::Ping(_) | Message::Pong(_) => None,
                 }
             }
+            _ = &mut observer => break,
             _ = changed.notified() => {
                 push_if_changed(&state, &machine, &mut stream).await
             }
-            _ = push.tick() => {
+            Ok(()) = host_usage.changed() => {
+                push_if_changed(&state, &machine, &mut stream).await
+            }
+            Ok(()) = async {
+                match gateway_usage.as_mut() {
+                    Some(usage) => usage.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 push_if_changed(&state, &machine, &mut stream).await
             }
             _ = ping.tick() => {
@@ -245,9 +251,8 @@ async fn handle(state: &AppState, machine: &str, stream: &mut Stream, text: &str
         moves: Vec::new(),
         ..req.clone()
     };
-    let Some(resp) = run_placement_sync(state, machine, req, text.len()).await else {
-        // The host now reports over the POST, maybe to another worker: ranking the
-        // report kept here again would write it back over the newer one.
+    let Some(resp) = run_placement_sync(state, machine, req, Some(text.len())).await else {
+        // The host can fall back to HTTP, so stop issuing moves from this report.
         stream.report = None;
         return reply(Err((SYNC_FAILED, "Placement sync failed; try again.")));
     };
@@ -283,8 +288,7 @@ mod tests {
                 .await
                 .expect("open_or_create"),
         );
-        let state = AppState::new(Arc::clone(&client), Some(KEY.to_vec()))
-            .with_placement_push_every(Duration::from_millis(50));
+        let state = AppState::new(Arc::clone(&client), Some(KEY.to_vec()));
         let base = serve(router(state)).await;
         (dir, client, base.replacen("http://", "ws://", 1))
     }
@@ -480,9 +484,7 @@ mod tests {
                 .await
                 .expect("open_or_create"),
         );
-        // Set the fallback poll timer far out so only Rocky `observe` can wake the push.
-        let state = AppState::new(Arc::clone(&client), Some(KEY.to_vec()))
-            .with_placement_push_every(Duration::from_secs(60));
+        let state = AppState::new(Arc::clone(&client), Some(KEY.to_vec()));
         let base = serve(router(state)).await.replacen("http://", "ws://", 1);
         let token = machine_token(KEY, "david-mb").expect("token");
         let mut socket = connect(&base, Some(&token)).await.expect("connect");
@@ -516,7 +518,7 @@ mod tests {
             .expect("put profile");
         let update = tokio::time::timeout(Duration::from_secs(3), next(&mut socket))
             .await
-            .expect("pushed via observe before fallback timer");
+            .expect("pushed via observe without another host report");
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "expected immediate push, took {:?}",
@@ -524,5 +526,97 @@ mod tests {
         );
         assert_eq!(update["method"], METHOD_UPDATE);
         assert_eq!(update["params"]["profiles"][0]["id"], "fast");
+    }
+    #[tokio::test]
+    async fn pushes_and_keeps_a_compaction_until_the_host_acknowledges_it() {
+        use crate::config::Config;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(
+            PrismClient::open_or_create(dir.path().display().to_string(), None)
+                .await
+                .unwrap(),
+        );
+        let now = chrono::Utc::now().timestamp();
+        client
+            .put_placement_profile(
+                "fast".into(),
+                PutPlacementProfileRequest {
+                    label: "Fast".into(),
+                    entries: vec![PutPlacementEntryInput {
+                        instance_id: "claudeAgent".into(),
+                        model: "claude-david/claude-opus-5-5".into(),
+                        reasoning: String::new(),
+                        enabled: true,
+                        session_share_of_weekly: None,
+                    }],
+                },
+                now,
+            )
+            .await
+            .unwrap();
+
+        let used = Arc::new(AtomicU32::new(42));
+        let reading = Arc::clone(&used);
+        let metrics = serve(axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let used = reading.load(Ordering::Relaxed);
+                async move {
+                    json!({
+                        "account": "claude-david", "window": "five_hour", "used": used,
+                        "reset": now + 3600, "observed": now,
+                    })
+                    .to_string()
+                }
+            }),
+        ))
+        .await;
+        let state =
+            AppState::new(Arc::clone(&client), Some(KEY.to_vec())).with_config(Arc::new(Config {
+                usage_url: metrics,
+                ..Config::default()
+            }));
+        let usage = Arc::clone(state.usage.as_ref().unwrap());
+        let base = serve(router(state)).await.replacen("http://", "ws://", 1);
+        let token = machine_token(KEY, "david-mb").unwrap();
+        let mut socket = connect(&base, Some(&token)).await.unwrap();
+        let mut report = report();
+        let selection =
+            json!({"instanceId": "claudeAgent", "model": "claude-david/claude-opus-5-5"});
+        report["threads"] = json!([{
+            "threadId": "active", "title": "Active", "profile": "fast",
+            "selection": selection, "running": true
+        }]);
+        let sync = |id, params| json!({"jsonrpc": "2.0", "method": METHOD_SYNC, "id": id, "params": params});
+        call(&mut socket, sync(1, report.clone())).await;
+        let initial = next(&mut socket).await;
+        assert_eq!(initial["result"]["moves"], json!([]));
+
+        used.store(97, Ordering::Relaxed);
+        usage.refresh_for_test().await;
+        let update = next(&mut socket).await;
+        assert_eq!(update["method"], METHOD_UPDATE);
+        let instruction = &update["params"]["moves"][0];
+        assert_eq!(instruction["from"], selection);
+        assert_eq!(instruction["to"], selection);
+        assert!(
+            instruction["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Compacting before the limit")
+        );
+        let instruction_id = instruction["id"].as_str().unwrap();
+
+        call(&mut socket, sync(2, report.clone())).await;
+        assert_eq!(
+            next(&mut socket).await["result"]["moves"][0]["id"],
+            instruction_id
+        );
+
+        report["moves"] = json!([{"id": instruction_id, "state": "continued"}]);
+        call(&mut socket, sync(3, report)).await;
+        assert_eq!(next(&mut socket).await["result"]["moves"], json!([]));
     }
 }

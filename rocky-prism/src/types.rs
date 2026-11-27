@@ -20,6 +20,8 @@ pub enum PrismError {
     NotFound,
     #[error("storage error: {0}")]
     Storage(String),
+    #[error("storage error: {0}")]
+    SchemaMismatch(String),
     /// A failure Rocky marks retryable, such as a table that is not writable
     /// while synced rows are still being imported (`Incomplete`). The same
     /// write usually succeeds moments later; see `retry_unavailable`.
@@ -29,7 +31,9 @@ pub enum PrismError {
 
 impl From<rocky_sdk::Error> for PrismError {
     fn from(err: rocky_sdk::Error) -> Self {
-        if err.retryable() {
+        if matches!(err.kind(), rocky_sdk::ErrorKind::SchemaMismatch { .. }) {
+            PrismError::SchemaMismatch(err.to_string())
+        } else if err.retryable() {
             PrismError::Unavailable(err.to_string())
         } else {
             PrismError::Storage(err.to_string())

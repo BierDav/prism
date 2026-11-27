@@ -33,7 +33,7 @@ fn next(
                 current
             }
         }
-        Some(Err(err)) if err.is_incomplete() => {
+        Some(Err(err)) if err.is_incomplete() || matches!(err, PrismError::SchemaMismatch(_)) => {
             *successes = 0;
             Eligibility::Incomplete
         }
@@ -114,6 +114,21 @@ mod tests {
             e,
             Eligibility::Ready,
             "an unknown replica is ready at its first read"
+        );
+    }
+
+    #[test]
+    fn a_worker_with_an_unpublished_schema_is_not_ready() {
+        let mut successes = 0;
+        assert_eq!(
+            next(
+                Eligibility::Ready,
+                &mut successes,
+                Some(Err(PrismError::SchemaMismatch(
+                    "v3 declared, v2 installed".into()
+                )))
+            ),
+            Eligibility::Incomplete,
         );
     }
 

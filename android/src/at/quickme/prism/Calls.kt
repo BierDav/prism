@@ -47,7 +47,7 @@ object Calls {
         val app = c.applicationContext
         dialScope.launch {
             try {
-                val pending = PrismApi.run(app) { it.pendingCallRequests() }
+                val pending = PrismApi.call(app) { pendingCallRequests() }
                 for (req in pending) {
                     var err: String? = null
                     try {
@@ -67,7 +67,7 @@ object Calls {
                         Log.w(TAG, "dial request ${req.requestId} failed: $err")
                     }
                     try {
-                        PrismApi.run(app) { it.finishCallRequest(req.requestId, err) }
+                        PrismApi.call(app) { finishCallRequest(req.requestId, err) }
                     } catch (e: Exception) {
                         Log.w(TAG, "finishCallRequest ${req.requestId}: ${e.message}")
                     }

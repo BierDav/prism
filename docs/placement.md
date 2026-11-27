@@ -387,11 +387,11 @@ it).
   ```
 
 - Prism keeps the host's last report (without its acknowledgements) and
-  ranks it again every 5 seconds while it is at most 3 minutes old. When
-  the answer differs from the last one the host got (`checkedAt` aside),
-  Prism sends it as the notification `placement.update` (no `id`): a
-  changed profile, policy or action, a new move, or a ranking that moved
-  with the accounts' usage.
+  ranks it again when Rocky reports a placement change or an account usage
+  reading changes. The worker samples ClickHouse once per minute and shares
+  changes with its streams. When the answer differs from the last one the
+  host got (`checkedAt` aside), Prism sends it as `placement.update` (no
+  `id`), including any move or compaction it wants T3 to carry out.
 
   ```json
   {"jsonrpc": "2.0", "method": "placement.update", "params": {"v": 1, "checkedAt": "…", "profiles": […], "moves": […]}}
@@ -404,12 +404,13 @@ it).
 - Prism pings every 20 seconds and closes a connection it heard nothing
   from, not even a pong, for 90 seconds.
 
-T3 keeps one stream open and syncs over it, and over the POST while it is
-down. Over the stream it reports every change to its profile threads (a
-run starting or ending, a thread changing account) and every
-acknowledgement on its next 5-second tick instead of waiting out the 30
-seconds, and still sends a full report every 30 seconds. It carries out a
-pushed move the moment it arrives.
+T3 reports changes to its profile threads, providers, and usage over the
+stream as they happen, and sends move acknowledgements as soon as it has
+them. It still sends a full report every 30 seconds to renew the host's
+fleet presence and account for time passing (for example, a quota reset).
+It carries out pushed moves as soon as they arrive. If the stream fails,
+T3 tries the POST; if both fail, it uses saved profiles and local usage
+until Prism answers again.
 
 ### How T3 moves a running thread
 

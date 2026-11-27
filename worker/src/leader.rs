@@ -43,6 +43,7 @@ pub struct LeaderWork {
     pub secrets: Secrets,
     pub http: reqwest::Client,
     pub now: Clock,
+    pub usage: Option<Arc<crate::usage::UsageSource>>,
 }
 
 impl LeaderWork {
@@ -64,6 +65,7 @@ impl LeaderWork {
             cfg,
             worker,
             now: Arc::new(|| Utc::now().timestamp()),
+            usage: None,
         }
     }
 
@@ -368,14 +370,14 @@ impl LeaderWork {
     }
 
     async fn lead_weekly_activations(&self) {
-        let Some(source) = crate::usage::UsageSource::from_config(&self.cfg, &self.secrets) else {
+        let Some(source) = &self.usage else {
             return;
         };
         let mut ticker = tokio::time::interval(crate::activate::ACTIVATE_EVERY);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let usage = source.current().await;
+            let usage = source.latest();
             if let Err(err) = crate::activate::activate_weekly_windows(
                 &self.client,
                 &self.cfg,

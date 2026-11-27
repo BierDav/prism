@@ -1373,6 +1373,18 @@ async fn test_placement_compacts_in_place_before_a_limit_it_runs_into() {
         resp.moves[0].reason
     );
 
+    let mut ack = req(true);
+    ack.moves.push(rocky_prism::PlacementMoveAck {
+        id: resp.moves[0].id.clone(),
+        state: "continued".into(),
+        detail: String::new(),
+    });
+    let acked = client
+        .sync_placement("david-mb".into(), ack, now + 1)
+        .await
+        .expect("ack compaction");
+    assert!(acked.moves.is_empty());
+
     // Once per session window: later syncs, past the move cooldown, ask no more.
     for later in [300, 900, 3600] {
         let resp = client
