@@ -13,7 +13,7 @@ this document records how we got there. Since the first version:
   (`sync-forks.yml`, every two hours) syncs every fork the App is installed on,
   with a token limited to that fork. The key lives only there; forks keep just
   the guard. [Prism's leader can take over the recurring checks](../worker.md#fork-kit-upstream-checks)
-  and dispatch individual syncs.
+  and dispatch syncs directly in each fork.
 - **The guard** sets the required status `fork-kit/hold` on every PR into the
   fork branch: it fails while the PR has the label `fork-kit:hold`, and it
   turns auto-merge off when someone other than fork-kit pushes to the sync PR.

@@ -189,10 +189,8 @@ spec:
             # extra peer contacts (workers auto-join prism-worker-0 on first boot).
             - name: PRISM_WORKER_PEERS_FILE
               value: /secrets/rocky/PEERS
-            - name: PRISM_FORK_KIT_CONTROLLER
-              value: BierDav/fork-kit
             - name: PRISM_FORK_KIT_FORKS
-              value: CLIProxyAPI,mautrix-teams,palpo,seaweedfs,t3code
+              value: BierDav/CLIProxyAPI,BierDav/mautrix-teams,BierDav/palpo,BierDav/seaweedfs,BierDav/t3code
             - name: PRISM_FORK_KIT_TOKEN_FILE
               value: /secrets/fork-kit/token
           ports:

@@ -11,12 +11,9 @@ use std::{cmp::Ordering, time::Duration};
 
 const POLL: Duration = Duration::from_secs(15 * 60);
 const RETRY_SECONDS: i64 = 2 * 60 * 60;
-const WORKFLOW: &str = "sync-forks.yml";
+const WORKFLOW: &str = "fork-kit.yml";
 
 pub(crate) async fn lead(client: &PrismClient, secrets: &Secrets, now: &Clock) {
-    let Ok(controller) = std::env::var("PRISM_FORK_KIT_CONTROLLER") else {
-        return;
-    };
     let forks = std::env::var("PRISM_FORK_KIT_FORKS").unwrap_or_default();
     let mut forks: Vec<_> = forks
         .split(',')
@@ -28,12 +25,10 @@ pub(crate) async fn lead(client: &PrismClient, secrets: &Secrets, now: &Clock) {
     if forks.is_empty() {
         return;
     }
-    let Ok((owner, _)) = repo_parts(&controller) else {
-        eprintln!("prism-worker: PRISM_FORK_KIT_CONTROLLER must be a GitHub owner/repo");
-        return;
-    };
-    if forks.iter().any(|name| !repo_part(name)) {
-        eprintln!("prism-worker: PRISM_FORK_KIT_FORKS must be comma-separated repository names");
+    if forks.iter().any(|fork| repo_parts(fork).is_err()) {
+        eprintln!(
+            "prism-worker: PRISM_FORK_KIT_FORKS must be comma-separated GitHub owner/repo names"
+        );
         return;
     }
     let mut ticker = tokio::time::interval(POLL);
@@ -58,11 +53,9 @@ pub(crate) async fn lead(client: &PrismClient, secrets: &Secrets, now: &Clock) {
         };
         futures_util::future::join_all(forks.iter().map(|fork| {
             let github = &github;
-            let controller = &controller;
             async move {
-                let repo = format!("{owner}/{fork}");
-                if let Err(err) = check(client, github, controller, &repo, now()).await {
-                    eprintln!("prism-worker: Fork Kit check of {repo} failed: {err}");
+                if let Err(err) = check(client, github, fork, now()).await {
+                    eprintln!("prism-worker: Fork Kit check of {fork} failed: {err}");
                 }
             }
         }))
@@ -140,14 +133,10 @@ impl Run {
 async fn check(
     client: &PrismClient,
     github: &GitHub<'_>,
-    controller: &str,
     fork: &str,
     now: i64,
 ) -> Result<(), String> {
-    let key = format!(
-        "fork-kit.dispatch:{}",
-        format!("{controller}:{fork}").to_ascii_lowercase()
-    );
+    let key = format!("fork-kit.dispatch:{}", fork.to_ascii_lowercase());
     let prior = client
         .get_setting(&key)
         .await
@@ -160,7 +149,7 @@ async fn check(
 
     let mut failed = false;
     if let Some(prior) = &prior
-        && let Some(run) = github.run(controller, prior.run).await?
+        && let Some(run) = github.run(fork, prior.run).await?
     {
         if run.status != "completed" {
             // Let Fork Kit finish this run before replacing the one we monitor.
@@ -168,7 +157,7 @@ async fn check(
         }
         if run.failed() {
             failed = true;
-            let link = format!("https://github.com/{controller}/actions/runs/{}", prior.run);
+            let link = format!("https://github.com/{fork}/actions/runs/{}", prior.run);
             client
                 .record_fork_sync_result(
                     fork,
@@ -210,7 +199,7 @@ async fn check(
         return Ok(());
     }
 
-    let run = github.dispatch(controller, fork).await?;
+    let run = github.dispatch(fork).await?;
     let value = serde_json::to_string(&Dispatch {
         fingerprint,
         at: now,
@@ -246,8 +235,12 @@ impl GitHub<'_> {
         url.path_segments_mut()
             .expect("GitHub API base")
             .pop_if_empty()
-            .extend(["repos", owner, name])
-            .extend(path);
+            .extend(["repos", owner, name]);
+        if !path.is_empty() {
+            url.path_segments_mut()
+                .expect("GitHub API base")
+                .extend(path);
+        }
         Ok(self
             .http
             .request(method, url)
@@ -377,13 +370,9 @@ impl GitHub<'_> {
         Ok(!prs.is_empty())
     }
 
-    async fn run(&self, controller: &str, id: u64) -> Result<Option<Run>, String> {
+    async fn run(&self, fork: &str, id: u64) -> Result<Option<Run>, String> {
         let resp = self
-            .request(
-                Method::GET,
-                controller,
-                &["actions", "runs", &id.to_string()],
-            )?
+            .request(Method::GET, fork, &["actions", "runs", &id.to_string()])?
             .send()
             .await
             .map_err(|err| err.to_string())?;
@@ -399,18 +388,23 @@ impl GitHub<'_> {
             .map_err(|err| err.to_string())
     }
 
-    async fn dispatch(&self, controller: &str, fork: &str) -> Result<u64, String> {
+    async fn dispatch(&self, fork: &str) -> Result<u64, String> {
         #[derive(Deserialize)]
         struct Accepted {
             workflow_run_id: u64,
         }
+        #[derive(Deserialize)]
+        struct Repository {
+            default_branch: String,
+        }
+        let repo: Repository = self.get(fork, &[]).await?;
         let accepted: Accepted = response(
             self.request(
                 Method::POST,
-                controller,
+                fork,
                 &["actions", "workflows", WORKFLOW, "dispatches"],
             )?
-            .json(&json!({ "ref": "main", "inputs": { "repository": fork } })),
+            .json(&json!({ "ref": repo.default_branch })),
         )
         .await?
         .json()
@@ -507,7 +501,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const FORK: &str = "BierDav/t3code";
-    const CONTROLLER: &str = "BierDav/fork-kit";
 
     #[test]
     fn picks_the_latest_matching_nightly_by_version_and_build_number() {
@@ -548,7 +541,7 @@ mod tests {
         if request.method() == Method::POST {
             assert_eq!(
                 path,
-                "/repos/BierDav/fork-kit/actions/workflows/sync-forks.yml/dispatches"
+                "/repos/BierDav/t3code/actions/workflows/fork-kit.yml/dispatches"
             );
             assert_eq!(request.headers()["x-github-api-version"], "2026-03-10");
             let bytes = axum::body::to_bytes(request.into_body(), 4096)
@@ -556,7 +549,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-                json!({"ref": "main", "inputs": {"repository": FORK}})
+                json!({"ref": "prism-nightly"})
             );
             let mut fixture = fixture.lock().unwrap();
             if fixture.refuse_dispatch {
@@ -569,6 +562,7 @@ mod tests {
 
         let fixture = fixture.lock().unwrap();
         let body = match path.as_str() {
+            "/repos/BierDav/t3code" => json!({"default_branch": "prism-nightly"}),
             "/repos/BierDav/t3code/contents/.fork-kit.toml" => {
                 assert_eq!(
                     request.headers()["accept"],
@@ -596,7 +590,7 @@ mod tests {
                 json!({"behind_by": u32::from(fixture.behind)})
             }
             "/repos/BierDav/t3code/pulls" => json!([]),
-            "/repos/BierDav/fork-kit/actions/runs/1" | "/repos/BierDav/fork-kit/actions/runs/2" => {
+            "/repos/BierDav/t3code/actions/runs/1" | "/repos/BierDav/t3code/actions/runs/2" => {
                 json!({
                     "status": if fixture.conclusion.is_some() { "completed" } else { "queued" },
                     "conclusion": fixture.conclusion
@@ -629,9 +623,7 @@ mod tests {
         };
         let now = 1_795_255_300;
 
-        check(&client, &github, CONTROLLER, FORK, now)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, now).await.unwrap();
         assert_eq!(fixture.lock().unwrap().dispatches, 0);
 
         {
@@ -639,22 +631,14 @@ mod tests {
             state.behind = true;
             state.refuse_dispatch = true;
         }
-        assert!(
-            check(&client, &github, CONTROLLER, FORK, now + 1)
-                .await
-                .is_err()
-        );
+        assert!(check(&client, &github, FORK, now + 1).await.is_err());
         fixture.lock().unwrap().refuse_dispatch = false;
-        check(&client, &github, CONTROLLER, FORK, now + 2)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, now + 2).await.unwrap();
         assert_eq!(fixture.lock().unwrap().dispatches, 1);
         assert!(client.alert_rows().await.unwrap().is_empty());
 
         fixture.lock().unwrap().conclusion = Some("failure");
-        check(&client, &github, CONTROLLER, FORK, now + 3)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, now + 3).await.unwrap();
         let alerts = client.alert_rows().await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert!(alerts[0].is_open());
@@ -674,19 +658,13 @@ mod tests {
                 .unwrap();
         }
         let retry_at = now + 2 + RETRY_SECONDS;
-        check(&client, &github, CONTROLLER, FORK, retry_at)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, retry_at).await.unwrap();
         assert_eq!(fixture.lock().unwrap().dispatches, 2);
-        check(&client, &github, CONTROLLER, FORK, retry_at + 1)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, retry_at + 1).await.unwrap();
         assert!(client.alert_rows().await.unwrap()[0].is_open());
 
         fixture.lock().unwrap().conclusion = Some("failure");
-        check(&client, &github, CONTROLLER, FORK, retry_at + 2)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, retry_at + 2).await.unwrap();
         let updated = client.alert_rows().await.unwrap();
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].key, alerts[0].key);
@@ -702,9 +680,7 @@ mod tests {
             state.conclusion = Some("success");
             state.behind = false;
         }
-        check(&client, &github, CONTROLLER, FORK, retry_at + 3)
-            .await
-            .unwrap();
+        check(&client, &github, FORK, retry_at + 3).await.unwrap();
         let resolved = client.alert_rows().await.unwrap();
         assert_eq!(resolved.len(), 1);
         assert!(!resolved[0].is_open());
