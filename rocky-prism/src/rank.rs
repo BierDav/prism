@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const PLACEMENT_SESSION_HOURS: f64 = 5.0;
 pub const PLACEMENT_BURN_WINDOW_SECS: i64 = 45 * 60;
 pub const PLACEMENT_MIN_BURN_SPAN_SECS: i64 = 10 * 60;
+const RECENT_BURN_WINDOW_SECS: i64 = 15 * 60;
 /// A weekly reset further ahead than this is implausible and treated as unknown.
 pub const PLACEMENT_MAX_WEEKLY_RESET_SECS: i64 = 8 * 24 * 60 * 60;
 
@@ -772,7 +773,8 @@ pub fn placement_move_target(
 }
 
 /// Calculates session percent burned per running thread per hour from samples ordered by `at`
-/// ascending. A drop of > 0.5% indicates a window reset and discards earlier samples.
+/// ascending. Use the recent rate when it is faster so a burst does not get averaged away.
+/// A drop of > 0.5% indicates a window reset and discards earlier samples.
 pub fn compute_burn_rate(samples: &[PlacementSample], now: i64) -> Option<f64> {
     let mut kept: Vec<&PlacementSample> = Vec::new();
     for s in samples {
@@ -786,20 +788,21 @@ pub fn compute_burn_rate(samples: &[PlacementSample], now: i64) -> Option<f64> {
         }
         kept.push(s);
     }
-    if kept.len() < 2 {
-        return None;
-    }
-    let first = kept.first()?;
     let last = kept.last()?;
-    let span = last.at - first.at;
-    if span < PLACEMENT_MIN_BURN_SPAN_SECS {
-        return None;
+    let rate = |window: &[&PlacementSample]| {
+        let first = window.first()?;
+        let span = last.at - first.at;
+        if span < PLACEMENT_MIN_BURN_SPAN_SECS {
+            return None;
+        }
+        let sum_running: i32 = window.iter().map(|s| s.running).sum();
+        let mean_running = f64::from(sum_running) / (window.len() as f64);
+        (mean_running >= 0.5)
+            .then(|| ((last.used - first.used) / (span as f64 / 3600.0) / mean_running).max(0.0))
+    };
+    let recent_start = kept.partition_point(|s| last.at - s.at > RECENT_BURN_WINDOW_SECS);
+    match (rate(&kept), rate(&kept[recent_start..])) {
+        (Some(full), Some(recent)) => Some(full.max(recent)),
+        (full, recent) => full.or(recent),
     }
-    let sum_running: i32 = kept.iter().map(|s| s.running).sum();
-    let mean_running = f64::from(sum_running) / (kept.len() as f64);
-    if mean_running < 0.5 {
-        return None;
-    }
-    let per_thread = (last.used - first.used) / (span as f64 / 3600.0) / mean_running;
-    Some(per_thread.max(0.0))
 }

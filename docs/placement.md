@@ -165,8 +165,9 @@ while its account can still run the compaction. The entry is
 
 - its session (5-hour) window is at or past `switchAtPercent`, or
 - at the current pace, its session or weekly window runs out within
-  10 minutes. The pace is the session burn rate per thread (samples of the
-  last 45 minutes) times the entry's running threads. The weekly rate is
+  15 minutes. The pace is the session burn rate per thread times the entry's
+  running threads. Prism compares the last 45 minutes with the most recent
+  15 minutes so a sudden burst is visible. The weekly rate is
   that times `sessionShareOfWeekly` / 100. Without a known pace, only the
   session switch point applies.
 
@@ -188,6 +189,11 @@ Two cases run into the limit instead:
   once per thread per session window.
 - The window resets within 30 minutes. The thread hits the limit and waits
   for the reset on the same account (above), keeping its prompt cache.
+
+These exceptions keep existing runs in place. Once the session passes the
+switch point, a new run or a handoff waits for capacity or uses another
+entry. A running thread can compact on its current account when it crosses
+the switch point and there is no destination yet.
 
 The weekly window has no fixed switch point. Only its pace or 100% stops it.
 

@@ -693,6 +693,31 @@ fn test_pace_interrupts_before_a_limit_runs_out() {
 }
 
 #[test]
+fn test_burn_rate_detects_a_quota_spike_after_a_quiet_stretch() {
+    let samples: Vec<_> = [(0, 18.0), (20, 24.0), (27, 49.0), (34, 68.0)]
+        .into_iter()
+        .map(|(minute, used)| PlacementSample {
+            account: "codex-2".into(),
+            at: minute * 60,
+            used,
+            running: 2,
+        })
+        .collect();
+    let burn = compute_burn_rate(&samples, 34 * 60).expect("burst rate");
+    assert!((burn - (44.0 * 60.0) / (14.0 * 2.0)).abs() < 0.01);
+    let dec = paced_state(
+        (68.0, 150),
+        (18.0, 72 * 60),
+        10.0,
+        PlacementLoad {
+            running: 2,
+            burn_per_thread_per_hour: Some(burn),
+        },
+    );
+    assert_eq!(dec.state, "over_threshold");
+}
+
+#[test]
 fn test_a_monthly_quota_is_not_full_while_used() {
     // gh, make and jetbrains report a monthly quota as their session window.
     // One thread at 0.5% per hour stays far from the switch point for weeks;
