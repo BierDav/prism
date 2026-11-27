@@ -189,6 +189,12 @@ spec:
             # extra peer contacts (workers auto-join prism-worker-0 on first boot).
             - name: PRISM_WORKER_PEERS_FILE
               value: /secrets/rocky/PEERS
+            - name: PRISM_FORK_KIT_CONTROLLER
+              value: BierDav/fork-kit
+            - name: PRISM_FORK_KIT_FORKS
+              value: CLIProxyAPI,mautrix-teams,palpo,seaweedfs,t3code
+            - name: PRISM_FORK_KIT_TOKEN_FILE
+              value: /secrets/fork-kit/token
           ports:
             - name: rocky
               containerPort: 7411
@@ -256,6 +262,9 @@ spec:
             - name: telemetry
               mountPath: /secrets/telemetry
               readOnly: true
+            - name: fork-kit
+              mountPath: /secrets/fork-kit
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
@@ -298,6 +307,10 @@ spec:
         - name: telemetry
           secret:
             secretName: prism-telemetry
+            optional: true
+        - name: fork-kit
+          secret:
+            secretName: prism-fork-kit
             optional: true
   # Written out as the API server stores it (apiVersion, kind, volumeMode),
   # or Argo CD shows the StatefulSet OutOfSync after every sync.

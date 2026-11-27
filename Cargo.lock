@@ -1768,6 +1768,7 @@ dependencies = [
  "hyper-util",
  "p256",
  "rand_core 0.6.4",
+ "regex",
  "reqwest",
  "rocky-core",
  "rocky-prism",
@@ -1780,6 +1781,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "toml",
  "tower",
  "url",
 ]

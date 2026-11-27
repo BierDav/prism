@@ -11,7 +11,9 @@ Prism's Forks proposal". Section 1 describes the forks *before* that; today:
   one sync PR from `fork-kit/sync` into the fork branch (`patched`, `docker`,
   `placement-profiles`), merged by auto-merge when its checks pass. The sync
   runs every two hours from `BierDav/fork-kit`'s `sync-forks.yml` with the one
-  App key; each fork keeps only the guard workflow and holds no key.
+  App key; each fork keeps only the guard workflow and holds no key. The
+  [Prism worker scanner](../worker.md#fork-kit-upstream-checks) replaces that
+  schedule when enabled, and alerts on failed sync runs it dispatches.
 - **seaweedfs-backup** moved out of selfhosted-platform into the GitHub fork
   `BierDav/seaweedfs` (`patched`, following SeaweedFS releases); it publishes
   `ghcr.io/bierdav/seaweedfs-backup`.

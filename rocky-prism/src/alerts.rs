@@ -41,6 +41,8 @@ pub const ACTION_FIX: &str = "fix";
 /// The alert name of a machine event (`prism run`), a check's alert.
 pub const EVENT_ALERT_NAME: &str = "HostCheckFailed";
 const EVENT_SOURCE: &str = "prism";
+const FORK_SYNC_ALERT_NAME: &str = "ForkKitSyncFailed";
+const FORK_SYNC_SOURCE: &str = "prism-fork-kit";
 
 /// The longest instruction a fix request carries.
 pub const MAX_INSTRUCTION_CHARS: usize = 10_000;
@@ -104,6 +106,10 @@ impl AmAlert {
             && self.label("alertname") == EVENT_ALERT_NAME
             && !self.label("machine").is_empty()
             && !self.label("check").is_empty()
+    }
+
+    fn is_fork_sync(&self) -> bool {
+        self.label("source") == FORK_SYNC_SOURCE && self.name() == FORK_SYNC_ALERT_NAME
     }
 
     fn parse(payload: &str) -> Self {
@@ -864,9 +870,8 @@ impl PrismClient {
         // Alerts before an invalid one are stored, as in Go; Alertmanager
         // does not retry a 400.
         for (status, alert, raw) in alerts {
-            if alert.is_host_event() {
-                // Machine events are the worker's own; these are what
-                // Alertmanager still has from when they went through it.
+            if alert.is_host_event() || alert.is_fork_sync() {
+                // The worker manages these episodes directly.
                 continue;
             }
             let labels = alert.labels.clone().unwrap_or_default();
@@ -890,6 +895,55 @@ impl PrismClient {
             }
         }
         Ok(())
+    }
+
+    /// Keeps one episode per fork open until a later sync succeeds. A retry
+    /// that fails updates the link without starting another episode.
+    pub async fn record_fork_sync_result(
+        &self,
+        repository: &str,
+        failure: Option<(&str, &str)>,
+        now: i64,
+    ) -> Result<(), PrismError> {
+        let labels = BTreeMap::from([
+            ("alertname".into(), FORK_SYNC_ALERT_NAME.into()),
+            ("source".into(), FORK_SYNC_SOURCE.into()),
+            ("repository".into(), repository.to_ascii_lowercase()),
+            ("severity".into(), "warning".into()),
+        ]);
+        let fingerprint = label_fingerprint(&labels);
+        let _guard = self.alerts_lock.lock().await;
+        let row = self.current_alert(&fingerprint).await?;
+        let open = row.as_ref().filter(|row| row.is_open());
+        let Some((link, conclusion)) = failure else {
+            return match open {
+                Some(row) => self.end_alert(&row.key, ALERT_RESOLVED, now).await,
+                None => Ok(()),
+            };
+        };
+        let starts_at = open.map(|row| row.episode.clone()).unwrap_or_else(|| {
+            DateTime::from_timestamp(now, 0)
+                .unwrap_or_default()
+                .to_rfc3339()
+        });
+        let alert = AmAlert {
+            status: "firing".into(),
+            labels: Some(labels),
+            annotations: BTreeMap::from([
+                (
+                    "summary".into(),
+                    format!("Fork Kit sync failed for {repository}"),
+                ),
+                (
+                    "description".into(),
+                    format!("Latest sync: {conclusion}. GitHub Actions run: {link}"),
+                ),
+            ]),
+            starts_at,
+            ..AmAlert::default()
+        };
+        let raw = serde_json::to_string(&alert).expect("serializable Fork Kit alert");
+        self.fire(&fingerprint, row, &alert, &raw, now).await
     }
 
     async fn fire(
@@ -1221,7 +1275,7 @@ impl PrismClient {
         let _guard = self.alerts_lock.lock().await;
         let mut ended = Vec::new();
         for row in self.alert_rows().await? {
-            if !row.is_open() || row.alert().is_host_event() {
+            if !row.is_open() || row.alert().is_host_event() || row.alert().is_fork_sync() {
                 continue;
             }
             if present.contains(&row.fingerprint) {

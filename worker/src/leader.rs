@@ -362,7 +362,8 @@ impl LeaderWork {
         tokio::join!(
             self.lead_requests(),
             self.lead_scans(),
-            self.lead_weekly_activations()
+            self.lead_weekly_activations(),
+            crate::fork_kit::lead(&self.client, &self.secrets, &self.now),
         );
     }
 

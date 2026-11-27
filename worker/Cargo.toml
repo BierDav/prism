@@ -18,6 +18,7 @@ hex = "0.4"
 hmac = "0.12"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rocky-prism = { path = "../rocky-prism" }
 rocky-sdk.workspace = true
@@ -28,6 +29,7 @@ sha2 = "0.10"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+toml = "0.5"
 url = "2"
 
 [dev-dependencies]

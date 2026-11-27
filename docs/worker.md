@@ -257,6 +257,34 @@ idempotent per request id: a fix launch carries
 `clientRequestId = prism:sha256(prism:<investigate|instruct>:<device>:sha256(request id))`,
 so T3 returns the thread a former leader already launched.
 
+### Fork Kit upstream checks
+
+The leader checks each enrolled fork's default-branch `.fork-kit.toml` every
+15 minutes. It resolves the tracked GitHub branch, matching tag, or latest
+release and dispatches `sync-forks.yml` for that fork when upstream still
+needs to be merged or a sync PR needs reconciliation. A failed run or a
+still-pending sync can be retried after two hours for the same upstream ref.
+Fork Kit still owns the merge, the sync PR, and the GitHub App key.
+
+Prism records the run ID returned by GitHub. If a Prism-triggered sync fails,
+the fork gets one `ForkKitSyncFailed` alert with the run link. The alert stays
+open while a retry is queued or running, and closes when a tracked run succeeds.
+
+The deployment sets `PRISM_FORK_KIT_CONTROLLER` to `BierDav/fork-kit` (whose
+dispatch ref is `main`) and `PRISM_FORK_KIT_FORKS` to a comma-separated list of
+repository names under that owner. To enable polling, create the
+`monitoring/prism-fork-kit` Secret with a `token` key, preferably through the
+platform's Sealed Secrets. Use a fine-grained GitHub token with **Actions:
+Read and write** for the controller repository only. The worker reads the
+forks and their upstreams as public repositories. It loads the token from
+`PRISM_FORK_KIT_TOKEN_FILE` on each pass (`PRISM_FORK_KIT_TOKEN` works locally).
+
+Roll out the worker and the Secret first. Confirm it can dispatch a per-fork
+run on GitHub and observe its result, then remove the central workflow's cron.
+Keep `workflow_dispatch` for manual syncs and reviewed workflow changes. The
+T3 Code fork's CLI and desktop build runs after a successful `Fork check`
+on `placement-profiles` and can still be dispatched manually.
+
 On its own, when an alert fires, the Go server did nothing but notify, and
 so does the worker: the leader numbers the episode and posts its
 `alert.firing` push; when it ends, `alert.ended`. Fixes start only on a
