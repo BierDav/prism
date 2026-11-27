@@ -119,10 +119,11 @@ class AssistantSession(
     private val matrix get() = MatrixClient(Settings.matrixHomeserver(app), Settings.matrixAccessToken(app))
     private var matrixClient: MatrixClient? = null
 
-    private fun harness(): Harness {
+    /** The harness for a turn, asking [model] (AssistantModel). */
+    private fun harness(model: String): Harness {
         val m = matrix.also { matrixClient = it }
         return Harness(
-            Gateway(Settings.assistantUrl(app), Settings.assistantApiKey(app), Settings.assistantModel(app), Settings.deviceName(app)),
+            Gateway(Settings.assistantUrl(app), Settings.assistantApiKey(app), model, Settings.deviceName(app)),
             tools = phoneTools(context, capture) + matrixTools(m) + t3Tools(app) + uiTools({ id -> transcript.modelSurface(id) }, { id -> transcript.surface(id)?.trusted == true }),
             systemPrompt = {
                 SystemPrompt.build(
@@ -152,12 +153,20 @@ class AssistantSession(
         // The conversation this turn belongs to: once it is deleted
         // ([dropDeleted]), nothing of the turn reaches the next one.
         val mine = conversationId
+        val timing = TurnTiming()
+        val model = try {
+            AssistantModel.forTurn(app)
+        } catch (e: CancellationException) {
+            running = false
+            turn = null
+            throw e
+        }
         val note = notes.take()
-        val harness = harness()
+        val harness = harness(model)
         try {
             val result = harness.run(
                 history, text, attachments,
-                emit = { e -> withContext(Dispatchers.Main) { if (conversationId == mine) apply(e) } },
+                emit = { e -> timing.saw(e); withContext(Dispatchers.Main) { if (conversationId == mine) apply(e) } },
                 saved = { if (conversationId == mine) { history = it; save() } },
                 note = note,
                 shown = shown,
@@ -172,6 +181,7 @@ class AssistantSession(
             Log.w(TAG, "assistant turn failed (${e.javaClass.simpleName})")
             if (conversationId == mine) transcript = transcript.settled().after(Event.Failed(problem))
         } finally {
+            timing.done()
             running = false
             turn = null
             if (conversationId == mine) {
@@ -179,6 +189,48 @@ class AssistantSession(
                 store(now = true)
             }
             harness.close()
+        }
+    }
+
+    /**
+     * Opens the connection to the gateway while the owner speaks
+     * (Harness.warm) and picks the Assistant profile's model
+     * (AssistantModel), so the turn's first request needn't. Off the main
+     * thread; nothing without a key.
+     */
+    fun warm() {
+        if (!configured) return
+        val url = Settings.assistantUrl(app)
+        storeScope.launch(Dispatchers.IO) { Harness.warm(url) }
+        storeScope.launch(Dispatchers.IO) { AssistantModel.refresh(app) }
+    }
+
+    /**
+     * When a turn's steps came, for logcat (tag PrismLatency): the first tool
+     * call, the first answer text and the end, in ms from the send. Speech to
+     * text is logged by VoiceInput under the same tag.
+     */
+    private class TurnTiming {
+        private val start = android.os.SystemClock.elapsedRealtime()
+        @Volatile private var firstTool = -1L
+        @Volatile private var firstAnswer = -1L
+        @Volatile private var tools = 0
+
+        private fun since() = android.os.SystemClock.elapsedRealtime() - start
+
+        fun saw(e: Event) {
+            when (e) {
+                is Event.ToolStarted -> {
+                    tools++
+                    if (firstTool < 0) firstTool = since()
+                }
+                is Event.Answer -> if (firstAnswer < 0) firstAnswer = since()
+                else -> Unit
+            }
+        }
+
+        fun done() {
+            Log.i(LATENCY, "turn: first tool ${firstTool}ms, first answer ${firstAnswer}ms, done ${since()}ms, $tools tool calls")
         }
     }
 
@@ -479,6 +531,8 @@ class AssistantSession(
 
     companion object {
         private const val TAG = "PrismAssistant"
+        /** Where the time of a spoken turn goes, in logcat (VoiceInput logs there too). */
+        const val LATENCY = "PrismLatency"
         private const val STORE_AFTER_MS = 1500L
         /** Sessions kept for their conversation when no screen uses them. */
         private const val LIVE_SESSIONS = 8

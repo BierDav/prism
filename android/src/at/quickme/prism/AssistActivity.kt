@@ -669,7 +669,7 @@ private fun Assist(
         } else {
             agentId = null
             activity = null
-            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+            starting = AssistantRequest(card.requestId, AUTO, AgentProfile.model(context, card.profile.ifEmpty { null }), card.project, card.request)
         }
     }
     session.onHandoff = ::handedOff
@@ -683,7 +683,7 @@ private fun Assist(
         if (card != null && card.agentId.isEmpty() && card.requestId.isNotEmpty() && card.failed.isEmpty()) {
             handoffEntry = entry
             agentId = null
-            starting = AssistantRequest(card.requestId, AUTO, AssistantProfile.model(context), card.project, card.request)
+            starting = AssistantRequest(card.requestId, AUTO, AgentProfile.model(context, card.profile.ifEmpty { null }), card.project, card.request)
             return@LaunchedEffect
         }
         val (id, request, project) = memory.starting() ?: return@LaunchedEffect
@@ -691,7 +691,7 @@ private fun Assist(
             agentId = null
             agentTitle = request
             pending.add(request)
-            starting = AssistantRequest(id, AUTO, AssistantProfile.model(context), project, request)
+            starting = AssistantRequest(id, AUTO, AgentProfile.model(context), project, request)
         }
     }
 
@@ -904,7 +904,7 @@ private fun Assist(
         if (sending || reading > 0 || starting != null || leave.isRunning || leave.value > 0f) return
         menuOpen = false
         agentId?.let { return reply(it, request, files) }
-        val model = AssistantProfile.model(context)
+        val model = AgentProfile.model(context)
         val payload = previous?.takeIf { it.target == AUTO && it.text == request && it.model == model && it.attachments == files }
             ?: AssistantRequest(PrismClient.requestId(), AUTO, model, AUTO, request, files)
         previous = payload
@@ -959,8 +959,14 @@ private fun Assist(
         voice.stop()
     }
 
+    /** Listens, and meanwhile opens the connection to the gateway, so what is heard goes out at once. */
+    fun startListening() {
+        session.warm()
+        voice.start(::heard)
+    }
+
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) voice.start(::heard) else sendError = "Prism may not use the microphone."
+        if (granted) startListening() else sendError = "Prism may not use the microphone."
     }
 
     fun listen() {
@@ -974,7 +980,7 @@ private fun Assist(
                 voiceInline = imeShown.value || text.isNotBlank()
                 if (!voiceInline) keyboard?.hide()
                 sendError = null
-                voice.start(::heard)
+                startListening()
             }
             else -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -984,7 +990,7 @@ private fun Assist(
     // Not over a kept draft (what it heard would replace and send it), and
     // only with the microphone already allowed (no prompt on every open).
     LaunchedEffect(Unit) {
-        if (text.isEmpty() && voice.permitted()) voice.start(::heard)
+        if (text.isEmpty() && voice.permitted()) startListening()
     }
 
     fun openThread() {
@@ -1538,9 +1544,10 @@ private data class AssistantRequest(
 )
 
 /**
- * The placement profile the assistant's agents start with (Phone ›
- * Profiles › Actions › Assistant); the machine and the project are always
- * Prism's pick. Unset, the worker's own default model applies.
+ * The placement profile the overlay's assistant itself runs on (Phone ›
+ * Profiles › Actions › Assistant): it asks that profile's best model through
+ * the gateway (assistant/AssistantModel.kt). Unset, the published
+ * assistant_model.
  */
 internal object AssistantProfile {
     private const val KEY = "profile"
@@ -1553,9 +1560,29 @@ internal object AssistantProfile {
     fun set(context: Context, id: String?) {
         prefs(context).edit().apply { if (id.isNullOrEmpty()) remove(KEY) else putString(KEY, id) }.apply()
     }
+}
 
-    /** The launch's model: the profile on T3's placement instance, or null for the default. */
-    fun model(context: Context): ModelChoice? = get(context)?.let { ProfileChoice(it).model }
+/**
+ * The placement profile the T3 agents the overlay starts run on by default
+ * (Phone › Profiles › Actions › Assistant's agents); the assistant takes
+ * another when the owner names one (start_t3_agent's profile). The machine
+ * and the project are always Prism's pick. Unset, the worker's own default
+ * model applies.
+ */
+internal object AgentProfile {
+    private const val KEY = "agent_profile"
+
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences("assistant", Context.MODE_PRIVATE)
+
+    fun get(context: Context): String? = prefs(context).getString(KEY, null)?.takeIf { it.isNotEmpty() }
+
+    fun set(context: Context, id: String?) {
+        prefs(context).edit().apply { if (id.isNullOrEmpty()) remove(KEY) else putString(KEY, id) }.apply()
+    }
+
+    /** The launch's model: profile [id] (else the default one) on T3's placement instance, or null for the worker's default. */
+    fun model(context: Context, id: String? = null): ModelChoice? = (id ?: get(context))?.let { ProfileChoice(it).model }
 }
 
 /** What the overlay keeps on this phone: the draft and the agent it follows. */

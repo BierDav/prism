@@ -17,7 +17,9 @@ import at.quickme.prism.assistant.core.HandoffCard
 import at.quickme.prism.assistant.core.Markdown
 import at.quickme.prism.assistant.core.Matrix
 import at.quickme.prism.assistant.core.MessageCard
+import at.quickme.prism.assistant.core.ModelPick
 import at.quickme.prism.assistant.core.PhoneNumbers
+import at.quickme.prism.assistant.core.ProfileModel
 import at.quickme.prism.assistant.core.SettingCard
 import at.quickme.prism.assistant.core.Toggles
 import at.quickme.prism.assistant.core.ToolArgumentException
@@ -237,6 +239,32 @@ fun main() {
     check(Markdown.inline("2 * 3 * 4") == listOf(Markdown.Span("2 * 3 * 4")), "a lone star is a star")
     check(Markdown.inline("**open") == listOf(Markdown.Span("**open")), "an unclosed marker stays")
     check(Markdown.plain("**a** and *b*\n- c") == "a and b\n• c", "plain text")
+
+    // --- The assistant's model from its placement profile (ModelPick) ---
+    val profiles = mapOf(
+        "fast" to listOf(
+            ProfileModel("agy/gemini-3.8-flash-high", "low", state = "exhausted"),
+            ProfileModel("claude/claude-haiku-5-5", "max", state = "ok"),
+            ProfileModel("agy-1/gemini-3.8-flash-high", "high", state = "promoted"),
+        ),
+        "chain" to listOf(
+            ProfileModel("off/model", enabled = false),
+            ProfileModel("fast", profile = true),
+            ProfileModel("codex/gpt-6.1-sol", "medium"),
+        ),
+        "spent" to listOf(ProfileModel("agy/gemini-4-neon", state = "exhausted"), ProfileModel("localmodel", state = "ok")),
+        "loop" to listOf(ProfileModel("loop", profile = true), ProfileModel("codex/gpt-6.1-sol", "HIGH", state = "full")),
+    )
+    check(ModelPick.pick("fast", profiles) == "agy-1/gemini-3.8-flash-high(high)", "a promoted model first, with its level")
+    check(ModelPick.pick("chain", profiles) == "agy-1/gemini-3.8-flash-high(high)", "a profile entry ranks as its models")
+    check(ModelPick.gatewayId(ProfileModel("claude/claude-haiku-5-5", "max")) == "claude/claude-haiku-5-5", "a level not every model takes is left out")
+    check(ModelPick.pick("spent", profiles) == null, "nothing exhausted, nothing the gateway can't route")
+    check(ModelPick.pick("loop", profiles) == "codex/gpt-6.1-sol(high)", "a cycle ends, levels ignore case")
+    check(ModelPick.pick("missing", profiles) == null, "an unknown profile picks nothing")
+    check(
+        ModelPick.pick("p", mapOf("p" to listOf(ProfileModel("a/x", state = "over_threshold"), ProfileModel("b/y", state = "ok")))) == "b/y",
+        "ok before over the threshold",
+    )
 
     println(if (failed == 0) "all passed" else "$failed failed")
     exitProcess(if (failed == 0) 0 else 1)

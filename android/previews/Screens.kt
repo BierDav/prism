@@ -142,7 +142,7 @@ private fun PlacementLimitsPreview() = Themed {
     )
 }
 
-/** Placement actions: alert fixes, text generation, delegated agents roles, and recent moves. */
+/** Placement actions: alert fixes, text generation, the assistant and its agents, and recent moves. */
 @ScreenPreviews
 @WholePreview
 @Composable
@@ -155,6 +155,8 @@ private fun PlacementActionsPreview() = Themed {
         onReload = {},
         onAlertFix = {},
         onTextGeneration = {},
+        assistant = "minor",
+        agents = "coding",
     )
 }
 

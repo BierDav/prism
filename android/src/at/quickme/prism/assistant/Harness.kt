@@ -55,6 +55,7 @@ import at.quickme.prism.assistant.core.Tools
 import at.quickme.prism.assistant.core.UiChange
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.head
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -101,12 +102,8 @@ class Harness(
     /** How attached and captured images go to the model (scaled down on the phone). */
     private val prepareImage: (AssistAttachment) -> AssistAttachment = { it },
 ) : AutoCloseable {
-    private val http = HttpClient(OkHttp) {
-        engine {
-            addInterceptor { chain ->
-                chain.proceed(chain.request().newBuilder().header("X-Fleet-Host", gateway.host).build())
-            }
-        }
+    init {
+        fleetHost = gateway.host
     }
 
     // A 502 from the gateway now and then is retried (Koog's retrying client:
@@ -260,9 +257,8 @@ class Harness(
         }
     }
 
-    override fun close() {
-        http.close()
-    }
+    /** Nothing of its own to close: the HTTP client, with its connections, outlives a harness ([http]). */
+    override fun close() = Unit
 
     /** One of the assistant's tools as a Koog tool: JSON arguments in, its output's text to the model. */
     private class KoogTool(
@@ -296,6 +292,44 @@ class Harness(
         private const val MAX_TEXT_ATTACHMENT = 60_000
         /** Messages kept between runs: the newest, from a turn's start. */
         private const val KEEP_MESSAGES = 60
+
+        /** This phone's name for X-Fleet-Host (the gateway's per-device usage). */
+        @Volatile
+        private var fleetHost = ""
+
+        /**
+         * The gateway's HTTP client, one for the process: its connection
+         * pool keeps the TLS connection to the gateway between turns (OkHttp
+         * keeps an idle one 5 minutes), where a client per turn shook hands
+         * anew before every spoken request. Koog's client per harness is
+         * derived from it (HttpClient.config) and shares its engine.
+         */
+        private val http by lazy {
+            HttpClient(OkHttp) {
+                engine {
+                    addInterceptor { chain ->
+                        val host = fleetHost
+                        val request = chain.request()
+                        chain.proceed(if (host.isEmpty()) request else request.newBuilder().header("X-Fleet-Host", host).build())
+                    }
+                }
+            }
+        }
+
+        /**
+         * Opens the connection to the gateway at [url] ahead of a turn (the
+         * overlay listens, the owner speaks), so the turn's request goes out
+         * on it at once: DNS, TCP and TLS are behind it by then. A HEAD of
+         * the base URL, its answer ignored; nothing if it fails.
+         */
+        suspend fun warm(url: String) {
+            try {
+                http.head(url.trimEnd('/') + "/")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
 
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
         private val listSerializer = ListSerializer(Message.serializer())

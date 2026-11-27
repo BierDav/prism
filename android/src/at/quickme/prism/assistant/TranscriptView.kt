@@ -546,7 +546,7 @@ private fun toolIcon(tool: String): ImageVector = when (tool) {
     Tools.TIMER -> PrismIcons.Clock
     Tools.CALENDAR -> Icons.Rounded.DateRange
     Tools.MEDIA -> Icons.Rounded.PlayArrow
-    Tools.START_T3, Tools.LIST_T3, Tools.SEND_T3, Tools.T3_PROJECTS -> Icons.Rounded.Build
+    Tools.START_T3, Tools.LIST_T3, Tools.SEND_T3, Tools.T3_PROJECTS, Tools.T3_PROFILES -> Icons.Rounded.Build
     else -> Icons.Rounded.Settings
 }
 
