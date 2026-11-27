@@ -85,6 +85,10 @@ pub struct PrismClient {
     /// write grows Rocky's history, and each worker sees enough syncs to keep
     /// its own over `PLACEMENT_BURN_WINDOW_SECS`.
     samples: std::sync::Mutex<BTreeMap<String, Vec<PlacementSample>>>,
+    /// Host-reported usage per model key (for pooled models like `agy-pro/*`
+    /// that have no single-account ClickHouse row), kept in memory so a host
+    /// that reports no usage inherits another host's recent reading.
+    host_usage: std::sync::Mutex<BTreeMap<String, (i64, PlacementUsageReading)>>,
     /// Serialises this process's writes of assistant conversations.
     pub(crate) assistant_lock: tokio::sync::Mutex<()>,
 }
@@ -203,6 +207,7 @@ impl PrismClient {
             alerts_lock: tokio::sync::Mutex::new(()),
             events_lock: tokio::sync::Mutex::new(()),
             samples: std::sync::Mutex::default(),
+            host_usage: std::sync::Mutex::default(),
             assistant_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -520,6 +525,36 @@ impl PrismClient {
             }
         }
 
+        // Share host-reported usage (e.g. pooled models like agy-pro/* that
+        // have no single-account ClickHouse row) across hosts via in-memory
+        // cache + the replicated usage snapshot.
+        let shared_host_usage = {
+            let mut cache = self.host_usage.lock().expect("host_usage");
+            for m in &req.models {
+                if m.session.is_some() || m.weekly.is_some() {
+                    let k = model_key(&m.instance_id, &m.model);
+                    cache.insert(
+                        k,
+                        (
+                            now_unix,
+                            PlacementUsageReading {
+                                session: m.session.clone(),
+                                weekly: m.weekly.clone(),
+                            },
+                        ),
+                    );
+                }
+            }
+            cache.retain(|_, (at, _)| now_unix - *at <= USAGE_FRESH_SECS);
+            cache.clone()
+        };
+        let snapshot_fallback = self
+            .usage_snapshot()
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| now_unix - s.at <= USAGE_FRESH_SECS);
+
         // Prefer this host's own optionIds.
         let mut host_models: BTreeMap<String, PlacementHostModel> = BTreeMap::new();
         for m in &req.models {
@@ -529,7 +564,15 @@ impl PrismClient {
             {
                 option_ids.insert(k.clone(), r.option_id.clone());
             }
-            let (session, weekly) = usage_readings(m, usage, now_unix);
+            let shared = shared_host_usage
+                .get(&k)
+                .map(|(_, r)| r)
+                .or_else(|| {
+                    snapshot_fallback
+                        .as_ref()
+                        .and_then(|s| s.models.get(&k.replace('\0', "/")))
+                });
+            let (session, weekly) = usage_readings(m, usage, shared, now_unix);
             host_models.insert(
                 k,
                 PlacementHostModel {
@@ -2481,22 +2524,26 @@ struct StoredReport {
 }
 
 /// A model's session and weekly windows: its account's from ClickHouse when
-/// `usage` read them within [`USAGE_FRESH_SECS`], else the host's.
+/// `usage` read them within [`USAGE_FRESH_SECS`], else this host's reading,
+/// else another host's recent reading (for pooled models like `agy-pro/*`).
 fn usage_readings(
     m: &PlacementSyncModel,
     usage: &UsageByAccount,
+    shared: Option<&PlacementUsageReading>,
     now_unix: i64,
 ) -> (Option<PlacementWindow>, Option<PlacementWindow>) {
-    match usage
+    let ch = usage
         .get(account_of(&m.model))
-        .filter(|u| now_unix - u.observed_at <= USAGE_FRESH_SECS)
-    {
-        Some(u) => (
-            u.session.clone().or_else(|| m.session.clone()),
-            u.weekly.clone().or_else(|| m.weekly.clone()),
-        ),
-        None => (m.session.clone(), m.weekly.clone()),
-    }
+        .filter(|u| now_unix - u.observed_at <= USAGE_FRESH_SECS);
+    let session = ch
+        .and_then(|u| u.session.clone())
+        .or_else(|| m.session.clone())
+        .or_else(|| shared.and_then(|s| s.session.clone()));
+    let weekly = ch
+        .and_then(|u| u.weekly.clone())
+        .or_else(|| m.weekly.clone())
+        .or_else(|| shared.and_then(|s| s.weekly.clone()));
+    (session, weekly)
 }
 
 /// A window rounded to whole percents, so the snapshot changes only when the
@@ -3082,6 +3129,91 @@ mod tests {
             .await
             .expect("sync");
         assert_eq!(session_of(&resp), Some(10.0));
+        client.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn pooled_host_usage_is_shared_with_hosts_that_report_none() {
+        let (_dir, client) = open().await;
+        const AGY_OPUS: &str = "agy-pro/claude-opus-5-5";
+        client
+            .put_placement_profile(
+                "coding".into(),
+                PutPlacementProfileRequest {
+                    label: "Coding".into(),
+                    entries: vec![PutPlacementEntryInput {
+                        instance_id: "agy-pooled".into(),
+                        model: AGY_OPUS.into(),
+                        reasoning: String::new(),
+                        enabled: true,
+                        session_share_of_weekly: None,
+                    }],
+                },
+                NOW,
+            )
+            .await
+            .expect("put profile");
+
+        // host-a reports agy-pro/claude-opus-5-5 as exhausted (100% weekly).
+        let req_a = PlacementSyncRequest {
+            v: 1,
+            environment_id: "env-a".into(),
+            models: vec![PlacementSyncModel {
+                instance_id: "agy-pooled".into(),
+                model: AGY_OPUS.into(),
+                label: "Claude Opus 5.5".into(),
+                provider: "antigravity".into(),
+                hidden: false,
+                driver: "antigravity".into(),
+                reasoning: None,
+                blocked: None,
+                session: None,
+                weekly: Some(PlacementWindow {
+                    used_percent: 100.0,
+                    resets_at: "2026-12-03T14:46:55Z".into(),
+                }),
+            }],
+            threads: Vec::new(),
+            moves: Vec::new(),
+        };
+        let resp_a = client
+            .sync_placement("host-a".into(), req_a, NOW)
+            .await
+            .expect("sync host-a");
+        assert_eq!(resp_a.profiles[0].ranked[0].state, "exhausted");
+
+        // host-b reports no usage for agy-pro/claude-opus-5-5; it must inherit
+        // host-a's exhausted reading instead of ranking it as "ok".
+        let req_b = PlacementSyncRequest {
+            v: 1,
+            environment_id: "env-b".into(),
+            models: vec![PlacementSyncModel {
+                instance_id: "agy-pooled".into(),
+                model: AGY_OPUS.into(),
+                label: "Claude Opus 5.5".into(),
+                provider: "antigravity".into(),
+                hidden: false,
+                driver: "antigravity".into(),
+                reasoning: None,
+                blocked: None,
+                session: None,
+                weekly: None,
+            }],
+            threads: Vec::new(),
+            moves: Vec::new(),
+        };
+        let resp_b = client
+            .sync_placement("host-b".into(), req_b, NOW + 60)
+            .await
+            .expect("sync host-b");
+        assert_eq!(resp_b.profiles[0].ranked[0].state, "exhausted");
+        assert_eq!(
+            resp_b.profiles[0].ranked[0]
+                .weekly
+                .as_ref()
+                .map(|w| w.used_percent),
+            Some(100.0)
+        );
         client.close().await.expect("close");
     }
 
