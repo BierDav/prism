@@ -24,4 +24,4 @@ pub use rank::{
 };
 pub use schema::{SCHEMA_VERSION, prism_schema};
 pub use types::*;
-pub use weekly::{WeeklyActivation, account_of};
+pub use weekly::{ANTIGRAVITY, WeeklyActivation, account_of, is_third_party_model};

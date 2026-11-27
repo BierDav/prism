@@ -22,8 +22,8 @@ use crate::types::{
     PutPlacementProfileRequest, SetPlacementActionsRequest, UsageByAccount,
 };
 use crate::weekly::{
-    WeeklyActivation, WeeklyActivationState, WeeklyActivationStep, account_of,
-    weekly_activation_step,
+    ANTIGRAVITY, WeeklyActivation, WeeklyActivationState, WeeklyActivationStep, account_of,
+    antigravity_activation_model, is_third_party_model, weekly_activation_step,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use rocky_sdk::{
@@ -1761,7 +1761,11 @@ impl PrismClient {
     /// again, for the leader to send each a very small prompt (`crate::weekly`).
     /// An account counts when an enabled profile entry names it and `usage`
     /// (ClickHouse) has a weekly reading for it within [`USAGE_FRESH_SECS`]:
-    /// pooled names (`agy-pro`) are no single account. Stores each running
+    /// pooled names (`agy-pro`) are no single account. Antigravity's pools
+    /// stand for its accounts instead: once an enabled entry runs a
+    /// third-party model on Antigravity, every Antigravity account counts,
+    /// prompted on a third-party model of its own from `gateway_models` (its
+    /// weekly window is the third-party allowance). Stores each running
     /// window's reset the first time it shows, and counts a prompt as sent
     /// when it returns the account, so a lost or failed prompt is tried again
     /// only after `WEEKLY_ACTIVATION_RETRY_SECS`.
@@ -1769,21 +1773,48 @@ impl PrismClient {
         &self,
         now_unix: i64,
         usage: &UsageByAccount,
+        gateway_models: &[String],
     ) -> Result<Vec<WeeklyActivation>, PrismError> {
         let now_time = DateTime::from_timestamp(now_unix, 0).unwrap_or_else(Utc::now);
         // Each account with the models its enabled entries name, in profile order.
         let mut models_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut antigravity_third_party = false;
         for p in expand_profile_references(&self.placement_profiles().await?) {
             for e in p.entries.iter().filter(|e| e.enabled) {
-                let models = models_by_account
-                    .entry(account_of(&e.model).to_string())
-                    .or_default();
+                let account = account_of(&e.model);
+                if (guess_driver(&e.instance_id) == ANTIGRAVITY
+                    || guess_driver(account) == ANTIGRAVITY)
+                    && is_third_party_model(&e.model)
+                {
+                    antigravity_third_party = true;
+                }
+                let models = models_by_account.entry(account.to_string()).or_default();
                 if !models.contains(&e.model) {
                     models.push(e.model.clone());
                 }
             }
         }
-        if models_by_account.is_empty() {
+        // The account to prompt with the model to send it to.
+        let mut targets: BTreeMap<String, String> = models_by_account
+            .iter()
+            .filter(|(account, _)| {
+                usage
+                    .get(*account)
+                    .is_none_or(|u| u.provider != ANTIGRAVITY)
+            })
+            .map(|(account, models)| (account.clone(), models[0].clone()))
+            .collect();
+        if antigravity_third_party {
+            for (account, _) in usage.iter().filter(|(_, u)| u.provider == ANTIGRAVITY) {
+                let named = models_by_account
+                    .get(account)
+                    .map_or(&[][..], Vec::as_slice);
+                if let Some(model) = antigravity_activation_model(account, named, gateway_models) {
+                    targets.insert(account.clone(), model);
+                }
+            }
+        }
+        if targets.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1814,7 +1845,7 @@ impl PrismClient {
 
         let mut writes: Vec<(String, WeeklyActivationState)> = Vec::new();
         let mut due = Vec::new();
-        for (account, models) in &models_by_account {
+        for (account, model) in &targets {
             let account_readings: Vec<PlacementWindow> = usage
                 .get(account)
                 .filter(|u| now_unix - u.observed_at <= USAGE_FRESH_SECS)
@@ -1843,7 +1874,7 @@ impl PrismClient {
                     ));
                     due.push(WeeklyActivation {
                         account: account.clone(),
-                        model: models[0].clone(),
+                        model: model.clone(),
                     });
                 }
             }
@@ -2914,6 +2945,7 @@ mod tests {
                     }),
                     weekly: None,
                     observed_at,
+                    provider: "claude".into(),
                 },
             )])
         };

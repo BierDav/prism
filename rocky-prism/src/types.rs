@@ -175,6 +175,10 @@ pub struct AccountUsage {
     /// When the gateway last read the account (unix seconds).
     #[serde(rename = "observedAt", default)]
     pub observed_at: i64,
+    /// The gateway's provider for the account (`claude`, `codex`,
+    /// `antigravity`, …), or empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
 }
 
 /// [`AccountUsage`] per gateway account (`claude-alex`, `codex-2`).

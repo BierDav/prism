@@ -29,7 +29,8 @@ const QUERY: &str = "SELECT
     argMax((used_percent, reset_at), observed_at) AS last,
     tupleElement(last, 1) AS used,
     toUnixTimestamp(tupleElement(last, 2)) AS reset,
-    toUnixTimestamp(max(observed_at)) AS observed
+    toUnixTimestamp(max(observed_at)) AS observed,
+    any(provider) AS provider
 FROM ai_usage.account_limits
 WHERE observed_at > now() - INTERVAL 30 MINUTE
     AND status = 'ok'
@@ -125,29 +126,54 @@ struct Row {
     used: f64,
     reset: Option<i64>,
     observed: i64,
+    #[serde(default)]
+    provider: String,
+}
+
+/// An untouched window reports a rolling reset one full window after the
+/// reading (Antigravity: a bucket nothing used yet); it has not started.
+const ROLLING_RESET_SLACK_SECS: i64 = 120;
+
+fn window_secs(window: &str) -> Option<i64> {
+    match window {
+        "five_hour" | "primary_window" => Some(5 * 3600),
+        "seven_day" | "secondary_window" => Some(7 * 24 * 3600),
+        _ => None,
+    }
 }
 
 /// Each account's session window (`five_hour`, Codex's `primary_window`) and
 /// weekly window (`seven_day`, Codex's `secondary_window`). Resets are rounded
 /// to the minute: the gateway reports them a second apart from one read to
-/// the next, and an unchanged reading should stay unchanged.
+/// the next, and an unchanged reading should stay unchanged. A window at 0%
+/// whose reset is one full window after the reading has not started and has
+/// no reset.
 pub fn parse_rows(body: &str) -> UsageByAccount {
     let mut out = UsageByAccount::new();
     for line in body.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(row) = serde_json::from_str::<Row>(line) else {
             continue;
         };
+        let untouched = |reset: &i64| {
+            row.used == 0.0
+                && window_secs(&row.window).is_some_and(|len| {
+                    (reset - row.observed - len).abs() <= ROLLING_RESET_SLACK_SECS
+                })
+        };
         let window = PlacementWindow {
             used_percent: row.used,
             resets_at: row
                 .reset
-                .filter(|r| *r > 0)
+                .filter(|r| *r > 0 && !untouched(r))
                 .and_then(|r| DateTime::from_timestamp((r + 30) / 60 * 60, 0))
                 .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
                 .unwrap_or_default(),
         };
         let account = out.entry(row.account).or_default();
         account.observed_at = account.observed_at.max(row.observed);
+        if account.provider.is_empty() {
+            account.provider = row.provider;
+        }
         match row.window.as_str() {
             "five_hour" | "primary_window" => account.session = Some(window),
             "seven_day" | "secondary_window" => account.weekly = Some(window),
@@ -190,6 +216,22 @@ mod tests {
         // A window without a reset (nothing used yet).
         assert_eq!(usage["claude-1"].session.as_ref().unwrap().resets_at, "");
         assert!(usage["claude-1"].weekly.is_none());
+    }
+
+    #[test]
+    fn an_untouched_rolling_window_has_no_reset() {
+        // Antigravity reports a bucket nothing used yet as resetting a full
+        // window after each reading.
+        let body = r#"{"account":"agy-1","window":"seven_day","used":0,"reset":1796200856,"observed":1795596056,"provider":"antigravity"}
+{"account":"agy-david","window":"seven_day","used":0,"reset":1796200000,"observed":1795596056,"provider":"antigravity"}
+{"account":"agy-natalie","window":"seven_day","used":1,"reset":1796200856,"observed":1795596056,"provider":"antigravity"}
+"#;
+        let usage = parse_rows(body);
+        assert_eq!(usage["agy-1"].provider, "antigravity");
+        assert_eq!(usage["agy-1"].weekly.as_ref().unwrap().resets_at, "");
+        // A started window at 0% resets at a fixed time.
+        assert_ne!(usage["agy-david"].weekly.as_ref().unwrap().resets_at, "");
+        assert_ne!(usage["agy-natalie"].weekly.as_ref().unwrap().resets_at, "");
     }
 
     #[tokio::test]

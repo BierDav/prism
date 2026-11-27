@@ -98,6 +98,34 @@ pub fn account_of(model: &str) -> &str {
     model.split_once('/').map_or(model, |(account, _)| account)
 }
 
+/// The gateway's provider name for Antigravity accounts (`AccountUsage::provider`).
+pub const ANTIGRAVITY: &str = "antigravity";
+
+/// Whether an Antigravity model bills the third-party allowance ("Claude and
+/// GPT models"), which is what an Antigravity account's weekly window
+/// (`seven_day`) measures. Gemini has an allowance of its own.
+pub fn is_third_party_model(model: &str) -> bool {
+    let name = model.split_once('/').map_or(model, |(_, name)| name);
+    !name.is_empty() && !name.starts_with("gemini-")
+}
+
+/// The model to prompt an Antigravity account on so its third-party weekly
+/// window starts: the first third-party model a profile entry names for the
+/// account, else the first `<account>/<model>` the gateway lists.
+pub fn antigravity_activation_model(
+    account: &str,
+    named: &[String],
+    gateway_models: &[String],
+) -> Option<String> {
+    let own = |m: &&String| account_of(m) == account && m.len() > account.len();
+    named
+        .iter()
+        .chain(gateway_models)
+        .filter(own)
+        .find(|m| is_third_party_model(m))
+        .cloned()
+}
+
 /// One account Prism should send a prompt to now, with the model to send it to.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeeklyActivation {
@@ -210,5 +238,34 @@ mod tests {
     fn accounts() {
         assert_eq!(account_of("codex-2/gpt-6.2-sol"), "codex-2");
         assert_eq!(account_of("claude-sonnet-5-5"), "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn antigravity_accounts_are_prompted_on_a_third_party_model() {
+        assert!(is_third_party_model("agy/claude-opus-5-5"));
+        assert!(!is_third_party_model("agy-pro/gemini-4-neon"));
+        let gateway: Vec<String> = [
+            "agy-david/gemini-4-neon",
+            "agy-david/claude-opus-4-6-thinking",
+            "agy-1/claude-opus-4-6-thinking",
+            "agy/claude-opus-5-5",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(
+            antigravity_activation_model("agy-david", &[], &gateway).as_deref(),
+            Some("agy-david/claude-opus-4-6-thinking")
+        );
+        // A third-party model an entry names for the account comes first.
+        let named = [
+            "agy-david/gemini-4-neon".to_string(),
+            "agy-david/gpt-oss".to_string(),
+        ];
+        assert_eq!(
+            antigravity_activation_model("agy-david", &named, &gateway).as_deref(),
+            Some("agy-david/gpt-oss")
+        );
+        // An account the gateway lists no model of its own for.
+        assert_eq!(antigravity_activation_model("agy-2", &[], &gateway), None);
     }
 }

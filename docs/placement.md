@@ -206,8 +206,19 @@ to that account).
   `model` before `/`) and ClickHouse has a weekly reading for it from the
   last 20 minutes (pooled names are no single account and get none).
   Switching every entry of an account off stops its prompts.
+- Antigravity's accounts sit behind pooled names (`agy/…`, `agy-pro/…`), and
+  their weekly window (`seven_day`) is the third-party allowance ("Claude
+  and GPT models"; Gemini has its own). Once an enabled entry runs a
+  third-party model on Antigravity (anything but `gemini-*`), every account
+  ClickHouse reads as `antigravity` counts, prompted on a third-party model
+  of its own: one an entry names for it, else the first `<account>/<model>`
+  the gateway lists (`GET /models`), such as
+  `agy-1/claude-opus-4-6-thinking`. An account the gateway lists no such
+  model for gets none.
 - The window has ended when the reading shows no weekly reset in the
-  future. The first prompt goes out a minute after the reset; Prism tries
+  future. A window at 0% whose reset is a full window after the reading
+  (Antigravity's untouched buckets, which report a rolling reset) has not
+  started and counts as having no reset. The first prompt goes out a minute after the reset; Prism tries
   again every 10 minutes while the readings show no new window, at most 3
   times per ended window.
 - Prism keeps, per account, the last reset it saw, when it last prompted

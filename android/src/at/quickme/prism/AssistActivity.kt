@@ -1333,13 +1333,18 @@ private fun Assist(
         val transition: FiniteAnimationSpec<androidx.compose.ui.geometry.Rect> =
             if (reducedMotion) snap() else tween(FULL_MS, easing = EmphasizedEasing)
         val chatShape = androidx.compose.foundation.shape.RoundedCornerShape(CardRadius)
-        CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { SharedTransitionLayout(
+        CompositionLocalProvider(LocalOverlayAge provides { clock.value }) { Box(
             Modifier.fillMaxSize().graphicsLayer {
                 // All of it as one (the card, the panel and the chips, and what
                 // a transition draws over them): Back draws it back towards
                 // the bottom, closing takes it on from there and fades it.
                 // Faded per drawing, not through an offscreen layer, which
                 // would cut the card's shader (48 dp round it) where it ends.
+                // Round the shared layout, not on it: its lookahead root is
+                // its parent, so on it this layer lay between the two, and
+                // what is placed by its lookahead (the panel and the chips,
+                // [placedAtRest], [pinned]) undid the scale's move towards
+                // the bottom, shrinking where it was instead of with the card.
                 compositingStrategy = CompositingStrategy.ModulateAlpha
                 val l = leave.value
                 val b = progress()
@@ -1350,7 +1355,7 @@ private fun Assist(
                 translationY = 24.dp.toPx() * l
                 alpha = (1f - 0.35f * b) * (1f - l)
             },
-        ) {
+        ) { SharedTransitionLayout(Modifier.fillMaxSize()) {
             // The card and the full-screen chat are one element (shared
             // bounds): up, the card grows to fill the screen, its contents
             // giving way to the chat's; down, the whole chat shrinks into the
@@ -1489,7 +1494,7 @@ private fun Assist(
                     )
                 }
             }
-        } }
+        } } }
     }
 }
 
