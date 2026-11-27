@@ -16,6 +16,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.util.Log
@@ -23,6 +24,10 @@ import at.quickme.prism.core.CallLink
 import at.quickme.prism.core.HotspotToken
 import at.quickme.prism.shell.CallBridge
 import at.quickme.prism.shell.Shell
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.IOException
 
 object Calls {
@@ -32,8 +37,46 @@ object Calls {
     private const val MAX_STARTS = 5
 
     private var watching = false // guarded by this
+    private val dialScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile private var bridging = false
+
+    /** Picks up pending outgoing call requests written by a Mac and dials them. */
+    @JvmStatic
+    fun handleDialRequests(c: Context) {
+        val app = c.applicationContext
+        dialScope.launch {
+            try {
+                val pending = PrismApi.run(app) { it.pendingCallRequests() }
+                for (req in pending) {
+                    var err: String? = null
+                    try {
+                        val number = req.number.trim()
+                        if (number.isEmpty()) {
+                            err = "empty number"
+                        } else if (app.checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+                            err = "missing CALL_PHONE permission"
+                        } else {
+                            Log.i(TAG, "dialing requested number from ${req.requestedBy}")
+                            val intent = Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            app.startActivity(intent)
+                        }
+                    } catch (e: Exception) {
+                        err = e.message ?: e.javaClass.simpleName
+                        Log.w(TAG, "dial request ${req.requestId} failed: $err")
+                    }
+                    try {
+                        PrismApi.run(app) { it.finishCallRequest(req.requestId, err) }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "finishCallRequest ${req.requestId}: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "handleDialRequests: ${e.message}")
+            }
+        }
+    }
 
     /** Starts following the call state; once per process. */
     @JvmStatic

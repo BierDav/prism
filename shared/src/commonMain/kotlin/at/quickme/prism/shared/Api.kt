@@ -471,6 +471,19 @@ data class PlacementActions(
     val textGeneration: String? = null,
 )
 
+@Serializable
+data class CallRequest(
+    @SerialName("request_id") val requestId: String,
+    val number: String,
+    @SerialName("requested_by") val requestedBy: String = "",
+    @SerialName("requested_at") val requestedAt: Long = 0,
+)
+
+@Serializable
+internal data class CallRequestList(
+    val requests: List<CallRequest> = emptyList(),
+)
+
 /** One placement profile: an ordered list of models with reasoning and on/off switches. */
 @Serializable
 data class PlacementProfile(

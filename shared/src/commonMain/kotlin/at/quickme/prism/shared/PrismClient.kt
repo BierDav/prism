@@ -362,6 +362,36 @@ class PrismClient(base: String, private val token: () -> String?, private val tr
     suspend fun clearAccountLimit(account: String): Placement =
         decode(send("DELETE", "/v1/placement/account-limits/${T3Links.encode(account)}"), Placement.serializer())
 
+    /** Asks the phone to place an outgoing call to [number]. */
+    @Throws(Exception::class)
+    suspend fun dialCall(number: String, requestId: String = requestId()) {
+        send(
+            "POST",
+            "/v1/calls/dial",
+            buildJsonObject {
+                put("number", number)
+                put("request_id", requestId)
+            },
+        )
+    }
+
+    /** Pending outgoing call requests from a Mac. */
+    @Throws(Exception::class)
+    suspend fun pendingCallRequests(): List<CallRequest> =
+        decode(send("GET", "/v1/calls/pending"), CallRequestList.serializer()).requests
+
+    /** Marks a call request done (with an optional error message). */
+    @Throws(Exception::class)
+    suspend fun finishCallRequest(requestId: String, error: String? = null) {
+        send(
+            "POST",
+            "/v1/calls/${T3Links.encode(requestId)}/done",
+            buildJsonObject {
+                if (error != null) put("error", error)
+            },
+        )
+    }
+
     // --- The exchange ---
 
     private suspend fun send(method: String, path: String, body: JsonElement? = null, authorized: Boolean = true): String {

@@ -473,6 +473,27 @@ impl Api {
                 retrying(|| c.set_placement_policy(policy.clone())).await?;
                 self.placement().await
             }
+            ("POST", ["v1", "calls", "dial"]) => {
+                let number = str_field(&body, "number").trim().to_string();
+                if number.is_empty() {
+                    return Err(ApiError::invalid("Provide a phone number to dial."));
+                }
+                let request_id = self.request_id(&body, &format!("dial:{number}"))?;
+                let c = &self.client;
+                retrying(|| c.request_call(&request_id, &number, &self.device, now_unix())).await?;
+                ok(json!({"ok": true, "request_id": request_id}))
+            }
+            ("GET", ["v1", "calls", "pending"]) => {
+                let since = now_unix().saturating_sub(120);
+                let rows = self.client.pending_call_requests(since).await?;
+                ok(json!({"requests": rows}))
+            }
+            ("POST", ["v1", "calls", request_id, "done"]) => {
+                let err = body.get("error").and_then(Value::as_str).map(str::to_string);
+                let (c, id) = (&self.client, request_id.to_string());
+                retrying(|| c.finish_call_request(&id, now_unix(), err.as_deref())).await?;
+                ok(json!({"ok": true}))
+            }
             _ => Err(ApiError::not_found()),
         }
     }

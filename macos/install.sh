@@ -93,6 +93,18 @@ cat > "$BUILT/Contents/Info.plist" <<EOF
   <key>NSLocationUsageDescription</key><string>Prism reads the names of nearby Wi-Fi networks to leave your phone's hotspot for a Wi-Fi network that worked before.</string>
   <key>NSLocationWhenInUseUsageDescription</key><string>Prism reads the names of nearby Wi-Fi networks to leave your phone's hotspot for a Wi-Fi network that worked before.</string>
   <key>NSHumanReadableCopyright</key><string>fleet</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>Phone Call</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>tel</string>
+        <string>telprompt</string>
+        <string>callto</string>
+      </array>
+    </dict>
+  </array>
   <key>FleetSourceHash</key><string>$SOURCE_HASH</string>
 </dict>
 </plist>
@@ -106,6 +118,7 @@ fi
 
 rm -rf "$APP"
 ditto "$BUILT" "$APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
 echo "Installed $APP."
 
 restart

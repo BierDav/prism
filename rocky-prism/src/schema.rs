@@ -1,11 +1,12 @@
 use crate::types::PrismError;
 use rocky_sdk::{Affinity, Column, Schema, Table};
 
-/// The schema's version. Version 2 added the assistant's tables, nothing
-/// else: an additive change, which the first issuer opening with it publishes
-/// as a `continue` seal and every other replica follows (docs/worker.md,
+/// The schema's version. Version 2 added the assistant's tables; version 3
+/// added `call_requests` for placing outgoing phone calls from a Mac. Both are
+/// additive changes, which the first issuer opening with them publishes as a
+/// `continue` seal and every other replica follows (docs/worker.md,
 /// "Schema changes").
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub fn prism_schema() -> Result<Schema, PrismError> {
     Schema::builder("prism", SCHEMA_VERSION)
@@ -527,6 +528,18 @@ pub fn prism_schema() -> Result<Schema, PrismError> {
                 .column(Column::new("seq", Affinity::Integer).required())
                 .column(Column::new("revision", Affinity::Integer).required())
                 .column(Column::new("body", Affinity::Text).required()),
+        )
+        .table(
+            // Outgoing phone call requests from a Mac (`tel://`, `callto://`,
+            // `telprompt://`), picked up by the Android phone to place the call
+            // and bridge audio back to the Mac.
+            Table::replayed("call_requests")
+                .column(Column::new("request_id", Affinity::Text).required())
+                .column(Column::new("number", Affinity::Text).required())
+                .column(Column::new("requested_by", Affinity::Text).required())
+                .column(Column::new("requested_at", Affinity::Integer).required())
+                .column(Column::new("done_at", Affinity::Integer))
+                .column(Column::new("error", Affinity::Text)),
         )
         .build()
         .map_err(|err| PrismError::Storage(err.to_string()))

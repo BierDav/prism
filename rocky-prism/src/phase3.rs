@@ -192,6 +192,14 @@ pub const AGENT_MESSAGE: &str = "message";
 /// An `agent_messages` row that stops the agent's run.
 pub const AGENT_STOP: &str = "stop";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRequestRow {
+    pub request_id: String,
+    pub number: String,
+    pub requested_by: String,
+    pub requested_at: i64,
+}
+
 /// How a device request ended, as the leader recorded it: `done_at` is unset
 /// while it is pending, `error` is empty when it worked. `thread_id` and
 /// `link` are an agent start's thread.
@@ -1410,6 +1418,66 @@ impl PrismClient {
         self.exec_one(
             "UPDATE agent_messages SET done_at = ?, error = ? WHERE request_id = ? AND claimed_by = ? AND done_at IS NULL",
             params![now, error, request_id, worker],
+        )
+        .await
+    }
+
+    // --- Outgoing Phone Call Requests ---
+
+    pub async fn request_call(
+        &self,
+        request_id: &str,
+        number: &str,
+        requested_by: &str,
+        now: i64,
+    ) -> Result<(), PrismError> {
+        let _guard = self.alerts_lock.lock().await;
+        if self.request_exists("call_requests", request_id).await? {
+            return Ok(());
+        }
+        self.insert_one(
+            "call_requests",
+            "INSERT INTO call_requests (id, request_id, number, requested_by, requested_at, done_at, error)
+             VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+            params![request_id, number, requested_by, now],
+        )
+        .await
+    }
+
+    pub async fn pending_call_requests(&self, since: i64) -> Result<Vec<CallRequestRow>, PrismError> {
+        let mut rows = self
+            .db
+            .query(
+                "SELECT request_id, number, requested_by, requested_at
+                 FROM call_requests
+                 WHERE done_at IS NULL AND requested_at >= ?
+                 ORDER BY requested_at ASC, id ASC",
+                params![since],
+            )
+            .await
+            .map_err(storage_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_err)? {
+            out.push(CallRequestRow {
+                request_id: row.get::<String>("request_id").map_err(storage_err)?,
+                number: row.get::<String>("number").map_err(storage_err)?,
+                requested_by: row.get::<String>("requested_by").map_err(storage_err)?,
+                requested_at: row.get::<i64>("requested_at").map_err(storage_err)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn finish_call_request(
+        &self,
+        request_id: &str,
+        now: i64,
+        error: Option<&str>,
+    ) -> Result<(), PrismError> {
+        let _guard = self.alerts_lock.lock().await;
+        self.exec_one(
+            "UPDATE call_requests SET done_at = ?, error = ? WHERE request_id = ? AND done_at IS NULL",
+            params![now, error.unwrap_or(""), request_id],
         )
         .await
     }

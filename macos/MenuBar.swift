@@ -8,6 +8,7 @@
 
 import AppKit
 import Combine
+import CoreServices
 import PrismShared
 import SwiftUI
 import UserNotifications
@@ -57,6 +58,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             DispatchQueue.main.async { calls.hotspotChanged() }
         }
         calls.start()
+        registerDefaultPhoneHandlers()
+    }
+
+    /// Registers Prism as the default handler for tel://, telprompt://, and callto:// links.
+    private func registerDefaultPhoneHandlers() {
+        guard let bundleId = Bundle.main.bundleIdentifier as CFString? else { return }
+        for scheme in ["tel", "telprompt", "callto"] {
+            LSSetDefaultHandlerForURLScheme(scheme as CFString, bundleId)
+        }
+    }
+
+    @MainActor
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let number = Self.phoneNumber(from: url) else { continue }
+            Self.store.dial(number)
+        }
+    }
+
+    private static func phoneNumber(from url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "tel" || scheme == "telprompt" || scheme == "callto" else {
+            return nil
+        }
+        var raw = (url as NSURL).resourceSpecifier ?? ""
+        while raw.hasPrefix("/") { raw.removeFirst() }
+        if let semi = raw.firstIndex(of: ";") { raw = String(raw[..<semi]) }
+        if let query = raw.firstIndex(of: "?") { raw = String(raw[..<query]) }
+        let decoded = (raw.removingPercentEncoding ?? raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        return decoded.isEmpty ? nil : decoded
     }
 
     /// A notification about an agent opens its thread in T3 Code.

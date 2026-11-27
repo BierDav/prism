@@ -30,7 +30,7 @@ object PrismPush {
     /** The replica's tables the screens show (rocky-prism's schema). */
     private val REFRESH_TABLES = listOf(
         "alerts", "alert_actions", "agents", "agent_activity", "questions", "approvals", "machines", "projects",
-        "profiles", "profile_entries", "actions", "policy", "settings",
+        "profiles", "profile_entries", "actions", "policy", "settings", "call_requests",
     )
 
     const val CHANNEL_CRITICAL = "alerts-critical"
@@ -117,6 +117,7 @@ object PrismPush {
                 changed()
                 if ("approvals" in tables) Approver.load(c)
                 if ("settings" in tables) Updater.checkSoon(c) // published settings, maybe this phone's
+                if ("call_requests" in tables) Calls.handleDialRequests(c)
             }
         }
         scope.launch {
