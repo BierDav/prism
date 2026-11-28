@@ -223,9 +223,22 @@ impl PrismClient {
     /// Issues an invitation code that lets a new device join this database
     /// with full access while this device is online.
     pub async fn invite(&self, label: Option<&str>) -> Result<String, PrismError> {
+        self.invite_for(label, None).await
+    }
+
+    /// [`PrismClient::invite`], redeemable for `valid_for` (Rocky takes one
+    /// minute to 30 days) instead of Rocky's default ten minutes.
+    pub async fn invite_for(
+        &self,
+        label: Option<&str>,
+        valid_for: Option<std::time::Duration>,
+    ) -> Result<String, PrismError> {
         let mut invite = Invite::new(Access::Full);
         if let Some(label) = label {
             invite = invite.label(label);
+        }
+        if let Some(valid_for) = valid_for {
+            invite = invite.valid_for(valid_for);
         }
         let issued = self.db.invite(invite).await.map_err(storage_err)?;
         Ok(issued.code.to_string())

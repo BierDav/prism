@@ -141,6 +141,11 @@ pub async fn get_rocky_contact(State(state): State<AppState>, headers: HeaderMap
 struct InviteBody {
     #[serde(default)]
     name: Option<String>,
+    /// How long the code stays redeemable, 60 s to 30 days; Rocky's
+    /// default (ten minutes) when absent. Fleet keeps a device's code until
+    /// that device deploys, so it asks for days.
+    #[serde(default, rename = "validForSeconds")]
+    valid_for_seconds: Option<u64>,
 }
 
 /// `POST /v1/rocky/invite`: creates an online Rocky invitation and returns it
@@ -172,7 +177,22 @@ pub async fn post_rocky_invite(
         };
         parsed
     };
-    let invitation = match state.client.invite(req.name.as_deref()).await {
+    if req
+        .valid_for_seconds
+        .is_some_and(|secs| !(60..=30 * 24 * 60 * 60).contains(&secs))
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "validForSeconds must be between 60 seconds and 30 days.",
+            "invalid",
+        );
+    }
+    let valid_for = req.valid_for_seconds.map(std::time::Duration::from_secs);
+    let invitation = match state
+        .client
+        .invite_for(req.name.as_deref(), valid_for)
+        .await
+    {
         Ok(inv) => inv,
         Err(err) if err.to_string().contains("only an admin does this") => {
             if let Some(proxied) = proxy_invite_to_bootstrap(&state, &req).await {
@@ -210,7 +230,7 @@ async fn proxy_invite_to_bootstrap(state: &AppState, req: &InviteBody) -> Option
     let resp = match http
         .post(&url)
         .bearer_auth(token)
-        .json(&json!({ "name": req.name }))
+        .json(&json!({ "name": req.name, "validForSeconds": req.valid_for_seconds }))
         .send()
         .await
     {
@@ -402,6 +422,19 @@ mod tests {
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
                 assert_eq!(body["code"], "unauthorized");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_refuses_a_validity_outside_one_minute_to_30_days() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (app, _) = app(dir.path(), "{}").await;
+        let admin = admin_token(KEY).expect("token");
+        for secs in [59, 30 * 24 * 60 * 60 + 1] {
+            let body = json!({"name": "david-pixel", "validForSeconds": secs});
+            let (status, body) = call(&app, "POST", "/v1/rocky/invite", &admin, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{secs} s");
+            assert_eq!(body["code"], "invalid");
         }
     }
 
