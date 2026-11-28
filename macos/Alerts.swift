@@ -273,13 +273,13 @@ final class PrismStore: ObservableObject {
 
     /// Sends an outgoing call request for `number` to the phone over Rocky.
     func dial(_ number: String) {
-        guard let replica else {
+        guard let client else {
             log("dial: replica not open yet; cannot dial \(number)")
             return
         }
         Task {
             do {
-                try await replica.client.dialCall(number: number, requestId: PrismClient.companion.requestId())
+                try await client.dialCall(number: number, requestId: PrismClient.companion.requestId())
                 log("dial: requested call to \(number)")
             } catch {
                 log("dial failed for \(number): \(error.text)")
