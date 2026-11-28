@@ -37,12 +37,20 @@ fn print(text: String) -> Result<(), Failure> {
 /// in `data_dir`.
 pub async fn open(data_dir: String, network: Network) -> Result<PrismClient, Failure> {
     if auth::secret("PRISM_WORKER_INVITATION").is_none()
-        && is_empty_dir(&data_dir)
+        && needs_auto_join(&data_dir)
         && let Some((bootstrap_url, node_name, token)) = auto_join_config()
     {
         return auto_join(data_dir, network, &bootstrap_url, &node_name, &token).await;
     }
     open_from(data_dir, network, auth::secret).await
+}
+
+/// An empty directory, or one whose auto-join never finished. The invitation
+/// of a join cut short (pod 0 not reachable yet, a restart) is gone, so Rocky
+/// can't resume it: ask for a new one, and joining with it clears the
+/// directory first.
+fn needs_auto_join(path: &str) -> bool {
+    is_empty_dir(path) || !rocky_prism::enroll::joined_by_invitation(std::path::Path::new(path))
 }
 
 fn is_empty_dir(path: &str) -> bool {
@@ -213,6 +221,7 @@ mod tests {
         let contact = creator.contact().await.expect("contact");
 
         let joiner_dir = dir.path().join("joiner").display().to_string();
+        assert!(needs_auto_join(&joiner_dir));
         let start = |data: String| {
             let vars = BTreeMap::from([
                 ("PRISM_WORKER_INVITATION", invitation.clone()),
@@ -223,10 +232,23 @@ mod tests {
         let first = start(joiner_dir.clone()).await.expect("first start");
         let node = first.node().await.expect("node");
         first.close().await.expect("close");
+        assert!(
+            !needs_auto_join(&joiner_dir),
+            "a finished join keeps its replica"
+        );
         let second = start(joiner_dir).await.expect("second start");
         assert_eq!(second.node().await.expect("node"), node);
         second.close().await.expect("close");
         creator.close().await.expect("close");
+    }
+
+    #[test]
+    fn a_join_cut_short_asks_for_a_new_invitation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // What a join leaves when pod 0 isn't reachable: the joiner's person
+        // key and Rocky's unfinished-join state, but no invitation digest.
+        std::fs::write(dir.path().join("prism-identity.key"), "words").expect("write");
+        assert!(needs_auto_join(&dir.path().display().to_string()));
     }
 
     #[tokio::test]

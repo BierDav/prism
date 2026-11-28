@@ -75,6 +75,12 @@ pub(crate) fn save_invitation_hash(directory: &Path, hash: &str) -> Result<(), P
     write_secret_file(&directory.join(INVITATION_HASH_FILE), hash)
 }
 
+/// Whether a join by invitation finished in `directory`: the invitation
+/// digest is written only once Rocky's join succeeds.
+pub fn joined_by_invitation(directory: &Path) -> bool {
+    directory.join(INVITATION_HASH_FILE).is_file()
+}
+
 /// Loads the persisted invitation digest from `directory`, if present.
 pub(crate) fn load_invitation_hash(directory: &Path) -> Result<Option<String>, PrismError> {
     Ok(read_secret_file(&directory.join(INVITATION_HASH_FILE))?.map(|s| s.trim().to_string()))
