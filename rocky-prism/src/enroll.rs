@@ -2,8 +2,9 @@
 //! persistence of the device's Rocky person key (`IdentityKey`) and optional
 //! root key (`RootKey`).
 //!
-//! Rocky v0.1.0-beta.4 never stores a person key on disk: `create` and `join`
-//! return it once, and subsequent `open` calls pass it via
+//! Rocky never stores a person key on disk: `create` returns the owner's
+//! once, a joining device mints its own (`IdentityKey::generate`) before
+//! `join`, and every `open` and `join` passes it via
 //! `Configuration::identity`. Prism persists it inside the database directory
 //! (`prism-identity.key`, mode 0600) so restarts retain admin/invite authority.
 

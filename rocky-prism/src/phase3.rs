@@ -295,6 +295,7 @@ impl PrismClient {
         self.db
             .write(async move |tx| tx.execute(&sql, args).await)
             .await
+            .map(drop)
             .map_err(storage_err)
     }
 
@@ -313,6 +314,7 @@ impl PrismClient {
                 tx.execute(&sql, args).await
             })
             .await
+            .map(drop)
             .map_err(storage_err)
     }
 

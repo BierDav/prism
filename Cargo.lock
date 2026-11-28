@@ -2053,7 +2053,7 @@ dependencies = [
 [[package]]
 name = "rocky-core"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "serde",
  "serde_bytes",
@@ -2065,7 +2065,7 @@ dependencies = [
 [[package]]
 name = "rocky-credentials"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "bip39",
  "chacha20poly1305",
@@ -2085,7 +2085,7 @@ dependencies = [
 [[package]]
 name = "rocky-platform"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
@@ -2141,7 +2141,7 @@ dependencies = [
 [[package]]
 name = "rocky-sdk"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "data-encoding",
  "futures-core",
@@ -2164,7 +2164,7 @@ dependencies = [
 [[package]]
 name = "rocky-secure"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "chacha20poly1305",
  "p2panda-core",
@@ -2185,7 +2185,7 @@ dependencies = [
 [[package]]
 name = "rocky-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "cc",
  "js-sys",
@@ -2198,7 +2198,7 @@ dependencies = [
 [[package]]
 name = "rocky-sqlite-opfs"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "js-sys",
  "rsqlite-vfs",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "rocky-storage"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "rocky-core",
  "rocky-platform",
@@ -2226,7 +2226,7 @@ dependencies = [
 [[package]]
 name = "rocky-tcp"
 version = "0.1.0"
-source = "git+https://github.com/BierDav/rocky?rev=029f9381784660b42ef414b6c57082a61fa37675#029f9381784660b42ef414b6c57082a61fa37675"
+source = "git+https://github.com/BierDav/rocky?rev=69a15cb624ac4291e2848baaf2f8f08413128414#69a15cb624ac4291e2848baaf2f8f08413128414"
 dependencies = [
  "futures-util",
  "rocky-core",

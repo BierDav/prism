@@ -44,7 +44,7 @@
         # needs no git: the NixOS hosts' deploy service evaluates fleet, and
         # this CLI with it, without git on its PATH. A new Rocky rev in
         # Cargo.toml needs a new hash here and in rocky-prism-ffi/default.nix.
-        outputHashes."rocky-core-0.1.0" = "sha256-gpb1pQLCl7vSBGz2poLiCTAVOvuTLBYDd3P46tIW1Y0=";
+        outputHashes."rocky-core-0.1.0" = "sha256-HWFgkXFlCbIeA9ciHROSquElJS7CU6kdigQx6ET2vkY=";
       };
 
       # The `prism` CLI (cli/): machines report check results with it

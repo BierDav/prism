@@ -27,7 +27,8 @@ use crate::weekly::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use rocky_sdk::{
-    Access, Configuration, Database, InvitationCode, Invite, Network, SqlValue, SyncMode, params,
+    Access, Configuration, Database, IdentityKey, InvitationCode, Invite, Network, SqlValue,
+    SyncMode, params,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -161,7 +162,18 @@ impl PrismClient {
         if let Some(net) = network {
             config = config.network(net);
         }
-        if let Some(identity) = load_identity(dir_path)? {
+        let identity = match (load_identity(dir_path)?, &first) {
+            (Some(identity), _) => Some(identity),
+            // Rocky's join signs with the joiner's own person key: mint it and
+            // keep its phrase first, so a join that has to resume uses it again.
+            (None, First::Join(_)) => {
+                let identity = IdentityKey::generate();
+                save_identity(dir_path, &identity)?;
+                Some(Arc::new(identity))
+            }
+            (None, First::Create) => None,
+        };
+        if let Some(identity) = identity {
             config = config.identity(identity);
         }
         let db = match (is_empty, first) {
@@ -171,14 +183,11 @@ impl PrismClient {
                     let code: InvitationCode = invitation
                         .parse()
                         .map_err(|e| PrismError::InvalidInput(format!("invalid invitation code: {e}")))?;
-                    let opened = config.join(&code).await.map_err(storage_err)?;
-                    if let Some(identity) = &opened.identity {
-                        save_identity(dir_path, identity)?;
-                    }
+                    let database = config.join(&code).await.map_err(storage_err)?;
                     if let Some(hash) = &invitation_hash {
                         save_invitation_hash(dir_path, hash)?;
                     }
-                    opened.database
+                    database
                 }
                 Err(err) => return Err(storage_err(err)),
             },
@@ -193,14 +202,11 @@ impl PrismClient {
                 let code: InvitationCode = invitation
                     .parse()
                     .map_err(|e| PrismError::InvalidInput(format!("invalid invitation code: {e}")))?;
-                let opened = config.join(&code).await.map_err(storage_err)?;
-                if let Some(identity) = &opened.identity {
-                    save_identity(dir_path, identity)?;
-                }
+                let database = config.join(&code).await.map_err(storage_err)?;
                 if let Some(hash) = &invitation_hash {
                     save_invitation_hash(dir_path, hash)?;
                 }
-                opened.database
+                database
             }
         };
         Ok(Self {

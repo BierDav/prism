@@ -39,7 +39,7 @@ let
   cargoDeps = rust.importCargoLock {
     lockFile = ../Cargo.lock;
     # Rocky's checkout, as in flake.nix (no git needed to evaluate).
-    outputHashes."rocky-core-0.1.0" = "sha256-gpb1pQLCl7vSBGz2poLiCTAVOvuTLBYDd3P46tIW1Y0=";
+    outputHashes."rocky-core-0.1.0" = "sha256-HWFgkXFlCbIeA9ciHROSquElJS7CU6kdigQx6ET2vkY=";
   };
 
   version = "0.1.0";

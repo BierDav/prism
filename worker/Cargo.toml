@@ -33,7 +33,7 @@ toml = "0.5"
 url = "2"
 
 [dev-dependencies]
-rocky-core = { git = "https://github.com/BierDav/rocky", rev = "029f9381784660b42ef414b6c57082a61fa37675" }
+rocky-core = { git = "https://github.com/BierDav/rocky", rev = "69a15cb624ac4291e2848baaf2f8f08413128414" }
 axum = { version = "0.8", features = ["ws"] }
 http-body-util = "0.1"
 p256 = { version = "0.13", features = ["ecdsa"] }
